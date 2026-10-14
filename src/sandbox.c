@@ -1,0 +1,338 @@
+#include "sandbox.h"
+
+static int create_mem_fd(const void *data, size_t len) {
+    char tmppath[] = "/tmp/ltm_vfs_XXXXXX";
+    int fd = mkstemp(tmppath);
+    if (fd < 0) {
+        return -LINUX_EIO;
+    }
+    /* Immediately unlink so it will disappear on close or termination */
+    unlink(tmppath);
+    if (len > 0) {
+        ssize_t written = write(fd, data, len);
+        if (written < 0 || (size_t)written != len) {
+            close(fd);
+            return -LINUX_EIO;
+        }
+        lseek(fd, 0, SEEK_SET);
+    }
+    return fd;
+}
+
+int sandbox_init(const char *root_dir) {
+    if (!root_dir) {
+        root_dir = getcwd(NULL, 0);
+        if (!root_dir) return -1;
+    }
+
+    if (!realpath(root_dir, g_ltm.host_root)) {
+        strncpy(g_ltm.host_root, root_dir, sizeof(g_ltm.host_root) - 1);
+        g_ltm.host_root[sizeof(g_ltm.host_root) - 1] = '\0';
+    }
+
+    /* Strip trailing slashes */
+    size_t len = strlen(g_ltm.host_root);
+    while (len > 1 && g_ltm.host_root[len - 1] == '/') {
+        g_ltm.host_root[len - 1] = '\0';
+        len--;
+    }
+
+    ltm_log_debug("Sandbox root initialized: %s", g_ltm.host_root);
+    return 0;
+}
+
+bool sandbox_is_virtual_path(const char *path) {
+    if (!path) return false;
+    return (strncmp(path, "/proc", 5) == 0 ||
+            strncmp(path, "/dev/null", 9) == 0 ||
+            strncmp(path, "/dev/zero", 9) == 0 ||
+            strncmp(path, "/dev/urandom", 12) == 0 ||
+            strncmp(path, "/dev/random", 11) == 0 ||
+            strncmp(path, "/dev/tty", 8) == 0);
+}
+
+ssize_t sandbox_virtual_readlink(const char *path, char *buf, size_t bufsiz) {
+    if (!path || !buf || bufsiz == 0) return -LINUX_EINVAL;
+
+    if (strcmp(path, "/proc/self/exe") == 0) {
+        size_t len = strlen(g_ltm.binary_path);
+        size_t copy_len = len < bufsiz ? len : bufsiz;
+        memcpy(buf, g_ltm.binary_path, copy_len);
+        return (ssize_t)copy_len;
+    }
+
+    return -LINUX_ENOENT;
+}
+
+int sandbox_virtual_stat(const char *path, struct stat *st) {
+    if (!path || !st) return -LINUX_EINVAL;
+    memset(st, 0, sizeof(*st));
+
+    st->st_uid = 1000;
+    st->st_gid = 1000;
+    st->st_nlink = 1;
+    st->st_blksize = 4096;
+
+    if (strcmp(path, "/proc/self/exe") == 0) {
+        st->st_mode = S_IFLNK | 0777;
+        st->st_size = strlen(g_ltm.binary_path);
+        return 0;
+    }
+
+    if (strncmp(path, "/proc", 5) == 0) {
+        st->st_mode = S_IFREG | 0444;
+        st->st_size = 4096;
+        return 0;
+    }
+
+    if (strncmp(path, "/dev/", 5) == 0) {
+        st->st_mode = S_IFCHR | 0666;
+        st->st_rdev = 0x0103; /* standard dummy char dev */
+        return 0;
+    }
+
+    return -LINUX_ENOENT;
+}
+
+static int open_proc_cpuinfo(void) {
+    char buf[4096];
+    int ncpus = 8;
+    size_t size = sizeof(ncpus);
+    if (sysctlbyname("hw.ncpu", &ncpus, &size, NULL, 0) != 0 || ncpus <= 0) {
+        ncpus = 8;
+    }
+
+    size_t offset = 0;
+    for (int i = 0; i < ncpus && offset < sizeof(buf) - 256; i++) {
+        int written = snprintf(buf + offset, sizeof(buf) - offset,
+            "processor\t: %d\n"
+            "BogoMIPS\t: 48.00\n"
+            "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm ssbs sb paca pacg dcpodp flagm2 frint\n"
+            "CPU implementer\t: 0x61\n"
+            "CPU architecture: 8\n"
+            "CPU variant\t: 0x1\n"
+            "CPU part\t: 0x000\n"
+            "CPU revision\t: 1\n\n",
+            i);
+        if (written > 0) offset += written;
+    }
+
+    return create_mem_fd(buf, offset);
+}
+
+static int open_proc_version(void) {
+    const char *ver = "Linux version 6.6.0-ltm (ltm@apple-silicon) (gcc (Ubuntu 11.4.0) 11.4.0) #1 SMP PREEMPT_DYNAMIC Wed Oct 14 00:00:00 UTC 2026\n";
+    return create_mem_fd(ver, strlen(ver));
+}
+
+static int open_proc_cmdline(void) {
+    char buf[4096];
+    size_t offset = 0;
+    for (int i = 0; i < g_ltm.guest_argc && offset < sizeof(buf) - 1; i++) {
+        const char *arg = g_ltm.guest_argv[i];
+        size_t len = strlen(arg) + 1;
+        if (offset + len >= sizeof(buf)) break;
+        memcpy(buf + offset, arg, len);
+        offset += len;
+    }
+    return create_mem_fd(buf, offset);
+}
+
+static int open_proc_meminfo(void) {
+    uint64_t memsize = 16ULL * 1024 * 1024 * 1024;
+    size_t size = sizeof(memsize);
+    sysctlbyname("hw.memsize", &memsize, &size, NULL, 0);
+
+    uint64_t mem_kb = memsize / 1024;
+    uint64_t free_kb = mem_kb / 2;
+
+    char buf[1024];
+    int len = snprintf(buf, sizeof(buf),
+        "MemTotal:       %llu kB\n"
+        "MemFree:        %llu kB\n"
+        "MemAvailable:   %llu kB\n"
+        "Buffers:               0 kB\n"
+        "Cached:          %llu kB\n"
+        "SwapTotal:             0 kB\n"
+        "SwapFree:              0 kB\n",
+        (unsigned long long)mem_kb,
+        (unsigned long long)free_kb,
+        (unsigned long long)free_kb,
+        (unsigned long long)(free_kb / 2));
+    if (len < 0) return -LINUX_EIO;
+    return create_mem_fd(buf, len);
+}
+
+static int open_proc_maps(void) {
+    char buf[4096];
+    size_t offset = 0;
+
+    int written = snprintf(buf + offset, sizeof(buf) - offset,
+        "%016lx-%016lx r-xp 00000000 00:00 0 %s\n"
+        "%016lx-%016lx rw-p 00000000 00:00 0 [heap]\n"
+        "%016lx-%016lx rw-p 00000000 00:00 0 [stack]\n",
+        (unsigned long)g_ltm.elf_base,
+        (unsigned long)(g_ltm.elf_base + 0x10000),
+        g_ltm.binary_path,
+        (unsigned long)g_ltm.brk_start,
+        (unsigned long)(g_ltm.brk_current > g_ltm.brk_start ? g_ltm.brk_current : g_ltm.brk_start + 0x10000),
+        (unsigned long)g_ltm.guest_stack_base,
+        (unsigned long)((char *)g_ltm.guest_stack_base + g_ltm.guest_stack_size));
+    if (written > 0) offset += written;
+
+    return create_mem_fd(buf, offset);
+}
+
+int sandbox_open_virtual(const char *path, int flags, mode_t mode) {
+    (void)flags;
+    (void)mode;
+    if (!path) return -LINUX_EINVAL;
+
+    if (strcmp(path, "/dev/null") == 0) return open("/dev/null", flags, mode);
+    if (strcmp(path, "/dev/zero") == 0) return open("/dev/zero", flags, mode);
+    if (strcmp(path, "/dev/urandom") == 0) return open("/dev/urandom", flags, mode);
+    if (strcmp(path, "/dev/random") == 0) return open("/dev/random", flags, mode);
+    if (strcmp(path, "/dev/tty") == 0) return open("/dev/tty", flags, mode);
+
+    if (strcmp(path, "/proc/cpuinfo") == 0) return open_proc_cpuinfo();
+    if (strcmp(path, "/proc/version") == 0) return open_proc_version();
+    if (strcmp(path, "/proc/sys/kernel/osrelease") == 0) {
+        const char *rel = "6.6.0-ltm\n";
+        return create_mem_fd(rel, strlen(rel));
+    }
+    if (strcmp(path, "/proc/meminfo") == 0) return open_proc_meminfo();
+    if (strcmp(path, "/proc/self/cmdline") == 0) return open_proc_cmdline();
+    if (strcmp(path, "/proc/self/maps") == 0) return open_proc_maps();
+    if (strcmp(path, "/proc/self/exe") == 0) {
+        return open(g_ltm.binary_path, O_RDONLY);
+    }
+
+    return -LINUX_ENOENT;
+}
+
+int sandbox_resolve_path(int dirfd, const char *guest_path, char *host_path_buf, size_t buf_sz, int flags) {
+    (void)flags;
+    if (!guest_path || !host_path_buf || buf_sz == 0) {
+        return -LINUX_EINVAL;
+    }
+
+    /* Virtual paths handled separately */
+    if (sandbox_is_virtual_path(guest_path)) {
+        return 1;
+    }
+
+    char norm_guest[1024];
+    const char *src = guest_path;
+
+    /* Handle home and root virtual aliases */
+    if (strncmp(src, "/home/user", 10) == 0) {
+        src += 10;
+        if (*src == '\0') src = "/";
+    } else if (strncmp(src, "/root", 5) == 0) {
+        src += 5;
+        if (*src == '\0') src = "/";
+    }
+
+    /* Strict check: block explicit escapes to forbidden host directories */
+    const char *forbidden_prefixes[] = {
+        "/System", "/Library", "/Users", "/Applications",
+        "/private", "/etc", "/var", "/usr", "/bin", "/sbin", "/opt",
+        NULL
+    };
+
+    if (src[0] == '/') {
+        for (int i = 0; forbidden_prefixes[i] != NULL; i++) {
+            size_t plen = strlen(forbidden_prefixes[i]);
+            if (strncmp(src, forbidden_prefixes[i], plen) == 0 &&
+                (src[plen] == '/' || src[plen] == '\0')) {
+                /* Check if host_root matches this path (e.g. host_root is /Users/...) */
+                if (strncmp(src, g_ltm.host_root, strlen(g_ltm.host_root)) != 0) {
+                    ltm_log_debug("Sandbox BLOCKED forbidden path: %s", src);
+                    return -LINUX_EACCES;
+                }
+            }
+        }
+    }
+
+    /* Canonicalize path components */
+    char full_virtual[1024];
+    if (src[0] == '/') {
+        /* Absolute virtual path: rooted at sandbox root */
+        snprintf(full_virtual, sizeof(full_virtual), "%s", src);
+    } else {
+        /* Relative path: determine directory base */
+        if (dirfd == LINUX_AT_FDCWD || dirfd == AT_FDCWD) {
+            snprintf(full_virtual, sizeof(full_virtual), "/%s", src);
+        } else {
+            /* Retrieve path from dirfd if needed */
+            char dir_path[1024];
+            if (fcntl(dirfd, F_GETPATH, dir_path) == 0) {
+                /* Check if dir_path is within sandbox */
+                if (strncmp(dir_path, g_ltm.host_root, strlen(g_ltm.host_root)) == 0) {
+                    const char *rel_base = dir_path + strlen(g_ltm.host_root);
+                    if (*rel_base == '\0') rel_base = "/";
+                    snprintf(full_virtual, sizeof(full_virtual), "%s/%s", rel_base, src);
+                } else {
+                    return -LINUX_EACCES;
+                }
+            } else {
+                snprintf(full_virtual, sizeof(full_virtual), "/%s", src);
+            }
+        }
+    }
+
+    /* Lexically normalize path components (resolving . and ..) */
+    char *components[64];
+    int depth = 0;
+    char temp[1024];
+    strncpy(temp, full_virtual, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0';
+
+    char *token = strtok(temp, "/");
+    while (token != NULL) {
+        if (strcmp(token, ".") == 0) {
+            /* ignore */
+        } else if (strcmp(token, "..") == 0) {
+            if (depth > 0) {
+                depth--;
+            } else {
+                /* Attempted directory traversal escape above root */
+                ltm_log_debug("Sandbox BLOCKED directory traversal attempt: %s", guest_path);
+                return -LINUX_EACCES;
+            }
+        } else {
+            if (depth < 63) {
+                components[depth++] = token;
+            }
+        }
+        token = strtok(NULL, "/");
+    }
+
+    norm_guest[0] = '\0';
+    size_t norm_len = 0;
+    for (int i = 0; i < depth; i++) {
+        norm_len += snprintf(norm_guest + norm_len, sizeof(norm_guest) - norm_len, "/%s", components[i]);
+    }
+    if (norm_len == 0) {
+        strcpy(norm_guest, "");
+    }
+
+    /* Construct host path */
+    int written = snprintf(host_path_buf, buf_sz, "%s%s", g_ltm.host_root, norm_guest);
+    if (written < 0 || (size_t)written >= buf_sz) {
+        return -LINUX_ENAMETOOLONG;
+    }
+
+    /* Verify existing path does not symlink escape the sandbox */
+    char resolved_real[1024];
+    if (realpath(host_path_buf, resolved_real)) {
+        size_t root_len = strlen(g_ltm.host_root);
+        if (strncmp(resolved_real, g_ltm.host_root, root_len) != 0 ||
+            (resolved_real[root_len] != '/' && resolved_real[root_len] != '\0')) {
+            ltm_log_debug("Sandbox BLOCKED symlink escape: %s -> %s", host_path_buf, resolved_real);
+            return -LINUX_EACCES;
+        }
+    }
+
+    return 0;
+}
