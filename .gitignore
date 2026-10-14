@@ -13,6 +13,7 @@ tests/bin/*
 # Temporary files
 *.tmp
 
-# Distro rootfs (fetchable via scripts/setup_rootfs.sh)
+# Distro rootfs (fetchable via scripts/setup_rootfs.sh or setup_arch_rootfs.sh)
 rootfs/
+arch_rootfs/
 test_binaries/

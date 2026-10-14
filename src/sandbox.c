@@ -29,7 +29,9 @@ int sandbox_init(const char *rootfs_dir) {
     const char *target_rootfs = rootfs_dir;
     if (!target_rootfs || target_rootfs[0] == '\0') {
         struct stat st;
-        if (stat("rootfs", &st) == 0 && S_ISDIR(st.st_mode)) {
+        if (stat("arch_rootfs", &st) == 0 && S_ISDIR(st.st_mode)) {
+            target_rootfs = "arch_rootfs";
+        } else if (stat("rootfs", &st) == 0 && S_ISDIR(st.st_mode)) {
             target_rootfs = "rootfs";
         } else {
             return -2; /* Rootfs directory not found */

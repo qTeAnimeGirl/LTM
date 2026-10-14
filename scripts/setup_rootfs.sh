@@ -47,12 +47,14 @@ fi
 
 echo "[+] Setting up network DNS configuration..."
 mkdir -p "$ROOTFS_DIR/etc"
+rm -f "$ROOTFS_DIR/etc/resolv.conf"
 cat << 'EOF' > "$ROOTFS_DIR/etc/resolv.conf"
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 EOF
 
 echo "[+] Initializing /proc, /sys, and /dev directory nodes..."
+chmod 755 "$ROOTFS_DIR/proc" "$ROOTFS_DIR/sys" "$ROOTFS_DIR/dev" 2>/dev/null || true
 mkdir -p "$ROOTFS_DIR/proc/self" "$ROOTFS_DIR/proc/sys/kernel" "$ROOTFS_DIR/sys/devices/system/cpu" "$ROOTFS_DIR/sys/class/dmi/id" "$ROOTFS_DIR/dev/pts" "$ROOTFS_DIR/dev/shm"
 touch "$ROOTFS_DIR/proc/cpuinfo" "$ROOTFS_DIR/proc/meminfo" "$ROOTFS_DIR/proc/version" "$ROOTFS_DIR/proc/uptime" "$ROOTFS_DIR/proc/loadavg" "$ROOTFS_DIR/proc/mounts" "$ROOTFS_DIR/proc/stat" "$ROOTFS_DIR/proc/filesystems" "$ROOTFS_DIR/proc/sys/kernel/osrelease"
 touch "$ROOTFS_DIR/proc/self/cmdline" "$ROOTFS_DIR/proc/self/maps" "$ROOTFS_DIR/proc/self/status" "$ROOTFS_DIR/proc/self/stat" "$ROOTFS_DIR/proc/self/mounts"

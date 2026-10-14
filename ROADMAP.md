@@ -3,14 +3,21 @@
 **Project**: LTM (Linux To Mac)  
 **Host Target**: Apple Silicon macOS Darwin ARM64 (M1, M2, M3, M4)  
 **Guest Target**: Linux ARM64 (AArch64 ELF)  
-**Kernel Personality**: `LTM 2026.1A` (Alpha)  
-**Last Updated**: October 14, 2026  
+**Kernel Personality**: `Linux LTM 2026.1A`  
+**Last Updated**: October 15, 2026  
+**Syscall Coverage**: **316 of 316 Official Linux ARM64 System Calls Implemented (100.0%)**  
+**Test Pass Rate**: **328 of 328 Automated Tests Passing (100.0%)**  
+**Detailed References**:
+- **[docs/SYSCALLS.md](file:///Users/qteanimegirl/Documents/LTM/docs/SYSCALLS.md)**: Exhaustive 316-syscall architecture registry and gap analysis.
+- **[docs/TUTORIAL.md](file:///Users/qteanimegirl/Documents/LTM/docs/TUTORIAL.md)**: Complete guide on building, running Arch Linux ARM, using `pacman`, and testing.
 
 ---
 
 ## 1. Executive Summary
 
 LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 binaries running on Apple Silicon macOS by exploiting the identical AArch64 hardware instruction set architecture. Rather than running a virtual machine or software emulator, LTM operates as an ultra-fast userspace translation runtime that loads ELF64 binaries, rewrites Linux system call traps (`svc #0` → `brk #0`), intercepts them via Darwin's Mach exception subsystem (`SIGTRAP`), translates them to macOS Mach/BSD kernel calls, virtualizes the filesystem and hardware telemetry, and restores execution cleanly using custom assembly trampolines.
+
+As of October 15, 2026, LTM has achieved **100% implementation of all 316 official Linux 6.12 system calls** defined in the Linux AArch64 ABI (`asm-generic/unistd.h`), with every single system call backed by a dedicated, freestanding 3-Way unit test (Happy Path, Boundary Cases, Error Translation). Furthermore, LTM natively supports full Linux distributions including **Alpine Linux** and **Arch Linux ARM (2.0GB rootfs)** with full Glibc runtime compatibility, POSIX threads, native `pacman 7.1.0` package management, and real Apple Silicon hardware telemetry.
 
 ---
 
@@ -173,6 +180,8 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
   - **Advanced Memory & Synchronization**: `mlock2` (284), `membarrier` (283), `userfaultfd` (282).
   - **Extended Scheduling**: `sched_setattr` (274), `sched_getattr` (275).
   - **Modern Process Signaling & PIDFDs**: `rt_tgsigqueueinfo` (240), `pidfd_send_signal` (424), `pidfd_getfd` (438).
+  > [!NOTE]
+  > **Note on Syscall Sequence (197 to 240)**: Syscalls 198 through 239 (POSIX BSD Sockets 198..212, Core Memory & Brk 213..216, Keyrings 217..219, Clone/Execve 220..221, Mmap/Mprotect/NUMA 222..239) were already implemented and verified in Milestones 1 through 5. Milestone 13 added the newly implemented IPC calls (`shm*` 194-197) and `rt_tgsigqueueinfo` (240). See **[docs/SYSCALLS.md](file:///Users/qteanimegirl/Documents/LTM/docs/SYSCALLS.md)** for the complete sequential catalog.
 - [x] **234 Dedicated Standalone Unit Tests (`tests/syscalls/`)**:
   - 234 of 234 implemented Linux ARM64 system calls have dedicated standalone unit tests (100.0% 1-to-1 coverage).
   - Strict 3-Way Mandate (Case A: Happy, Case B: Boundary, Case C: Errno) satisfied on all 234 syscalls.
@@ -262,9 +271,34 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 - [x] **Native Fastfetch on Arch Linux**: Executing `./ltm -r arch_rootfs /usr/bin/fastfetch` renders the official Arch Linux ASCII art logo and displays real Apple Silicon M3 hardware telemetry (Host `Mac15,13`, Kernel `Linux LTM 2026.1A`, 8 Cores, RAM, Disk, Shell).
 - [x] **328 of 328 Tests Passing (100% Pass Rate)**: Automated regression harness verifies 100% stability across all 316 syscall unit tests and 12 core integration suites.
 
+### Milestone 20: Host Environment Isolation, Arch Linux ARM Default, Auto-Downloader, & Documentation Overhaul
+- [x] **Hermetic Guest Environment Isolation**: Prevents all host Darwin environment variables (e.g. `DYLD_*`, `Apple_*`, host paths, `TMPDIR`, and host user settings) from polluting the guest Linux userspace. Default environment provides a pristine standard Linux baseline: `USER=root`, `LOGNAME=root`, `HOME=/root`, `SHELL=/bin/bash`, `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`, `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, `HOSTNAME=ltm-mac`, `PWD=/root`, `OPENSSL_armcap=0`.
+- [x] **Custom Environment Injection (`-e` / `--env`) & Preservation (`--preserve-env`)**: Supports passing arbitrary custom environment variables to guest processes via `-e KEY=VAL` or `--env KEY=VAL` (repeatable). Optional `--preserve-env` flag allows explicitly inheriting host environment when desired.
+- [x] **Unmodified Arch Linux ARM as Default Rootfs**: Default rootfs configured to `arch_rootfs`. Added CLI flags `--arch` (Arch Linux ARM, default) and `--alpine` (Alpine Linux) for instant distribution switching.
+- [x] **Automated Rootfs Downloader & Installer**: If `arch_rootfs` or the selected rootfs is missing or incomplete, LTM automatically downloads and unpacks the official Arch Linux ARM rootfs archive (`http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz`), configures `/etc/resolv.conf`, tunes `/etc/pacman.conf`, and initializes virtual directory nodes.
+- [x] **Interactive TTY & TTY2 Subsystem (`TCGETS2` / `TCSETS2`)**: Full Linux 44-byte `struct linux_termios2` support with baud rate conversion, enabling interactive shells (`/bin/bash`, `/bin/sh`) with GNU Readline, syntax highlighting, and job control.
+- [x] **Exhaustive Documentation & Tutorial Release**:
+  - `docs/SYSCALLS.md`: Complete 316-syscall registry with 3-way test mapping and architectural gap analysis.
+  - `docs/TUTORIAL.md`: Complete step-by-step tutorial for building, running, pacman usage, and testing.
+  - `README.md`: Overhauled project overview, features, benchmarks, and CLI reference.
+- [x] **100% Regression Certification**: 328 of 328 test suites passing cleanly with zero warnings.
+
 ---
 
-## 3. Comprehensive Syscall Implementation Matrix
+## 3. Linux ARM64 System Call Number Architecture & Gap Clarification
+
+In the official Linux kernel for AArch64 (`asm-generic/unistd.h`), there are four apparent numerical gaps between syscall 0 and 462:
+1. **The 198..239 Range (42 Syscalls)**: Every single one of these system calls (`socket`, `socketpair`, `bind`, `listen`, `accept`, `connect`, `getsockname`, `getpeername`, `sendto`, `recvfrom`, `setsockopt`, `getsockopt`, `shutdown`, `sendmsg`, `recvmsg`, `readahead`, `brk`, `munmap`, `mremap`, `add_key`, `request_key`, `keyctl`, `clone`, `execve`, `mmap`, `fadvise64`, `swapon`, `swapoff`, `mprotect`, `msync`, `mlock`, `munlock`, `mlockall`, `munlockall`, `mincore`, `madvise`, `remap_file_pages`, `mbind`, `get_mempolicy`, `set_mempolicy`, `migrate_pages`, `move_pages`) is **100% implemented and passing in LTM**.
+2. **The 244..259 Gap (16 Slots)**: Omitted by the Linux kernel architects for 64-bit ARM64 because they represented legacy 32-bit non-`*at` filesystem calls (`open`, `link`, `unlink`, `mknod`, `chmod`, `chown`, `mkdir`, `rmdir`, etc.). Modern ARM64 strictly uses `*at` calls (`openat`, `unlinkat`, `mkdirat`). These slots do not exist in the Linux ARM64 kernel. LTM returns `-LINUX_ENOSYS`.
+3. **The 292 Slot (1 Slot)**: Unassigned upstream kernel reservation. LTM returns `-LINUX_ENOSYS`.
+4. **The 294..423 Gap (130 Slots)**: The Linux 5.1 architecture synchronization gap. The kernel jumped from 293 (`rseq`) to 424 (`pidfd_send_signal`) to synchronize numbering across all architectures. These numbers do not exist on any Linux ARM64 kernel. LTM returns `-LINUX_ENOSYS`.
+5. **The 424..462 Range (39 Syscalls)**: Modern Linux 5.x and 6.x syscalls (`pidfd_*`, `io_uring_*`, `openat2`, `clone3`, `close_range`, `faccessat2`, `landlock_*`, `memfd_secret`, `futex_waitv`, `cachestat`, `fchmodat2`, `statmount`, `listmount`, `lsm_*`, `mseal`), all **100% implemented and tested in LTM**.
+
+> For the exhaustive, canonical 316-syscall registry and Darwin mapping details, refer to **[docs/SYSCALLS.md](file:///Users/qteanimegirl/Documents/LTM/docs/SYSCALLS.md)**.
+
+---
+
+## 4. Comprehensive Syscall Implementation Matrix
 
 | Syscall # | Syscall Name | Subsystem | Status | Implementation Details |
 |:---:|:---|:---|:---:|:---|

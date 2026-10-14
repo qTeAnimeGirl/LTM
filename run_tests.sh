@@ -19,6 +19,9 @@ echo -e "${C_BOLD}${C_BLUE}        LTM Automated Test Suite Execution           
 echo -e "${C_BOLD}${C_BLUE}   Linux ARM64 ELF on Apple Silicon Darwin Translator  ${C_RESET}"
 echo -e "${C_BOLD}${C_BLUE}======================================================${C_RESET}\n"
 
+# 0. Clean prior test artifacts
+rm -f "$SCRIPT_DIR"/test_*_sock* "$SCRIPT_DIR"/*.tmp
+
 # 1. Ensure test binaries are built
 if [ ! -d "$BIN_DIR" ] || [ -z "$(ls -A "$BIN_DIR" 2>/dev/null)" ]; then
     echo -e "${C_YELLOW}[!] Test binaries not found. Building now...${C_RESET}"
@@ -200,7 +203,7 @@ if [ -d "$BIN_DIR/syscalls" ]; then
 fi
 
 # Clean up any sandbox temporary files created during testing
-rm -f "$SCRIPT_DIR/ltm_io_test_file.tmp" "$SCRIPT_DIR/sandbox_test.txt" "$SCRIPT_DIR/wave1_test_file.tmp" "$SCRIPT_DIR/wave2_test_file.tmp" "$SCRIPT_DIR/wave2_copy_file.tmp" "$SCRIPT_DIR"/tmp_sys_*.tmp
+rm -f "$SCRIPT_DIR/ltm_io_test_file.tmp" "$SCRIPT_DIR/sandbox_test.txt" "$SCRIPT_DIR/wave1_test_file.tmp" "$SCRIPT_DIR/wave2_test_file.tmp" "$SCRIPT_DIR/wave2_copy_file.tmp" "$SCRIPT_DIR"/tmp_sys_*.tmp "$SCRIPT_DIR"/test_*_sock*
 
 # Print Granular Standalone Syscall Verification Matrix
 echo -e "\n${C_BOLD}${C_BLUE}========================================================================================${C_RESET}"

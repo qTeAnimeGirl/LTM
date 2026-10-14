@@ -2239,6 +2239,7 @@ int64_t handle_execve(const char *pathname, char *const argv[], char *const envp
     new_argv[n++] = ltm_path;
     new_argv[n++] = "-r";
     new_argv[n++] = g_ltm.host_rootfs;
+    new_argv[n++] = "--preserve-env";
     if (g_ltm.trace_syscalls) {
         new_argv[n++] = "-s";
     }
