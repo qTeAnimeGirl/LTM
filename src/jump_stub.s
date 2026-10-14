@@ -79,3 +79,8 @@ _ltm_resume_context:
     ldp x0, x1, [x16, #0]
 
     br x17
+
+.global _ltm_sigreturn_stub
+_ltm_sigreturn_stub:
+    mov x8, #139
+    brk #0

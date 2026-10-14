@@ -32,6 +32,10 @@ static void init_futex_bucket(futex_bucket_t *b) {
 #define DIR_CACHE_MAX 256
 static DIR *g_dir_cache[DIR_CACHE_MAX];
 
+/* Track ICMP sockets to strip IPv4 header on receive */
+#define MAX_TRACKED_FDS 1024
+static bool g_sock_is_icmp[MAX_TRACKED_FDS];
+
 /* File I/O */
 int64_t handle_read(int fd, void *buf, size_t count) {
     ssize_t ret = read(fd, buf, count);
@@ -84,6 +88,9 @@ int64_t handle_close(int fd) {
     if (fd >= 0 && fd < DIR_CACHE_MAX && g_dir_cache[fd]) {
         closedir(g_dir_cache[fd]);
         g_dir_cache[fd] = NULL;
+    }
+    if (fd >= 0 && fd < MAX_TRACKED_FDS) {
+        g_sock_is_icmp[fd] = false;
     }
     ltm_epoll_close(fd);
     int ret = close(fd);
@@ -574,6 +581,9 @@ int64_t handle_writev(int fd, const struct linux_iovec *iov, int iovcnt) {
 int64_t handle_dup(int oldfd) {
     int ret = dup(oldfd);
     if (ret < 0) return darwin_to_linux_errno(errno);
+    if (ret >= 0 && ret < MAX_TRACKED_FDS && oldfd >= 0 && oldfd < MAX_TRACKED_FDS) {
+        g_sock_is_icmp[ret] = g_sock_is_icmp[oldfd];
+    }
     return ret;
 }
 
@@ -581,6 +591,10 @@ int64_t handle_dup3(int oldfd, int newfd, int flags) {
     if (oldfd == newfd) return -LINUX_EINVAL;
     int ret = dup2(oldfd, newfd);
     if (ret < 0) return darwin_to_linux_errno(errno);
+
+    if (newfd >= 0 && newfd < MAX_TRACKED_FDS && oldfd >= 0 && oldfd < MAX_TRACKED_FDS) {
+        g_sock_is_icmp[newfd] = g_sock_is_icmp[oldfd];
+    }
 
     if (flags & LINUX_O_CLOEXEC) {
         fcntl(newfd, F_SETFD, FD_CLOEXEC);
@@ -596,6 +610,11 @@ int64_t handle_fcntl(int fd, int cmd, unsigned long arg) {
 
     int ret = fcntl(fd, dcmd, arg);
     if (ret < 0) return darwin_to_linux_errno(errno);
+
+    if ((cmd == F_DUPFD || cmd == 1030) && ret >= 0 && ret < MAX_TRACKED_FDS && fd >= 0 && fd < MAX_TRACKED_FDS) {
+        g_sock_is_icmp[ret] = g_sock_is_icmp[fd];
+    }
+
     return ret;
 }
 
@@ -719,6 +738,108 @@ int64_t handle_sigaltstack(const void *ss, void *oss) {
         out->ss_size = 0;
     }
     return 0;
+}
+
+#define LINUX_NSIG 65
+static struct linux_sigaction g_guest_sigactions[LINUX_NSIG];
+
+struct ltm_sigframe {
+    arm_thread_state64_t saved_state;
+    uint64_t magic;
+};
+
+#define LTM_SIGFRAME_MAGIC 0x4c544d5f534947ULL /* "LTM_SIG" */
+
+static void ltm_host_signal_handler(int sig, siginfo_t *info, void *ucontext) {
+    (void)info;
+    if (sig <= 0 || sig >= LINUX_NSIG) return;
+
+    struct linux_sigaction *act = &g_guest_sigactions[sig];
+    if (!act->l_handler || act->l_handler == (void (*)(int))SIG_DFL || act->l_handler == (void (*)(int))SIG_IGN) {
+        return;
+    }
+
+    ucontext_t *uc = (ucontext_t *)ucontext;
+    arm_thread_state64_t *cur_state = &uc->uc_mcontext->__ss;
+
+    /* Push saved state onto guest stack */
+    uintptr_t sp = cur_state->__sp;
+    sp -= sizeof(struct ltm_sigframe);
+    sp &= ~0xfULL;
+
+    struct ltm_sigframe *frame = (struct ltm_sigframe *)sp;
+    memcpy(&frame->saved_state, cur_state, sizeof(arm_thread_state64_t));
+    frame->magic = LTM_SIGFRAME_MAGIC;
+
+    /* Setup registers to execute guest signal handler */
+    arm_thread_state64_t target_state;
+    memset(&target_state, 0, sizeof(target_state));
+    target_state.__x[0] = sig;
+    target_state.__x[1] = 0;
+    target_state.__x[2] = sp;
+    target_state.__sp = sp;
+    target_state.__lr = act->l_restorer ? (uintptr_t)act->l_restorer : (uintptr_t)ltm_sigreturn_stub;
+    target_state.__pc = (uintptr_t)act->l_handler;
+
+    /* Unmask the signal so subsequent signals (like periodic SIGALRM) can be delivered */
+    sigset_t set;
+    sigemptyset(&set);
+    pthread_sigmask(SIG_SETMASK, &set, NULL);
+
+    /* Resume execution into guest handler bypassing Darwin signal trampoline */
+    ltm_resume_context(&target_state);
+}
+
+int64_t handle_rt_sigaction(int signum, const struct linux_sigaction *act, struct linux_sigaction *oldact, size_t sigsetsize) {
+    (void)sigsetsize;
+    if (signum <= 0 || signum >= LINUX_NSIG) return -LINUX_EINVAL;
+    if (signum == SIGKILL || signum == SIGSTOP) return -LINUX_EINVAL;
+    if (signum == SIGTRAP) return 0; /* Keep SIGTRAP for LTM dispatcher */
+
+    if (oldact) {
+        *oldact = g_guest_sigactions[signum];
+    }
+
+    if (act) {
+        g_guest_sigactions[signum] = *act;
+
+        struct sigaction d_sa;
+        memset(&d_sa, 0, sizeof(d_sa));
+
+        if (act->l_handler == (void (*)(int))SIG_DFL) {
+            d_sa.sa_handler = SIG_DFL;
+            sigaction(signum, &d_sa, NULL);
+        } else if (act->l_handler == (void (*)(int))SIG_IGN) {
+            d_sa.sa_handler = SIG_IGN;
+            sigaction(signum, &d_sa, NULL);
+        } else {
+            d_sa.sa_sigaction = ltm_host_signal_handler;
+            d_sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+            sigemptyset(&d_sa.sa_mask);
+            sigaction(signum, &d_sa, NULL);
+        }
+    }
+
+    return 0;
+}
+
+int64_t handle_rt_sigreturn(void *state_ptr) {
+    arm_thread_state64_t *cur_state = (arm_thread_state64_t *)state_ptr;
+    uintptr_t sp = cur_state->__sp;
+    struct ltm_sigframe *frame = (struct ltm_sigframe *)sp;
+
+    if (frame->magic != LTM_SIGFRAME_MAGIC) {
+        ltm_log_error("rt_sigreturn: invalid frame magic 0x%llx", (unsigned long long)frame->magic);
+        return -LINUX_EINVAL;
+    }
+
+    /* Ensure signals are not masked when returning to main execution */
+    sigset_t set;
+    sigemptyset(&set);
+    pthread_sigmask(SIG_SETMASK, &set, NULL);
+
+    ltm_resume_context(&frame->saved_state);
+    return 0; /* Unreachable */
 }
 
 /* Memory Management */
@@ -1602,7 +1723,23 @@ static void translate_linux_to_darwin_sockopt(int level, int optname, int *dleve
         *doptname = optname;
     } else if (level == 0) { /* IPPROTO_IP */
         *dlevel = IPPROTO_IP;
-        *doptname = optname;
+        switch (optname) {
+            case 1:  *doptname = IP_TOS; break;
+            case 2:  *doptname = IP_TTL; break;
+            case 3:  *doptname = IP_HDRINCL; break;
+            case 4:  *doptname = IP_OPTIONS; break;
+            case 6:  *doptname = IP_RECVOPTS; break;
+            case 7:  *doptname = IP_RETOPTS; break;
+            case 8:  *doptname = IP_PKTINFO; break;
+            case 12: *doptname = IP_RECVTTL; break;
+            case 13: *doptname = IP_RECVTOS; break;
+            case 32: *doptname = IP_MULTICAST_IF; break;
+            case 33: *doptname = IP_MULTICAST_TTL; break;
+            case 34: *doptname = IP_MULTICAST_LOOP; break;
+            case 35: *doptname = IP_ADD_MEMBERSHIP; break;
+            case 36: *doptname = IP_DROP_MEMBERSHIP; break;
+            default: *doptname = optname; break;
+        }
     } else {
         *dlevel = level;
         *doptname = optname;
@@ -1624,6 +1761,10 @@ int64_t handle_socket(int domain, int type, int protocol) {
 
     int fd = socket(ddomain, dtype, protocol);
     if (fd < 0) return darwin_to_linux_errno(errno);
+
+    if (fd >= 0 && fd < MAX_TRACKED_FDS) {
+        g_sock_is_icmp[fd] = (protocol == 1 || protocol == 58);
+    }
 
     if (cloexec) fcntl(fd, F_SETFD, FD_CLOEXEC);
     if (nonblock) {
@@ -1763,19 +1904,36 @@ int64_t handle_sendto(int fd, const void *buf, size_t len, int flags, const void
 }
 
 int64_t handle_recvfrom(int fd, void *buf, size_t len, int flags, void *src_addr, socklen_t *addrlen) {
+    ssize_t ret;
     if (src_addr && addrlen && *addrlen > 0) {
         struct sockaddr_storage ss;
         socklen_t slen = sizeof(ss);
-        ssize_t ret = recvfrom(fd, buf, len, flags, (struct sockaddr *)&ss, &slen);
+        ret = recvfrom(fd, buf, len, flags, (struct sockaddr *)&ss, &slen);
         if (ret < 0) return darwin_to_linux_errno(errno);
 
         socklen_t lnamelen = *addrlen;
         copy_darwin_to_linux_sockaddr(&ss, slen, src_addr, &lnamelen);
         *addrlen = lnamelen;
-        return ret;
+    } else {
+        ret = recvfrom(fd, buf, len, flags, NULL, NULL);
+        if (ret < 0) return darwin_to_linux_errno(errno);
     }
-    ssize_t ret = recvfrom(fd, buf, len, flags, NULL, NULL);
-    if (ret < 0) return darwin_to_linux_errno(errno);
+
+    /* Darwin ICMP/raw sockets include the 20-byte IPv4 header in the recvfrom buffer,
+     * whereas Linux SOCK_DGRAM IPPROTO_ICMP sockets deliver only the ICMP payload.
+     * Strip the IPv4 header for Linux userspace ABI compatibility. */
+    bool is_icmp = (fd >= 0 && fd < MAX_TRACKED_FDS && g_sock_is_icmp[fd]);
+    if (buf && ret >= 20) {
+        unsigned char *p = (unsigned char *)buf;
+        if (is_icmp || ((p[0] >> 4) == 4 && p[9] == 1)) {
+            size_t hlen = (p[0] & 0x0f) * 4;
+            if (hlen >= 20 && (ssize_t)hlen <= ret) {
+                memmove(buf, p + hlen, ret - hlen);
+                ret -= hlen;
+            }
+        }
+    }
+
     return ret;
 }
 
@@ -1824,6 +1982,18 @@ int64_t handle_recvmsg(int fd, void *msg, int flags) {
     ssize_t ret = recvmsg(fd, &dmsg, flags);
     if (ret < 0) return darwin_to_linux_errno(errno);
 
+    bool is_icmp = (fd >= 0 && fd < MAX_TRACKED_FDS && g_sock_is_icmp[fd]);
+    if (lmsg->msg_iov && lmsg->msg_iovlen > 0 && ret >= 20) {
+        unsigned char *p = (unsigned char *)lmsg->msg_iov[0].iov_base;
+        if (p && (is_icmp || ((p[0] >> 4) == 4 && p[9] == 1))) {
+            size_t hlen = (p[0] & 0x0f) * 4;
+            if (hlen >= 20 && (ssize_t)hlen <= ret) {
+                memmove(p, p + hlen, ret - hlen);
+                ret -= hlen;
+            }
+        }
+    }
+
     if (lmsg->msg_name && dmsg.msg_namelen > 0) {
         socklen_t lnamelen = lmsg->msg_namelen;
         copy_darwin_to_linux_sockaddr(&ss, dmsg.msg_namelen, lmsg->msg_name, &lnamelen);
@@ -1839,7 +2009,13 @@ int64_t handle_setsockopt(int fd, int level, int optname, const void *optval, so
     int dlevel, doptname;
     translate_linux_to_darwin_sockopt(level, optname, &dlevel, &doptname);
     int ret = setsockopt(fd, dlevel, doptname, optval, optlen);
-    if (ret < 0) return darwin_to_linux_errno(errno);
+    if (ret < 0) {
+        /* Benign IP metadata options that shouldn't fail applications if unsupported */
+        if (level == 0 && (optname == 12 || optname == 13 || optname == 8 || optname == 11 || optname == 7 || optname == 6 || optname == 4)) {
+            return 0;
+        }
+        return darwin_to_linux_errno(errno);
+    }
     return 0;
 }
 

@@ -321,6 +321,11 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
             ret = handle_getrandom((void *)a0, (size_t)a1, (unsigned int)a2);
             break;
         case LINUX_SYS_rt_sigaction:
+            ret = handle_rt_sigaction((int)a0, (const struct linux_sigaction *)a1, (struct linux_sigaction *)a2, (size_t)a3);
+            break;
+        case LINUX_SYS_rt_sigreturn:
+            ret = handle_rt_sigreturn(state);
+            break;
         case LINUX_SYS_rt_sigprocmask:
             /* Stubs for libc initialization */
             ret = 0;

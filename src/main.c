@@ -258,8 +258,7 @@ int main(int argc, char **argv, char **envp) {
         char cur_cwd[1024];
         if (getcwd(cur_cwd, sizeof(cur_cwd))) {
             size_t rootfs_len = strlen(g_ltm.host_rootfs);
-            if (strncmp(cur_cwd, g_ltm.host_rootfs, rootfs_len) != 0 ||
-                strcmp(cur_cwd, g_ltm.host_rootfs) == 0) {
+            if (strncmp(cur_cwd, g_ltm.host_rootfs, rootfs_len) != 0) {
                 char root_home[1024];
                 snprintf(root_home, sizeof(root_home), "%s/root", g_ltm.host_rootfs);
                 struct stat st;

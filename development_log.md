@@ -597,3 +597,68 @@ When launching interactive GNU Bash or BusyBox `sh` (`./ltm /bin/bash` or `./ltm
   ```
 - **Fastfetch**: `./ltm /usr/bin/fastfetch` renders `root@ltm-mac` with `Shell: bash 5.2.26`.
 - **Automated Regression Suite**: `./run_tests.sh` passes 6/6 tests (100% pass rate).
+
+---
+
+## Sprint 6: Root Filesystem Path Resolution, ICMP Header Decapsulation, and Real-Time Signal Delivery Engine
+
+**Date**: 2026-10-14
+**Author**: Engineering Swarm (Lead Architect, Core Systems Coder, Diligent Tester, Helpful Planner)
+
+### 1. Architectural Challenges & Root Causes
+1. **Container Root Hijacking (`cd / && ls`)**:
+   - In `src/main.c`, an overly aggressive CWD guard checked `if (strncmp(path, g_ltm.host_rootfs, ...) != 0 || strcmp(cur_cwd, g_ltm.host_rootfs) == 0)` and repeatedly forced the working directory back to `/root` whenever the process was located in the container root `/` (`g_ltm.host_rootfs`).
+   - Consequently, executing `cd / && ls` repeatedly redirected users to `/root` and displayed old test files.
+2. **ICMP Header Decapsulation (`got ICMP 69`)**:
+   - On Linux, `SOCK_DGRAM` ICMP sockets (e.g., used by ping) strip the IPv4 header in kernel space and present only the ICMP payload to userspace, where byte 0 is the ICMP Type (`0x00` for Echo Reply).
+   - On Darwin / Apple Silicon XNU, datagram/raw ICMP sockets deliver the raw 20-byte IPv4 packet header to `recvfrom()` / `recvmsg()`.
+   - Byte 0 of an IPv4 header is `0x45` (Version 4, IHL 5), which decimal converts to `69`. Linux `ping` read byte 0 as `69`, reported `ping: warning: got ICMP 69 (unknown ICMP type)`, and discarded all echo replies.
+3. **Premature Process Termination via SIGALRM (`Alarm clock`)**:
+   - Linux `ping` relies on `setitimer(ITIMER_REAL, ...)` to fire periodic 1-second `SIGALRM` timer interrupts while waiting in `recvfrom()`.
+   - Syscall 134 (`rt_sigaction`) was previously a dummy stub returning `0` without registering handlers with the Darwin host kernel.
+   - When the 1-second alarm fired, Darwin executed the default unhandled `SIGALRM` disposition: terminating the process with `Alarm clock` (exit code 142).
+4. **IP Sockopt Discrepancies**:
+   - Linux and Darwin use divergent numeric values for `IPPROTO_IP` socket options (`IP_TOS`, `IP_TTL`, `IP_HDRINCL`, `IP_OPTIONS`, `IP_RECVOPTS`, `IP_RETOPTS`, `IP_PKTINFO`, `IP_RECVTTL`, `IP_RECVTOS`).
+   - Unsupported advisory metadata options like `IP_RECVTTL` (Linux 12) caused Darwin `setsockopt()` to fail with `EINVAL`, emitting warnings in stderr.
+
+### 2. Solutions Implemented
+1. **Container Root Navigation in `src/main.c`**:
+   - Removed the `|| strcmp(cur_cwd, g_ltm.host_rootfs) == 0` override. Working directory initialization only establishes `/root` on the very first container invocation, allowing subsequent `chdir` / `cd /` commands to navigate the root filesystem hierarchy seamlessly.
+2. **ICMP Protocol Tracking & Header Decapsulation in `src/syscall_handlers.c`**:
+   - Added global socket protocol tracker `g_sock_is_icmp[MAX_TRACKED_FDS]`, maintaining ICMP state across `socket()`, `dup()`, `dup2()/dup3()`, `fcntl(F_DUPFD)`, and `close()`.
+   - In `handle_recvfrom()` and `handle_recvmsg()`, inspect incoming packets for IPv4 ICMP encapsulation (`(p[0] >> 4) == 4 && p[9] == 1`). If present, dynamically strip the 20-byte IP header using `memmove()` and adjust returned byte counts, delivering clean ICMP Echo Replies to guest binaries.
+3. **Real-Time Signal Delivery Engine (`rt_sigaction` / `rt_sigreturn`)**:
+   - Declared `struct linux_sigaction` with non-colliding fields (`l_handler`, `l_flags`, `l_restorer`, `l_mask`) in `include/syscalls.h`.
+   - Implemented `handle_rt_sigaction` in `src/syscall_handlers.c`, binding Linux signal handlers to Darwin host signals using `SA_SIGINFO | SA_NODEFER`.
+   - Authored assembly trampoline `_ltm_sigreturn_stub` (`mov x8, #139; brk #0`) in `src/jump_stub.s`.
+   - On Darwin signal receipt, `ltm_host_signal_handler` pushes an `ltm_sigframe` onto the guest stack preserving all ARM64 registers, sets `x0` to the signal number, `lr` to the restorer stub, unmasks signals with `pthread_sigmask()`, and branches to the guest handler via `ltm_resume_context`.
+   - Implemented `handle_rt_sigreturn` (Linux syscall 139) to pop the saved frame, verify magic cookie (`0x4c544d5f534947`), unmask signals, and resume execution cleanly without triggering Darwin XNU signal cookie mismatch panics (`brk #1`).
+4. **Socket Option Translation in `src/syscall_handlers.c`**:
+   - Mapped Linux `IPPROTO_IP` options to their Darwin constants in `translate_linux_to_darwin_sockopt()`.
+   - Added benign absorption in `handle_setsockopt` for optional IP metadata options (`IP_RECVTTL`, `IP_RECVTOS`, `IP_PKTINFO`, `IP_RECVERR`, `IP_RETOPTS`, `IP_RECVOPTS`, `IP_OPTIONS`), preventing stderr warnings.
+
+### 3. Verification & Results
+- **Root Directory Listing**:
+  `./ltm /bin/bash -c "cd / && ls"` and `./ltm /bin/sh -c "cd / && ls"` output:
+  `bin dev etc home lib media mnt opt proc root run sbin srv sys tmp usr var`
+  (100% clean container root listing, zero host leaks).
+- **Single-Packet Ping**:
+  - `./ltm /bin/ping -c 1 1.1.1.1`: 1 packet transmitted, 1 received, 0% packet loss (0 warnings, exit code 0).
+  - `./ltm /bin/ping -c 1 google.com`: 1 packet transmitted, 1 received, 0% packet loss (0 warnings, exit code 0).
+- **Multi-Packet Ping (Interval & Signal Delivery)**:
+  - `./ltm /bin/ping -c 3 1.1.1.1`:
+    ```
+    64 bytes from 1.1.1.1: seq=0 ttl=42 time=38.883 ms
+    64 bytes from 1.1.1.1: seq=1 ttl=42 time=67.233 ms
+    64 bytes from 1.1.1.1: seq=2 ttl=42 time=43.198 ms
+    3 packets transmitted, 3 packets received, 0% packet loss
+    ```
+  - `./ltm /bin/ping -c 3 google.com`:
+    ```
+    64 bytes from google.com: seq=0 ttl=42 time=32.977 ms
+    64 bytes from google.com: seq=1 ttl=42 time=39.399 ms
+    64 bytes from google.com: seq=2 ttl=42 time=96.786 ms
+    3 packets transmitted, 3 packets received, 0% packet loss
+    ```
+- **Automated Regression Suite**:
+  `./run_tests.sh` passes 6/6 tests (100% pass rate).
