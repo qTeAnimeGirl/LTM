@@ -9,13 +9,14 @@ Welcome to the comprehensive tutorial for **LTM (Linux To Mac)**. This guide cov
 2. [Prerequisites & System Requirements](#2-prerequisites--system-requirements)
 3. [Building LTM from Source](#3-building-ltm-from-source)
 4. [Setting Up Linux Root Filesystems](#4-setting-up-linux-root-filesystems)
-   - [Alpine Linux (Fast Automated Setup)](#41-alpine-linux-rootfs-fast-automated-setup)
-   - [Arch Linux ARM (Full 2GB Distribution & Pacman)](#42-arch-linux-arm-rootfs-full-distribution--pacman)
+   - [Arch Linux ARM (Default Distribution & Pacman)](#41-arch-linux-arm-rootfs-default-distribution--pacman)
+   - [Alpine Linux (Optional Lightweight Musl Setup)](#42-alpine-linux-rootfs-optional-lightweight-musl-setup)
 5. [Running Real-World Linux Workloads](#5-running-real-world-linux-workloads)
-   - [Fastfetch System Information](#51-fastfetch-system-information)
-   - [Interactive GNU Bash Shell](#52-interactive-gnu-bash-shell)
-   - [Arch Linux Pacman Package Manager](#53-arch-linux-pacman-package-manager)
-   - [Networking & ICMP Ping](#54-networking--icmp-ping)
+   - [Interactive GNU Bash Shell](#51-interactive-gnu-bash-shell)
+   - [Arch Linux Pacman Package Manager](#52-arch-linux-pacman-package-manager)
+   - [Fastfetch System Information](#53-fastfetch-system-information)
+   - [Hermetic Environment Isolation & Custom Variables](#54-hermetic-environment-isolation--custom-variables)
+   - [Networking & ICMP Ping](#55-networking--icmp-ping)
 6. [Testing & Verification](#6-testing--verification)
    - [Running the 328-Test Suite](#61-running-the-328-test-suite)
    - [Running Individual Standalone Syscall Tests](#62-running-individual-standalone-syscall-tests)
@@ -31,10 +32,11 @@ LTM is **not a virtual machine and not a CPU emulator**. It is a lightweight, hi
 Because Apple Silicon and Linux ARM64 share the exact same 64-bit ARMv8/ARMv9 instruction set:
 - **0% CPU Emulation**: Linux instructions execute directly on Apple Silicon performance and efficiency cores at 100% native hardware speed.
 - **Syscall Interception**: Linux system calls (`svc #0`, opcode `0xd4000001`) are patched at load time to Mach software traps (`brk #0`, opcode `0xd4200000`). Darwin delivers this trap via `SIGTRAP` with thread context access (`ucontext_t`).
-- **Syscall Dispatch & Translation**: The dispatcher reads `x8` (syscall number) and arguments `x0..x5`, maps them to Darwin Mach/BSD kernel calls, converts data structures (e.g. 128-byte Linux `stat` <-> 144-byte Darwin `stat`, 36-byte Linux `termios` <-> 72-byte Darwin `termios`), and writes the return value to `x0`.
+- **Syscall Dispatch & Translation**: The dispatcher reads `x8` (syscall number) and arguments `x0..x5`, maps them to Darwin Mach/BSD kernel calls, converts data structures (e.g. 128-byte Linux `stat` <-> 144-byte Darwin `stat`, 36-byte / 44-byte Linux `termios2` <-> 72-byte Darwin `termios`), and writes the return value to `x0`.
 - **16KB Memory Pages**: All memory allocations (`mmap`, `brk`, `munmap`, `mprotect`) are normalized to Apple Silicon hardware 16KB page boundaries.
-- **x18 Platform Register Preservation**: Darwin XNU is instructed via Mach-O SDK targeting (macOS 12.3.0) to preserve `x18` across context switches and timer interrupts, preventing register corruption in Linux userland libraries (such as `libz.so.1`).
+- **x18 Platform Register Preservation**: Darwin XNU is instructed via Mach-O platform SDK targeting (macOS 12.3.0) to preserve `x18` across context switches and timer interrupts. Because this is solved directly at the platform translation layer, **100% of official upstream Linux ARM64 libraries (such as `libz.so.1`, `libc.so.6`, `libcrypto.so.3`) run completely unmodified**.
 - **Synthetic Procfs & Telemetry**: `/proc/cpuinfo`, `/proc/meminfo`, and `/proc/version` query real Darwin `sysctl` and Mach VM APIs dynamically without hardcoded data.
+- **Self-Contained Single Binary**: The entire runtime—including ELF loading, instruction patching, syscall interception, terminal translation, and the rootfs installer—is compiled into a single executable `./ltm` with zero runtime script dependencies.
 
 ---
 
@@ -45,13 +47,13 @@ Because Apple Silicon and Linux ARM64 share the exact same 64-bit ARMv8/ARMv9 in
 - **Operating System**: macOS Monterey (12.3+), macOS Ventura (13.x), macOS Sonoma (14.x), or macOS Sequoia (15.x).
 
 ### Required Toolchain
-1. **Xcode Command Line Tools** (provides Clang, Make, and codesign):
+1. **Xcode Command Line Tools** (provides Clang and Make):
    ```bash
    xcode-select --install
    ```
-2. **Python 3** (used by build scripts and test generators):
+2. **Python 3** *(Optional, only used for test binary generation)*:
    Included with macOS (`/usr/bin/python3`) or Homebrew (`brew install python3`).
-3. **Rust LLVM Linker (`rust-lld`)** *(Required only for building standalone test binaries)*:
+3. **Rust LLVM Linker (`rust-lld`)** *(Optional, required only for building custom standalone test ELFs)*:
    ```bash
    brew install rust
    # Verify rust-lld is available
@@ -67,17 +69,16 @@ Because Apple Silicon and Linux ARM64 share the exact same 64-bit ARMv8/ARMv9 in
    cd ~/Documents/LTM
    ```
 
-2. Compile the LTM binary using `make`:
+2. Compile the standalone LTM binary using `make`:
    ```bash
    make
    ```
 
 3. What `make` does:
-   - Compiles `src/main.c`, `src/elf_loader.c`, `src/patcher.c`, `src/sandbox.c`, `src/syscall_dispatcher.c`, and `src/syscall_handlers.c`.
-   - Assembles `src/jump_stub.s` (freestanding guest context restoration stubs).
-   - Links the Mach-O executable `./ltm`.
-   - Automatically runs `python3 scripts/enable_x18_preservation.py ./ltm`, setting the Mach-O `LC_BUILD_VERSION` SDK to `12.3.0`. This activates native Darwin XNU `task->preserve_x18 = true` across all thread context switches.
-   - Signs the executable ad-hoc with `codesign -s - -f ./ltm`.
+   - Compiles all C modules: `src/main.c`, `src/elf_loader.c`, `src/patcher.c`, `src/sandbox.c`, `src/syscall_dispatcher.c`, `src/syscall_handlers.c`, and `src/rootfs_installer.c`.
+   - Assembles `src/jump_stub.s` (AArch64 context restoration and signal return trampolines).
+   - Links the Mach-O executable `./ltm` using `-Wl,-platform_version,macos,12.3.0,12.3.0 -mmacosx-version-min=12.3`. This natively instructs the Darwin XNU kernel scheduler to activate `task->preserve_x18 = true` across all thread context switches.
+   - Outputs a single, self-contained `./ltm` binary. No external helper scripts (`.sh` or `.py`) are required.
 
 4. Verify the build:
    ```bash
@@ -88,80 +89,169 @@ Because Apple Silicon and Linux ARM64 share the exact same 64-bit ARMv8/ARMv9 in
 
 ## 4. Setting Up Linux Root Filesystems
 
-LTM supports multiple Linux distributions in userspace chroot sandboxes.
+LTM provides a fully sandboxed userspace container environment. Arch Linux ARM is the **default** distribution.
 
-### 4.1 Alpine Linux Rootfs (Fast Automated Setup)
+### 4.1 Arch Linux ARM Rootfs (Default Distribution & Pacman)
 
-Alpine Linux provides a lightweight, Musl-libc-based environment ideal for fast testing.
+Arch Linux ARM provides a complete, modern 2.0GB Glibc-based distribution featuring the official `pacman` package manager and over 160 preinstalled utilities.
 
-To automatically download and configure Alpine Linux with GNU Bash and Fastfetch:
+#### Option A: Automatic On-Demand Installation (Recommended)
+You do not need to manually configure anything. Simply invoke any guest command:
+```bash
+./ltm /bin/bash
+```
+If `arch_rootfs` is missing or incomplete, LTM detects this automatically and prompts:
+```text
+[LTM:ROOTFS] Rootfs 'arch_rootfs' not found or incomplete.
+[LTM:ROOTFS] Automatically downloading and installing Arch Linux ARM rootfs...
+```
+The built-in C installer (`src/rootfs_installer.c`) immediately downloads and configures the environment.
+
+#### Option B: Explicit Installation via CLI
+You can also trigger the native C installer explicitly:
 ```bash
 ./ltm --install-rootfs
+# Or explicitly specify Arch:
+./ltm --install-rootfs arch
 ```
-*(Or run `./scripts/setup_rootfs.sh`)*.
 
-This installer creates the `rootfs/` directory containing:
-- Alpine Linux aarch64 core rootfs
-- `/bin/busybox` and `/bin/sh`
-- `/bin/bash` (GNU Bash 5.2)
-- `/usr/bin/fastfetch`
+#### What the Native C Installer Does:
+The installer runs entirely in native C without external shell scripts:
+1. Spawns `/usr/bin/curl` with an interactive progress bar to fetch the official upstream `ArchLinuxARM-aarch64-latest.tar.gz` archive.
+2. Spawns `/usr/bin/tar` to safely extract the filesystem into `arch_rootfs/`.
+3. Creates `arch_rootfs/etc/resolv.conf` with reliable fallback nameservers (`1.1.1.1` and `8.8.8.8`).
+4. Tunes `arch_rootfs/etc/pacman.conf` for unprivileged userland execution:
+   - Adds `DisableSandboxFilesystem` and `DisableSandboxSyscalls`
+   - Comments out `DownloadUser = alpm` (so downloads run under userland context)
+   - Sets `SigLevel = Never`
+5. Initializes virtual directory mountpoints (`/proc`, `/sys`, `/dev`, `/tmp`, `/root`).
 
-Test it immediately:
+#### 100% Unmodified Upstream Binaries
+Because LTM resolves register preservation at the Mach-O translation layer, **every binary and shared library in `arch_rootfs` is 100% identical to official upstream Arch Linux ARM packages**. No recompiled or modified libraries are needed.
+
+Verify Arch Linux ARM immediately:
 ```bash
-./ltm /usr/bin/fastfetch
+./ltm /usr/bin/pacman --version
+```
+*Output*:
+```text
+ .--.                  Pacman v7.1.0 - libalpm v16.0.1
+/ _.-' .-.  .-.  .-.   Copyright (C) 2006-2024 Pacman Development Team
+\  '-. '-'  '-'  '-'   This program may be freely redistributed under
+ '--'                  the terms of the GNU General Public License.
 ```
 
 ---
 
-### 4.2 Arch Linux ARM Rootfs (Full Distribution & Pacman)
+### 4.2 Alpine Linux Rootfs (Optional Lightweight Musl Setup)
 
-Arch Linux ARM provides a complete, modern 2.0GB Glibc-based distribution with the official `pacman` package manager.
+For scenarios requiring a minimal footprint (~15MB), Alpine Linux aarch64 is also supported.
 
-#### Setting up Arch Linux ARM:
-1. Create directory and download the official Arch Linux ARM aarch64 rootfs:
-   ```bash
-   mkdir -p arch_rootfs
-   curl -sSL -o ArchLinuxARM-aarch64-latest.tar.gz http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
-   tar -xzf ArchLinuxARM-aarch64-latest.tar.gz -C arch_rootfs
-   rm -f ArchLinuxARM-aarch64-latest.tar.gz
-   ```
+To install Alpine Linux:
+```bash
+./ltm --install-rootfs alpine
+```
+This extracts the Alpine rootfs into `rootfs/`.
 
-2. Configure network DNS nameservers:
-   ```bash
-   cat << 'EOF' > arch_rootfs/etc/resolv.conf
-   nameserver 1.1.1.1
-   nameserver 8.8.8.8
-   EOF
-   ```
-
-3. Configure `/etc/pacman.conf` for unprivileged userland execution:
-   Open `arch_rootfs/etc/pacman.conf` and adjust the options:
-   ```ini
-   # Disable sandboxing syscall hooks not permitted in unprivileged userland
-   DisableSandboxFilesystem
-   DisableSandboxSyscalls
-
-   # Comment out DownloadUser so downloads run under active user context
-   # DownloadUser = alpm
-   ```
-
-4. Install the fixed-x18 `libz.so.1` (already included in `arch_rootfs/usr/lib/libz.so.1`):
-   LTM's kernel x18 preservation ensures `libz`'s sliding window decompression of Arch's 10MB package database runs flawlessly without underflows.
-
-5. Test Arch Linux ARM:
-   ```bash
-   ./ltm -r arch_rootfs /usr/bin/pacman --version
-   ```
+To run commands within the Alpine environment, pass `--alpine`:
+```bash
+./ltm --alpine /bin/sh
+./ltm --alpine /usr/bin/fastfetch
+```
 
 ---
 
 ## 5. Running Real-World Linux Workloads
 
-### 5.1 Fastfetch System Information
+Because Arch Linux ARM is the default, you do **not** need to pass `-r arch_rootfs` to commands.
+
+### 5.1 Interactive GNU Bash Shell
+
+Launch an interactive GNU Bash shell inside Arch Linux ARM:
+```bash
+./ltm /bin/bash
+```
+
+Inside Bash:
+```bash
+# Check current user identity (virtualized root)
+[root@ltm-mac ~]# whoami
+root
+
+# Check kernel personality
+[root@ltm-mac ~]# uname -a
+Linux ltm-mac LTM 2026.1A #1 SMP PREEMPT_DYNAMIC Wed Oct 14 00:00:00 UTC 2026 aarch64 GNU/Linux
+
+# Check active directory
+[root@ltm-mac ~]# pwd
+/root
+
+# Inspect real Apple Silicon CPU cores via virtual /proc/cpuinfo
+[root@ltm-mac ~]# cat /proc/cpuinfo | grep "model name"
+model name	: Apple M3
+
+# Inspect live host memory statistics via virtual /proc/meminfo
+[root@ltm-mac ~]# cat /proc/meminfo | head -n 5
+MemTotal:       25165824 kB
+MemFree:        10245000 kB
+MemAvailable:   14320000 kB
+
+# Browse container root filesystem
+[root@ltm-mac ~]# cd / && ls -la
+
+# Test shell pipelines and command redirection
+[root@ltm-mac /]# echo "Hello from unmodified Arch Linux ARM on Apple Silicon!" | tr '[:lower:]' '[:upper:]'
+HELLO FROM UNMODIFIED ARCH LINUX ARM ON APPLE SILICON!
+
+# Exit container shell
+[root@ltm-mac /]# exit
+```
+
+---
+
+### 5.2 Arch Linux Pacman Package Manager
+
+With LTM, Arch Linux ARM's official `pacman 7.1.0` package manager operates natively:
+
+1. **Query installed packages**:
+   ```bash
+   ./ltm /usr/bin/pacman -Q
+   ```
+   *Lists all installed packages in the local ALPM database.*
+
+2. **Synchronize remote package databases** over network sockets:
+   ```bash
+   ./ltm /usr/bin/pacman -Sy
+   ```
+   *Downloads and decompresses `core.db`, `extra.db` (10MB), `alarm.db`, and `aur.db`.*
+
+3. **Search for packages across the 10MB package catalog**:
+   ```bash
+   ./ltm /usr/bin/pacman -Ss fastfetch
+   ```
+   *Output*:
+   ```text
+   extra/fastfetch 2.70.0-1
+       A feature-rich and performance oriented neofetch like system information tool
+   ```
+
+4. **Inspect package details and dependencies**:
+   ```bash
+   ./ltm /usr/bin/pacman -Si fastfetch
+   ```
+
+5. **Check for available updates across the system**:
+   ```bash
+   ./ltm /usr/bin/pacman -Qu
+   ```
+
+---
+
+### 5.3 Fastfetch System Information
 
 Run Fastfetch on Arch Linux ARM:
 ```bash
-./ltm -r arch_rootfs /usr/bin/fastfetch
+./ltm /usr/bin/fastfetch
 ```
 
 **Output Preview**:
@@ -188,79 +278,28 @@ Notice that LTM reports:
 
 ---
 
-### 5.2 Interactive GNU Bash Shell
+### 5.4 Hermetic Environment Isolation & Custom Variables
 
-Launch an interactive GNU Bash shell inside Arch Linux ARM:
+By default, LTM enforces **strict environment isolation**: host macOS variables (`DYLD_*`, `Apple_*`, Mac `$PATH`, Homebrew paths, host user tokens) are completely stripped. The guest receives a pristine Linux standard environment:
+- `USER=root`, `LOGNAME=root`, `HOME=/root`, `SHELL=/bin/bash`
+- `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`
+- `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, `HOSTNAME=ltm-mac`, `PWD=/root`
+
+#### Injecting Custom Environment Variables (`-e` / `--env`)
+You can pass custom environment variables directly to guest binaries:
 ```bash
-./ltm -r arch_rootfs /usr/bin/bash
+./ltm -e MY_VAR=HelloLTM -e DEBUG=1 /bin/bash -c 'echo "MY_VAR is $MY_VAR"'
 ```
 
-Inside Bash:
+#### Preserving Host Environment (`--preserve-env`)
+If you specifically want guest processes to inherit host environment variables, pass `--preserve-env`:
 ```bash
-# Check current user identity (virtualized superuser)
-whoami
-# Output: root
-
-# Check kernel version
-uname -a
-# Output: Linux ltm-mac LTM 2026.1A #1 SMP PREEMPT_DYNAMIC Wed Oct 14 00:00:00 UTC 2026 aarch64 Linux
-
-# Inspect real Apple Silicon CPU cores via virtual /proc/cpuinfo
-cat /proc/cpuinfo | grep "model name"
-
-# Inspect real host memory statistics
-cat /proc/meminfo | head -n 5
-
-# Browse container root filesystem
-cd / && ls -la
-
-# Test shell pipelines and command redirection
-echo "Hello from Linux on Apple Silicon!" | tr '[:lower:]' '[:upper:]'
-
-# Exit container shell
-exit
+./ltm --preserve-env /bin/bash
 ```
 
 ---
 
-### 5.3 Arch Linux Pacman Package Manager
-
-With LTM, Arch Linux ARM's official `pacman` package manager operates natively:
-
-1. **Query installed packages**:
-   ```bash
-   ./ltm -r arch_rootfs /usr/bin/pacman -Q
-   ```
-
-2. **Synchronize remote package databases** over network sockets:
-   ```bash
-   ./ltm -r arch_rootfs /usr/bin/pacman -Sy
-   ```
-   *Downloads and decompresses `core.db`, `extra.db` (10MB), `alarm.db`, and `aur.db`.*
-
-3. **Search for packages in the 10MB package catalog**:
-   ```bash
-   ./ltm -r arch_rootfs /usr/bin/pacman -Ss fastfetch
-   ```
-   *Output*:
-   ```text
-   extra/fastfetch 2.70.0-1
-       A feature-rich and performance oriented neofetch like system information tool
-   ```
-
-4. **Inspect package details and dependencies**:
-   ```bash
-   ./ltm -r arch_rootfs /usr/bin/pacman -Si fastfetch
-   ```
-
-5. **Check for available updates across the system**:
-   ```bash
-   ./ltm -r arch_rootfs /usr/bin/pacman -Qu
-   ```
-
----
-
-### 5.4 Networking & ICMP Ping
+### 5.5 Networking & ICMP Ping
 
 LTM bridges Linux network sockets directly to Darwin BSD sockets:
 

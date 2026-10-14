@@ -2,6 +2,7 @@
 #include "elf_loader.h"
 #include "sandbox.h"
 #include "syscalls.h"
+#include "rootfs_installer.h"
 
 #include <termios.h>
 
@@ -47,90 +48,7 @@ static void print_usage(const char *progname) {
 }
 
 static int run_install_rootfs(const char *flavor, const char *target_dir) {
-    if (!flavor || flavor[0] == '\0') {
-        flavor = "arch";
-    }
-    if (!target_dir || target_dir[0] == '\0') {
-        target_dir = (strcmp(flavor, "alpine") == 0) ? "rootfs" : "arch_rootfs";
-    }
-
-    for (const char *p = target_dir; *p; p++) {
-        if (*p == ';' || *p == '&' || *p == '|' || *p == '`' || *p == '$' || *p == '\n' || *p == '\'') {
-            fprintf(stderr, "Error: Invalid characters in target rootfs directory path\n");
-            return 1;
-        }
-    }
-
-    char script_path[1024];
-    if (strcmp(flavor, "alpine") == 0) {
-        snprintf(script_path, sizeof(script_path), "./scripts/setup_rootfs.sh");
-    } else {
-        snprintf(script_path, sizeof(script_path), "./scripts/setup_arch_rootfs.sh");
-    }
-
-    if (access(script_path, X_OK) == 0) {
-        char cmd[2048];
-        snprintf(cmd, sizeof(cmd), "\"%s\" \"%s\"", script_path, target_dir);
-        int ret = system(cmd);
-        return ret == 0 ? 0 : 1;
-    }
-
-    /* Fallback if script not executable or not present in ./scripts/ */
-    if (strcmp(flavor, "alpine") == 0) {
-        printf("==============================================================\n");
-        printf("   LTM Alpine Linux ARM64 Rootfs & Environment Installer\n");
-        printf("==============================================================\n");
-        printf("[*] Target directory: %s\n\n", target_dir);
-
-        char cmd[4096];
-        snprintf(cmd, sizeof(cmd),
-            "mkdir -p '%s' && "
-            "echo '[+] Downloading Alpine Linux 3.20 aarch64 minirootfs...' && "
-            "curl -sSL https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/aarch64/alpine-minirootfs-3.20.0-aarch64.tar.gz | tar -xz -C '%s' && "
-            "echo '[+] Downloading Fastfetch, GNU Bash, and dependencies...' && "
-            "TMP_PKGS=\"$(mktemp -d /tmp/ltm_pkgs.XXXXXX)\" && "
-            "curl -sSL -o \"$TMP_PKGS/fastfetch.apk\" https://dl-cdn.alpinelinux.org/alpine/v3.20/community/aarch64/fastfetch-2.13.1-r0.apk && "
-            "curl -sSL -o \"$TMP_PKGS/bash.apk\" https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/bash-5.2.26-r0.apk && "
-            "curl -sSL -o \"$TMP_PKGS/readline.apk\" https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/readline-8.2.10-r0.apk && "
-            "curl -sSL -o \"$TMP_PKGS/libncursesw.apk\" https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/libncursesw-6.4_p20240420-r2.apk && "
-            "curl -sSL -o \"$TMP_PKGS/ncurses-base.apk\" https://dl-cdn.alpinelinux.org/alpine/v3.20/main/aarch64/ncurses-terminfo-base-6.4_p20240420-r2.apk && "
-            "tar -xz -C '%s' -f \"$TMP_PKGS/fastfetch.apk\" usr/bin/fastfetch usr/share/fastfetch 2>/dev/null || true && "
-            "tar -xz -C '%s' -f \"$TMP_PKGS/bash.apk\" 2>/dev/null || true && "
-            "tar -xz -C '%s' -f \"$TMP_PKGS/readline.apk\" 2>/dev/null || true && "
-            "tar -xz -C '%s' -f \"$TMP_PKGS/libncursesw.apk\" 2>/dev/null || true && "
-            "tar -xz -C '%s' -f \"$TMP_PKGS/ncurses-base.apk\" 2>/dev/null || true && "
-            "chmod +x '%s/bin/busybox' '%s/bin/sh' '%s/bin/bash' '%s/usr/bin/fastfetch' 2>/dev/null || true && "
-            "rm -rf \"$TMP_PKGS\"",
-            target_dir, target_dir, target_dir, target_dir, target_dir, target_dir, target_dir,
-            target_dir, target_dir, target_dir, target_dir);
-
-        int ret = system(cmd);
-        return ret == 0 ? 0 : 1;
-    } else {
-        printf("==============================================================\n");
-        printf("   LTM Arch Linux ARM64 Rootfs & Environment Installer\n");
-        printf("==============================================================\n");
-        printf("[*] Target directory: %s\n\n", target_dir);
-
-        char cmd[4096];
-        snprintf(cmd, sizeof(cmd),
-            "mkdir -p '%s' && "
-            "echo '[+] Downloading Arch Linux ARM aarch64 rootfs archive...' && "
-            "TMP_ARCHIVE=\"$(mktemp /tmp/archlinux_arm.XXXXXX.tar.gz)\" && "
-            "curl -L --progress-bar -o \"$TMP_ARCHIVE\" 'http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz' && "
-            "echo '[+] Extracting rootfs into %s...' && "
-            "(tar -xzf \"$TMP_ARCHIVE\" -C '%s' 2>/dev/null || tar -xf \"$TMP_ARCHIVE\" -C '%s') && "
-            "rm -f \"$TMP_ARCHIVE\" && "
-            "mkdir -p '%s/etc' && "
-            "printf 'nameserver 1.1.1.1\\nnameserver 8.8.8.8\\n' > '%s/etc/resolv.conf' && "
-            "sed -i.bak 's/^[[:space:]]*DownloadUser[[:space:]]*=[[:space:]]*alpm/#DownloadUser = alpm/' '%s/etc/pacman.conf' 2>/dev/null || true && "
-            "sed -i.bak 's/^[[:space:]]*SigLevel[[:space:]]*=.*/SigLevel = Never/' '%s/etc/pacman.conf' 2>/dev/null || true && "
-            "rm -f '%s/etc/pacman.conf.bak'",
-            target_dir, target_dir, target_dir, target_dir, target_dir, target_dir, target_dir, target_dir, target_dir);
-
-        int ret = system(cmd);
-        return ret == 0 ? 0 : 1;
-    }
+    return rootfs_install(flavor, target_dir);
 }
 
 #define MAX_CUSTOM_ENV 256

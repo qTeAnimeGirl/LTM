@@ -17,8 +17,9 @@ If you are an autonomous AI coding agent (e.g. Antigravity, Claude, Copilot, SWE
 - [x] **Milestone 2**: Dynamic ELF loading (`PT_INTERP`), Musl C runtime, and BusyBox `/bin/sh`.
 - [x] **Milestone 3**: Full GNU Bash 5.2 interactive shell and native `fastfetch` with live hardware telemetry.
 - [x] **Milestone 4**: Full POSIX socket networking, DNS resolution, ICMP Echo ping with automated Darwin IPv4 header decapsulation, and real-time signal engine (`rt_sigaction`/`rt_sigreturn`).
-- [ ] **Milestone 5**: Native `kqueue` epoll event multiplexing, `timerfd`, `signalfd4`, and package manager support (`apk add`).
-- [ ] **Milestone 6**: Full Glibc compatibility, multi-threaded `clone()` / `pthreads` mapped to Darwin `pthread_create`, separate thread stacks, and private TLS blocks.
+- [x] **Milestone 5**: Native `kqueue` epoll event multiplexing, `timerfd`, `signalfd4`, and event loops.
+- [x] **Milestone 6**: Full Glibc compatibility, multi-threaded `clone()` / `pthreads` mapped to Darwin `pthread_create`, separate thread stacks, and private TLS blocks.
+- [x] **Milestone 7**: Official Arch Linux ARM default rootfs (`arch_rootfs`), Pacman 7.1.0 package manager database sync/search, and pure native C installer.
 
 ---
 
@@ -66,16 +67,18 @@ macOS Apple Silicon hardware strictly enforces **16KB (0x4000) page sizes**. Lin
 | `include/patcher.h` | Instruction patcher (`svc #0` -> `brk #0`) and cache invalidation. |
 | `include/sandbox.h` | Sandboxed path resolution, chroot isolation, and virtual `/proc` & `/sys` engines. |
 | `include/syscalls.h` | Syscall dispatcher prototypes, Linux struct definitions (`linux_stat`, `linux_termios`, `linux_sigaction`). |
-| `src/main.c` | CLI entry point, flag parsing (`-v`, `-s`, `-r`, `-i`), rootfs guard, and auto-installer. |
+| `src/main.c` | CLI entry point, flag parsing (`--arch`, `--alpine`, `-r`, `-e`, `--preserve-env`, `-i`, `-v`, `-s`), rootfs guard, and execution launcher. |
 | `src/elf_loader.c` | ELF parsing, `PT_LOAD` mapping, `PT_INTERP` dynamic linker resolution, and Auxv generation. |
 | `src/patcher.c` | JIT scanner rewriting `0xd4000001` to `0xd4200000` with Apple Silicon W^X page handling. |
 | `src/sandbox.c` | Chroot path resolution, symlink following, and live host telemetry generation. |
 | `src/syscall_dispatcher.c`| `SIGTRAP` signal handler, register extraction (`x8`, `x0`-`x5`), dispatch table, and `_ltm_resume_context` call. |
 | `src/syscall_handlers.c` | Handlers translating Linux syscall semantics to Darwin Mach/BSD APIs, ICMP decapsulation, signal engine. |
+| `include/rootfs_installer.h` | Prototypes for native C rootfs downloader and environment setup (`arch_rootfs` & `rootfs`). |
+| `src/rootfs_installer.c` | Pure C implementation of automated rootfs downloader, unpacker, DNS, and pacman configuration without `.sh` dependencies. |
 | `src/jump_stub.s` | AArch64 assembly stubs: `jump_to_elf`, `_ltm_resume_context`, and `_ltm_sigreturn_stub`. |
-| `scripts/setup_rootfs.sh` | Shell script to download and unpack Alpine Linux aarch64 minirootfs, Fastfetch, and GNU Bash. |
+| `scripts/setup_rootfs.sh` | Legacy auxiliary script to unpack Alpine Linux rootfs (superceded by native C installer). |
 | `tests/` | Source code for automated Linux test binaries (`test_hello`, `test_args_env`, `test_file_io`, etc.). |
-| `run_tests.sh` | Automated regression test harness verifying 6 core subsystems. |
+| `run_tests.sh` | Automated regression test harness verifying all 316 Linux ARM64 syscall unit tests and 12 core integration test suites (328 tests total). |
 | `ROADMAP.md` | Full capability roadmap, implemented syscall matrix, and future milestones. |
 | `development_log.md` | Persistent chronological log of all architectural decisions and sprint outcomes. |
 
