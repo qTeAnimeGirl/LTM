@@ -3,7 +3,24 @@
 #include "sandbox.h"
 #include "syscalls.h"
 
+#include <termios.h>
+
 ltm_runtime_t g_ltm = {0};
+
+static struct termios g_saved_termios;
+static bool g_have_saved_termios = false;
+
+static void ltm_restore_terminal(void) {
+    if (g_have_saved_termios) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &g_saved_termios);
+    }
+}
+
+static void ltm_terminal_sig_handler(int sig) {
+    ltm_restore_terminal();
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
 
 static void print_usage(const char *progname) {
     fprintf(stderr,
@@ -130,6 +147,18 @@ int main(int argc, char **argv, char **envp) {
 
     g_ltm.debug_enabled = debug;
     g_ltm.trace_syscalls = strace;
+
+    /* Save original terminal attributes for graceful restoration upon exit */
+    if (isatty(STDIN_FILENO) && tcgetattr(STDIN_FILENO, &g_saved_termios) == 0) {
+        g_have_saved_termios = true;
+        atexit(ltm_restore_terminal);
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = ltm_terminal_sig_handler;
+        sigaction(SIGINT, &sa, NULL);
+        sigaction(SIGTERM, &sa, NULL);
+        sigaction(SIGHUP, &sa, NULL);
+    }
 
     const char *binary_arg = argv[arg_idx];
     bool is_container_path = (binary_arg[0] == '/');

@@ -415,3 +415,61 @@ In Sprint 3, the team addressed the key operational requirements for solidifying
 - **Fastfetch**: Verified displaying live Apple M3 CPU, 8 cores, 13.71 GiB / 24.00 GiB memory usage, and 9h+ uptime.
 - **Interactive GNU Bash**: Verified pty interaction with command execution (`echo`, `uname -a`, `pwd`), subshells, and exit code propagation (`exit 42`).
 - **Interactive BusyBox Shell**: Verified pty interaction with input and clean exit (`exit 17`).
+
+
+---
+
+## [Sprint 3.1] Fix: Terminal Keystroke Hiding ("sudo effect") & Comprehensive Bitwise Termios Translation
+
+**Date**: 2026-10-14
+**Author**: Engineering Swarm (Lead Architect, Core Systems Coder)
+
+### 1. Issue Diagnosis & Root Cause
+When launching interactive GNU Bash or BusyBox `sh` (`./ltm /bin/bash` or `./ltm /bin/sh`), keystrokes were completely hidden (no character echo, similar to typing a password for `sudo`), and pressing Enter yielded no output.
+
+**Detailed Root Causes**:
+1. **Raw Flag Copying across Incompatible ABIs**:
+   While `struct linux_termios` was sized to 36 bytes, the previous implementation directly copied raw flag integers (`d->c_lflag = (tcflag_t)l->c_lflag`). However, the bit positions of almost every termios mode flag differ between Linux ARM64 (`asm-generic/termbits.h`) and macOS Darwin (`sys/termios.h`):
+   - **`CREAD` (Enable Receiver)**: Linux = `0x80`, Darwin = `0x800`. Raw copying caused Darwin's receiver to be disabled (`CREAD == 0`), dropping all incoming keyboard input.
+   - **`ICANON` (Canonical Input Mode)**: Linux = `0x02`, Darwin = `0x100`. Raw copying caused Darwin to stay in non-canonical mode when canonical was intended, and vice versa.
+   - **`ISIG` (Signals)**: Linux = `0x01`, Darwin = `0x80`.
+   - **`IEXTEN` (Extended Functions)**: Linux = `0x8000`, Darwin = `0x400`.
+   - **`IXON` / `IXOFF`**: Linux = `0x400` / `0x1000`, Darwin = `0x200` / `0x400`.
+   - **`ONLCR` (Map NL to CR-NL)**: Linux = `0x04`, Darwin = `0x02`.
+2. **Control Character (`c_cc`) Index Misalignment**:
+   The indices of the control characters array differ radically:
+   - `VEOF`: Linux = 4, Darwin = 0
+   - `VMIN`: Linux = 6, Darwin = 16
+   - `VTIME`: Linux = 5, Darwin = 17
+   - `VINTR`: Linux = 0, Darwin = 8
+   - `VQUIT`: Linux = 1, Darwin = 9
+   - `VERASE`: Linux = 2, Darwin = 3
+   - `VKILL`: Linux = 3, Darwin = 5
+   - `VSTART` / `VSTOP`: Linux = 8 / 9, Darwin = 12 / 13
+   Direct element-by-element array copy mapped Linux `VMIN` (index 6) to Darwin's `VREPRINT` (`^R`), while Darwin's `VMIN` (index 16) was set to 0. With `VMIN=0, VTIME=0` in non-canonical mode, `read()` returns immediately with 0 bytes (EOF).
+3. **Baud Rate Encoding**:
+   Linux encodes baud rate in `c_cflag & 0x100f` (`CBAUD`), whereas Darwin uses explicit speed integers via `cfsetospeed()` and `cfsetispeed()`.
+4. **Host Terminal State Preservation**:
+   If an application exited while the terminal attributes were modified by the guest shell, the host macOS terminal could be left in raw/no-echo mode.
+
+---
+
+### 2. Solutions Implemented
+1. **Bitwise-Accurate Translation in `src/syscall_handlers.c`**:
+   - `copy_darwin_to_linux_termios`: Explicitly transforms each flag bit for `c_iflag`, `c_oflag`, `c_cflag`, and `c_lflag`. Maps Darwin baud rates to Linux `CBAUD` codes. Maps `c_cc` control characters according to exact ABI index specifications.
+   - `copy_linux_to_darwin_termios`: Re-maps Linux flags to Darwin constants, sets `CREAD`, `CS8`, `CLOCAL`, `ICANON`, `ECHO`, and configures Darwin `cfsetispeed` and `cfsetospeed`.
+2. **Additional Terminal Ioctls**:
+   - Added `TCFLSH` (`0x540b`) calling Darwin `tcflush()`.
+   - Added `TCXONC` (`0x540a`) calling Darwin `tcflow()`.
+   - Added `TIOCSCTTY` (`0x540e`) calling `ioctl(fd, TIOCSCTTY, 0)`.
+3. **Automatic Terminal Cleanup in `src/main.c`**:
+   - Saves initial terminal attributes on startup with `tcgetattr(STDIN_FILENO, &g_saved_termios)`.
+   - Registers `atexit(ltm_restore_terminal)`.
+   - Installs signal handlers for `SIGINT`, `SIGTERM`, `SIGHUP` to ensure the host terminal is always cleanly restored upon exit.
+
+---
+
+### 3. Verification & Results
+- Verified with interactive pty test typing character-by-character into GNU Bash: keystrokes echo properly, commands execute, and prompts display without suppression.
+- Verified with BusyBox `/bin/sh`.
+- Regression test suite (`./run_tests.sh`) passes 6/6 tests.

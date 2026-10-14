@@ -151,26 +151,265 @@ int64_t handle_lseek(int fd, off_t offset, int whence) {
     return res;
 }
 
+#define LINUX_ISIG     0x00001
+#define LINUX_ICANON   0x00002
+#define LINUX_ECHO     0x00008
+#define LINUX_ECHOE    0x00010
+#define LINUX_ECHOK    0x00020
+#define LINUX_ECHONL   0x00040
+#define LINUX_NOFLSH   0x00080
+#define LINUX_TOSTOP   0x00100
+#define LINUX_ECHOCTL  0x00200
+#define LINUX_ECHOPRT  0x00400
+#define LINUX_ECHOKE   0x00800
+#define LINUX_FLUSHO   0x01000
+#define LINUX_PENDIN   0x04000
+#define LINUX_IEXTEN   0x08000
+#define LINUX_EXTPROC  0x10000
+
+#define LINUX_VINTR    0
+#define LINUX_VQUIT    1
+#define LINUX_VERASE   2
+#define LINUX_VKILL    3
+#define LINUX_VEOF     4
+#define LINUX_VTIME    5
+#define LINUX_VMIN     6
+#define LINUX_VSTART   8
+#define LINUX_VSTOP    9
+#define LINUX_VSUSP    10
+#define LINUX_VEOL     11
+#define LINUX_VREPRINT 12
+#define LINUX_VDISCARD 13
+#define LINUX_VWERASE  14
+#define LINUX_VLNEXT   15
+#define LINUX_VEOL2    16
+
 static void copy_darwin_to_linux_termios(const struct termios *d, struct linux_termios *l) {
     memset(l, 0, sizeof(*l));
-    l->c_iflag = (uint32_t)d->c_iflag;
-    l->c_oflag = (uint32_t)d->c_oflag;
-    l->c_cflag = (uint32_t)d->c_cflag;
-    l->c_lflag = (uint32_t)d->c_lflag;
-    l->c_line  = 0;
-    for (int i = 0; i < 19; i++) {
-        l->c_cc[i] = (uint8_t)d->c_cc[i];
+
+    /* iflag */
+    uint32_t l_iflag = 0;
+    if (d->c_iflag & IGNBRK)  l_iflag |= 0x001;
+    if (d->c_iflag & BRKINT)  l_iflag |= 0x002;
+    if (d->c_iflag & IGNPAR)  l_iflag |= 0x004;
+    if (d->c_iflag & PARMRK)  l_iflag |= 0x008;
+    if (d->c_iflag & INPCK)   l_iflag |= 0x010;
+    if (d->c_iflag & ISTRIP)  l_iflag |= 0x020;
+    if (d->c_iflag & INLCR)   l_iflag |= 0x040;
+    if (d->c_iflag & IGNCR)   l_iflag |= 0x080;
+    if (d->c_iflag & ICRNL)   l_iflag |= 0x100;
+    if (d->c_iflag & IXON)    l_iflag |= 0x400;
+    if (d->c_iflag & IXANY)   l_iflag |= 0x800;
+    if (d->c_iflag & IXOFF)   l_iflag |= 0x1000;
+    if (d->c_iflag & IMAXBEL) l_iflag |= 0x2000;
+    if (d->c_iflag & IUTF8)   l_iflag |= 0x4000;
+    l->c_iflag = l_iflag;
+
+    /* oflag */
+    uint32_t l_oflag = 0;
+    if (d->c_oflag & OPOST)  l_oflag |= 0x01;
+    if (d->c_oflag & ONLCR)  l_oflag |= 0x04;
+    if (d->c_oflag & OCRNL)  l_oflag |= 0x08;
+    if (d->c_oflag & ONOCR)  l_oflag |= 0x10;
+    if (d->c_oflag & ONLRET) l_oflag |= 0x20;
+    if (d->c_oflag & OFILL)  l_oflag |= 0x40;
+    if (d->c_oflag & OFDEL)  l_oflag |= 0x80;
+    if (d->c_oflag & OXTABS) l_oflag |= 0x1800;
+    l->c_oflag = l_oflag;
+
+    /* cflag */
+    uint32_t l_cflag = 0;
+    tcflag_t csize = d->c_cflag & CSIZE;
+    if (csize == CS5) l_cflag |= 0x00;
+    else if (csize == CS6) l_cflag |= 0x10;
+    else if (csize == CS7) l_cflag |= 0x20;
+    else if (csize == CS8) l_cflag |= 0x30;
+
+    if (d->c_cflag & CSTOPB)  l_cflag |= 0x40;
+    if (d->c_cflag & CREAD)   l_cflag |= 0x80;
+    if (d->c_cflag & PARENB)  l_cflag |= 0x100;
+    if (d->c_cflag & PARODD)  l_cflag |= 0x200;
+    if (d->c_cflag & HUPCL)   l_cflag |= 0x400;
+    if (d->c_cflag & CLOCAL)  l_cflag |= 0x800;
+    if (d->c_cflag & CRTSCTS) l_cflag |= 0x80000000;
+
+    speed_t ospd = cfgetospeed(d);
+    uint32_t cbaud = 0x000f;
+    switch (ospd) {
+        case B0: cbaud = 0x0000; break;
+        case B50: cbaud = 0x0001; break;
+        case B75: cbaud = 0x0002; break;
+        case B110: cbaud = 0x0003; break;
+        case B134: cbaud = 0x0004; break;
+        case B150: cbaud = 0x0005; break;
+        case B200: cbaud = 0x0006; break;
+        case B300: cbaud = 0x0007; break;
+        case B600: cbaud = 0x0008; break;
+        case B1200: cbaud = 0x0009; break;
+        case B1800: cbaud = 0x000a; break;
+        case B2400: cbaud = 0x000b; break;
+        case B4800: cbaud = 0x000c; break;
+        case B9600: cbaud = 0x000d; break;
+        case B19200: cbaud = 0x000e; break;
+        case B38400: cbaud = 0x000f; break;
+        case B57600: cbaud = 0x1001; break;
+        case B115200: cbaud = 0x1002; break;
+        case B230400: cbaud = 0x1003; break;
+        default: cbaud = 0x000f; break;
     }
+    l_cflag |= cbaud;
+    l->c_cflag = l_cflag;
+
+    /* lflag */
+    uint32_t l_lflag = 0;
+    if (d->c_lflag & ISIG)     l_lflag |= LINUX_ISIG;
+    if (d->c_lflag & ICANON)   l_lflag |= LINUX_ICANON;
+    if (d->c_lflag & ECHO)     l_lflag |= LINUX_ECHO;
+    if (d->c_lflag & ECHOE)    l_lflag |= LINUX_ECHOE;
+    if (d->c_lflag & ECHOK)    l_lflag |= LINUX_ECHOK;
+    if (d->c_lflag & ECHONL)   l_lflag |= LINUX_ECHONL;
+    if (d->c_lflag & NOFLSH)   l_lflag |= LINUX_NOFLSH;
+    if (d->c_lflag & TOSTOP)   l_lflag |= LINUX_TOSTOP;
+    if (d->c_lflag & ECHOCTL)  l_lflag |= LINUX_ECHOCTL;
+    if (d->c_lflag & ECHOPRT)  l_lflag |= LINUX_ECHOPRT;
+    if (d->c_lflag & ECHOKE)   l_lflag |= LINUX_ECHOKE;
+    if (d->c_lflag & FLUSHO)   l_lflag |= LINUX_FLUSHO;
+    if (d->c_lflag & PENDIN)   l_lflag |= LINUX_PENDIN;
+    if (d->c_lflag & IEXTEN)   l_lflag |= LINUX_IEXTEN;
+    if (d->c_lflag & EXTPROC)  l_lflag |= LINUX_EXTPROC;
+    l->c_lflag = l_lflag;
+
+    /* c_cc */
+    l->c_cc[LINUX_VINTR]    = d->c_cc[VINTR];
+    l->c_cc[LINUX_VQUIT]    = d->c_cc[VQUIT];
+    l->c_cc[LINUX_VERASE]   = d->c_cc[VERASE];
+    l->c_cc[LINUX_VKILL]    = d->c_cc[VKILL];
+    l->c_cc[LINUX_VEOF]     = d->c_cc[VEOF];
+    l->c_cc[LINUX_VTIME]    = d->c_cc[VTIME];
+    l->c_cc[LINUX_VMIN]     = d->c_cc[VMIN];
+    l->c_cc[LINUX_VSTART]   = d->c_cc[VSTART];
+    l->c_cc[LINUX_VSTOP]    = d->c_cc[VSTOP];
+    l->c_cc[LINUX_VSUSP]    = d->c_cc[VSUSP];
+    l->c_cc[LINUX_VEOL]     = d->c_cc[VEOL];
+    l->c_cc[LINUX_VREPRINT] = d->c_cc[VREPRINT];
+    l->c_cc[LINUX_VDISCARD] = d->c_cc[VDISCARD];
+    l->c_cc[LINUX_VWERASE]  = d->c_cc[VWERASE];
+    l->c_cc[LINUX_VLNEXT]   = d->c_cc[VLNEXT];
+    l->c_cc[LINUX_VEOL2]    = d->c_cc[VEOL2];
 }
 
 static void copy_linux_to_darwin_termios(const struct linux_termios *l, struct termios *d) {
-    d->c_iflag = (tcflag_t)l->c_iflag;
-    d->c_oflag = (tcflag_t)l->c_oflag;
-    d->c_cflag = (tcflag_t)l->c_cflag;
-    d->c_lflag = (tcflag_t)l->c_lflag;
-    for (int i = 0; i < 19; i++) {
-        d->c_cc[i] = (cc_t)l->c_cc[i];
+    /* 1. iflag */
+    tcflag_t d_iflag = 0;
+    if (l->c_iflag & 0x001)  d_iflag |= IGNBRK;
+    if (l->c_iflag & 0x002)  d_iflag |= BRKINT;
+    if (l->c_iflag & 0x004)  d_iflag |= IGNPAR;
+    if (l->c_iflag & 0x008)  d_iflag |= PARMRK;
+    if (l->c_iflag & 0x010)  d_iflag |= INPCK;
+    if (l->c_iflag & 0x020)  d_iflag |= ISTRIP;
+    if (l->c_iflag & 0x040)  d_iflag |= INLCR;
+    if (l->c_iflag & 0x080)  d_iflag |= IGNCR;
+    if (l->c_iflag & 0x100)  d_iflag |= ICRNL;
+    if (l->c_iflag & 0x400)  d_iflag |= IXON;
+    if (l->c_iflag & 0x800)  d_iflag |= IXANY;
+    if (l->c_iflag & 0x1000) d_iflag |= IXOFF;
+    if (l->c_iflag & 0x2000) d_iflag |= IMAXBEL;
+    if (l->c_iflag & 0x4000) d_iflag |= IUTF8;
+    d->c_iflag = d_iflag;
+
+    /* 2. oflag */
+    tcflag_t d_oflag = 0;
+    if (l->c_oflag & 0x01)   d_oflag |= OPOST;
+    if (l->c_oflag & 0x04)   d_oflag |= ONLCR;
+    if (l->c_oflag & 0x08)   d_oflag |= OCRNL;
+    if (l->c_oflag & 0x10)   d_oflag |= ONOCR;
+    if (l->c_oflag & 0x20)   d_oflag |= ONLRET;
+    if (l->c_oflag & 0x40)   d_oflag |= OFILL;
+    if (l->c_oflag & 0x80)   d_oflag |= OFDEL;
+    if ((l->c_oflag & 0x1800) == 0x1800) d_oflag |= OXTABS;
+    d->c_oflag = d_oflag;
+
+    /* 3. cflag */
+    tcflag_t d_cflag = 0;
+    uint32_t csize = l->c_cflag & 0x30;
+    if (csize == 0x00) d_cflag |= CS5;
+    else if (csize == 0x10) d_cflag |= CS6;
+    else if (csize == 0x20) d_cflag |= CS7;
+    else if (csize == 0x30) d_cflag |= CS8;
+
+    if (l->c_cflag & 0x40)       d_cflag |= CSTOPB;
+    if (l->c_cflag & 0x80)       d_cflag |= CREAD;
+    if (l->c_cflag & 0x100)      d_cflag |= PARENB;
+    if (l->c_cflag & 0x200)      d_cflag |= PARODD;
+    if (l->c_cflag & 0x400)      d_cflag |= HUPCL;
+    if (l->c_cflag & 0x800)      d_cflag |= CLOCAL;
+    if (l->c_cflag & 0x80000000) d_cflag |= CRTSCTS;
+    d->c_cflag = d_cflag;
+
+    /* 4. lflag */
+    tcflag_t d_lflag = 0;
+    if (l->c_lflag & LINUX_ISIG)     d_lflag |= ISIG;
+    if (l->c_lflag & LINUX_ICANON)   d_lflag |= ICANON;
+    if (l->c_lflag & LINUX_ECHO)     d_lflag |= ECHO;
+    if (l->c_lflag & LINUX_ECHOE)    d_lflag |= ECHOE;
+    if (l->c_lflag & LINUX_ECHOK)    d_lflag |= ECHOK;
+    if (l->c_lflag & LINUX_ECHONL)   d_lflag |= ECHONL;
+    if (l->c_lflag & LINUX_NOFLSH)   d_lflag |= NOFLSH;
+    if (l->c_lflag & LINUX_TOSTOP)   d_lflag |= TOSTOP;
+    if (l->c_lflag & LINUX_ECHOCTL)  d_lflag |= ECHOCTL;
+    if (l->c_lflag & LINUX_ECHOPRT)  d_lflag |= ECHOPRT;
+    if (l->c_lflag & LINUX_ECHOKE)   d_lflag |= ECHOKE;
+    if (l->c_lflag & LINUX_FLUSHO)   d_lflag |= FLUSHO;
+    if (l->c_lflag & LINUX_PENDIN)   d_lflag |= PENDIN;
+    if (l->c_lflag & LINUX_IEXTEN)   d_lflag |= IEXTEN;
+    if (l->c_lflag & LINUX_EXTPROC)  d_lflag |= EXTPROC;
+    d->c_lflag = d_lflag;
+
+    /* 5. c_cc */
+    d->c_cc[VEOF]     = l->c_cc[LINUX_VEOF];
+    d->c_cc[VEOL]     = l->c_cc[LINUX_VEOL];
+    d->c_cc[VEOL2]    = l->c_cc[LINUX_VEOL2];
+    d->c_cc[VERASE]   = l->c_cc[LINUX_VERASE];
+    d->c_cc[VWERASE]  = l->c_cc[LINUX_VWERASE];
+    d->c_cc[VKILL]    = l->c_cc[LINUX_VKILL];
+    d->c_cc[VREPRINT] = l->c_cc[LINUX_VREPRINT];
+    d->c_cc[VINTR]    = l->c_cc[LINUX_VINTR];
+    d->c_cc[VQUIT]    = l->c_cc[LINUX_VQUIT];
+    d->c_cc[VSUSP]    = l->c_cc[LINUX_VSUSP];
+    d->c_cc[VSTART]   = l->c_cc[LINUX_VSTART];
+    d->c_cc[VSTOP]    = l->c_cc[LINUX_VSTOP];
+    d->c_cc[VLNEXT]   = l->c_cc[LINUX_VLNEXT];
+    d->c_cc[VDISCARD] = l->c_cc[LINUX_VDISCARD];
+    d->c_cc[VMIN]     = l->c_cc[LINUX_VMIN];
+    d->c_cc[VTIME]    = l->c_cc[LINUX_VTIME];
+
+    /* 6. Baud rate */
+    uint32_t cbaud = l->c_cflag & 0x100f;
+    speed_t spd = B38400;
+    switch (cbaud) {
+        case 0x0000: spd = B0; break;
+        case 0x0001: spd = B50; break;
+        case 0x0002: spd = B75; break;
+        case 0x0003: spd = B110; break;
+        case 0x0004: spd = B134; break;
+        case 0x0005: spd = B150; break;
+        case 0x0006: spd = B200; break;
+        case 0x0007: spd = B300; break;
+        case 0x0008: spd = B600; break;
+        case 0x0009: spd = B1200; break;
+        case 0x000a: spd = B1800; break;
+        case 0x000b: spd = B2400; break;
+        case 0x000c: spd = B4800; break;
+        case 0x000d: spd = B9600; break;
+        case 0x000e: spd = B19200; break;
+        case 0x000f: spd = B38400; break;
+        case 0x1001: spd = B57600; break;
+        case 0x1002: spd = B115200; break;
+        case 0x1003: spd = B230400; break;
+        default: spd = B38400; break;
     }
+    cfsetispeed(d, spd);
+    cfsetospeed(d, spd);
 }
 
 int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
@@ -228,6 +467,30 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
         if (tcsetattr(fd, opt, &tios) != 0) {
             return darwin_to_linux_errno(errno);
         }
+        return 0;
+    }
+
+    /* TCFLSH: Linux 0x540b */
+    if (request == 0x540b) {
+        int action = (int)(uintptr_t)arg;
+        int d_action = TCIOFLUSH;
+        if (action == 0) d_action = TCIFLUSH;
+        else if (action == 1) d_action = TCOFLUSH;
+        else if (action == 2) d_action = TCIOFLUSH;
+        if (tcflush(fd, d_action) != 0) return darwin_to_linux_errno(errno);
+        return 0;
+    }
+
+    /* TCXONC: Linux 0x540a */
+    if (request == 0x540a) {
+        int action = (int)(uintptr_t)arg;
+        if (tcflow(fd, action) != 0) return darwin_to_linux_errno(errno);
+        return 0;
+    }
+
+    /* TIOCSCTTY: Linux 0x540e */
+    if (request == 0x540e) {
+        ioctl(fd, TIOCSCTTY, 0);
         return 0;
     }
 
