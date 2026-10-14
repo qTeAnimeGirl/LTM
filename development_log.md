@@ -2631,3 +2631,60 @@ ALL 326 TESTS PASSED! Translation module validated with 100% accuracy.
 - Exactly 316 dedicated standalone unit tests in `tests/syscalls/` (100.0% coverage).
 - All 10 core integration test suites passing.
 - 100% of tests satisfy the **Strict 3-Way Mandate** (Case A: Happy Path, Case B: Boundary Cases, Case C: Errno Handling).
+
+---
+
+## Sprint 19: Step 1 Complete — Full Native Multi-Threading Architecture (`pthreads` & `clone` Concurrency)
+
+**Date**: 2026-10-14
+**Author**: Engineering Swarm (Lead Architect, Core Systems Coder, Diligent Tester, Systems Critic)
+
+### 1. Architectural Mission & Invariants
+Step 1 of the Grand Roadmap requires native multi-threading for Linux ARM64 binaries on Apple Silicon macOS:
+1. **Thread Creation via `handle_clone`**:
+   - Differentiate `flags & LINUX_CLONE_THREAD` (multi-threaded concurrency) from process forks (`!(flags & LINUX_CLONE_THREAD)`).
+   - Map `CLONE_THREAD` to native Darwin pthreads created via `pthread_create()`, sharing virtual address space, file descriptors, and signal dispositions without duplicating process memory.
+2. **Apple Silicon Thread-Local Storage (`TPIDR_EL0`)**:
+   - On Darwin ARM64, the kernel reserves `TPIDR_EL0` for Darwin pthread structures, blocking guest direct writes (`msr tpidr_el0`).
+   - LTM virtualizes `TPIDR_EL0` access by scanning and patching `mrs/msr tpidr_el0` to dedicated `brk` trap codes.
+   - Migrated guest TLS from global state to thread-local storage (`static __thread uintptr_t s_guest_tls`), allowing concurrent threads to maintain independent TLS pointers simultaneously without cross-thread corruption.
+3. **Independent 1MB Per-Thread Alternate Signal Stacks**:
+   - `sigaltstack` in POSIX is per-thread. Each newly created pthread allocates a 1MB alternate signal stack aligned to 16KB Apple Silicon page boundaries, ensuring guest syscall traps (`SIGTRAP`) are delivered safely without risk of guest stack overflow.
+4. **Thread-Safe Subsystems**:
+   - Protected dynamic heap expansion (`handle_brk`) and runtime instruction patching (`patcher_patch_executable_range`) with dedicated mutexes to prevent concurrent data races.
+5. **Thread Lifecycle & Synchronization**:
+   - `CLONE_PARENT_SETTID`: Atomically writes child TID to parent memory before syscall return.
+   - `CLONE_CHILD_SETTID`: Atomically writes child TID to child memory during thread bootstrap.
+   - `CLONE_CHILD_CLEARTID`: Registers `child_tid_ptr`; on thread exit in `handle_exit()`, clears `*child_tid_ptr = 0` and broadcasts a futex wake, powering standard `pthread_join()` behavior.
+   - `handle_exit` vs `handle_exit_group`: `sys_exit` terminates only the calling thread via `pthread_exit(NULL)` while keeping other threads alive; `sys_exit_group` terminates the entire process group with `exit(status)`.
+   - `handle_tkill` / `handle_tgkill`: Uses active thread table `g_thread_table` to route thread-targeted signals directly to the target thread via Darwin `pthread_kill()`.
+
+### 2. Solutions Implemented
+- In `include/ltm.h`: Added full suite of clone flags (`LINUX_CLONE_VFORK`, `LINUX_CLONE_SYSVSEM`, `LINUX_CLONE_PIDFD`, etc.) and declared thread-local accessor functions (`ltm_get_guest_tls`, `ltm_set_guest_tls`, `ltm_get_child_tid_ptr`, `ltm_set_child_tid_ptr`, `ltm_get_thread_tid`, `ltm_set_thread_tid`).
+- In `src/syscall_dispatcher.c`: Updated virtualized TLS trap handler to use thread-local accessors `ltm_get_guest_tls()` and `ltm_set_guest_tls()`.
+- In `src/syscall_handlers.c`:
+  - Added thread-local variables `s_guest_tls`, `s_child_tid_ptr`, `s_thread_tid`, `s_is_main_thread`.
+  - Added atomic TID allocator `ltm_allocate_tid()`, atomic active thread counter `g_active_thread_count`, and thread registry `g_thread_table`.
+  - Rewrote `handle_clone` to create detached native pthreads when `CLONE_THREAD` is specified, running `ltm_thread_entry` and resuming guest execution via `_ltm_resume_context`.
+  - Updated `handle_clone3` to compute stack top (`cl_args->stack + cl_args->stack_size`) and delegate to `handle_clone`.
+  - Implemented thread-targeted signaling in `handle_tkill` and `handle_tgkill` using `pthread_kill`.
+  - Added mutex protection to `handle_brk`.
+  - Enhanced `handle_futex` with bitset support (`FUTEX_WAIT_BITSET`, `FUTEX_WAKE_BITSET`), `CLOCK_REALTIME` absolute timeout handling, and 4-byte alignment checks.
+- In `src/patcher.c`: Added mutex protection to `patcher_patch_executable_range`.
+- In `tests/test_pthreads.c`: Authored comprehensive freestanding multi-threaded test with canonical `ltm_clone` assembly stub, spawning 4 concurrent worker threads, verifying isolated per-thread TLS, shared memory array updates, atomic counters, futex start-gate barriers, and `CLONE_CHILD_CLEARTID` futex join.
+
+### 3. Verification & Universal Test Results
+- **Automated Regression Suite**:
+  ```
+  ======================================================
+                     TEST SUITE SUMMARY                 
+  ======================================================
+  Total Tests : 327
+  Passed      : 327
+  Failed      : 0
+  ALL 327 TESTS PASSED! Translation module validated with 100% accuracy.
+  ```
+- **Live Binary Execution**:
+  - GNU Bash 5.2 executing complex subshells and commands with zero regressions.
+  - Alpine Linux Fastfetch displaying full live Apple M3 telemetry and hardware stats.
+

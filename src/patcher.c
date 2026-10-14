@@ -37,8 +37,12 @@ size_t patcher_scan_and_patch(void *addr, size_t size) {
     return count;
 }
 
+static pthread_mutex_t g_patcher_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 size_t patcher_patch_executable_range(void *addr, size_t size) {
     if (!addr || size == 0) return 0;
+
+    pthread_mutex_lock(&g_patcher_mutex);
 
     uintptr_t page_start = PAGE_ROUND_DOWN(addr);
     uintptr_t page_end = PAGE_ROUND_UP((uintptr_t)addr + size);
@@ -47,6 +51,7 @@ size_t patcher_patch_executable_range(void *addr, size_t size) {
     /* Elevate to RW */
     if (mprotect((void *)page_start, page_len, PROT_READ | PROT_WRITE) != 0) {
         ltm_log_error("patcher_patch_executable_range: mprotect RW failed: %s", strerror(errno));
+        pthread_mutex_unlock(&g_patcher_mutex);
         return 0;
     }
 
@@ -59,6 +64,8 @@ size_t patcher_patch_executable_range(void *addr, size_t size) {
 
     /* Invalidate caches */
     patcher_invalidate_cache(addr, size);
+
+    pthread_mutex_unlock(&g_patcher_mutex);
 
     ltm_log_debug("Patched %zu svc instructions at [%p, %p)", count, addr, (char *)addr + size);
     return count;

@@ -583,12 +583,27 @@
 #define LINUX_CLONE_FS             0x00000200
 #define LINUX_CLONE_FILES          0x00000400
 #define LINUX_CLONE_SIGHAND        0x00000800
+#define LINUX_CLONE_PIDFD          0x00001000
+#define LINUX_CLONE_PTRACE         0x00002000
+#define LINUX_CLONE_VFORK          0x00004000
+#define LINUX_CLONE_PARENT         0x00008000
 #define LINUX_CLONE_THREAD         0x00010000
+#define LINUX_CLONE_NEWNS          0x00020000
+#define LINUX_CLONE_SYSVSEM        0x00040000
 #define LINUX_CLONE_SETTLS         0x00080000
 #define LINUX_CLONE_PARENT_SETTID  0x00100000
 #define LINUX_CLONE_CHILD_CLEARTID 0x00200000
 #define LINUX_CLONE_DETACHED       0x00400000
+#define LINUX_CLONE_UNTRACED       0x00800000
 #define LINUX_CLONE_CHILD_SETTID   0x01000000
+
+/* Thread-Local State Accessors */
+uintptr_t ltm_get_guest_tls(void);
+void ltm_set_guest_tls(uintptr_t val);
+int *ltm_get_child_tid_ptr(void);
+void ltm_set_child_tid_ptr(int *ptr);
+int64_t ltm_get_thread_tid(void);
+void ltm_set_thread_tid(int tid);
 
 /* Global runtime state */
 typedef struct {

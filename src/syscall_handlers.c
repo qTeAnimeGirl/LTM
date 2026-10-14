@@ -16,6 +16,60 @@
 #include <sys/msg.h>
 #include <sys/sem.h>
 #include <sys/shm.h>
+#include <stdatomic.h>
+
+#define LTM_MAX_THREADS 256
+
+typedef struct {
+    int tid;
+    pthread_t pthread;
+    _Atomic int active;
+} ltm_thread_record_t;
+
+static ltm_thread_record_t g_thread_table[LTM_MAX_THREADS];
+static pthread_mutex_t g_thread_table_mutex = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic int g_next_thread_tid = 0;
+static _Atomic int g_active_thread_count = 1;
+
+static __thread uintptr_t s_guest_tls = 0;
+static __thread int *s_child_tid_ptr = NULL;
+static __thread int s_thread_tid = 0;
+static __thread int s_is_main_thread = 1;
+
+uintptr_t ltm_get_guest_tls(void) {
+    return s_guest_tls;
+}
+
+void ltm_set_guest_tls(uintptr_t val) {
+    s_guest_tls = val;
+    g_ltm.guest_tls = val;
+}
+
+int *ltm_get_child_tid_ptr(void) {
+    return s_child_tid_ptr;
+}
+
+void ltm_set_child_tid_ptr(int *ptr) {
+    s_child_tid_ptr = ptr;
+    g_ltm.child_tid_ptr = ptr;
+}
+
+int64_t ltm_get_thread_tid(void) {
+    if (s_thread_tid > 0) return s_thread_tid;
+    return getpid();
+}
+
+void ltm_set_thread_tid(int tid) {
+    s_thread_tid = tid;
+}
+
+static int ltm_allocate_tid(void) {
+    int expected = 0;
+    if (atomic_compare_exchange_strong(&g_next_thread_tid, &expected, getpid() + 1)) {
+        return getpid() + 1;
+    }
+    return atomic_fetch_add(&g_next_thread_tid, 1);
+}
 
 /* Futex bucket structure */
 typedef struct {
@@ -1016,16 +1070,45 @@ int64_t handle_kill(pid_t pid, int sig) {
 int64_t handle_tkill(int tid, int sig) {
     if (sig < 0 || sig >= LINUX_NSIG) return -LINUX_EINVAL;
     if (tid <= 0) return -LINUX_ESRCH;
-    if (tid != getpid()) {
+
+    if (tid == getpid()) {
+        if (sig == 0) return 0;
+        if (signalfd_deliver_signal(sig, NULL)) {
+            return 0;
+        }
+        int ret = kill(getpid(), sig);
+        if (ret < 0) return darwin_to_linux_errno(errno);
+        return 0;
+    }
+
+    pthread_t target_th = NULL;
+    bool found = false;
+
+    pthread_mutex_lock(&g_thread_table_mutex);
+    for (int i = 0; i < LTM_MAX_THREADS; i++) {
+        if (g_thread_table[i].active && g_thread_table[i].tid == tid) {
+            target_th = g_thread_table[i].pthread;
+            found = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_thread_table_mutex);
+
+    if (!found) {
         int r = kill(tid, 0);
         if (r < 0) return darwin_to_linux_errno(errno);
+        if (sig == 0) return 0;
+        r = kill(tid, sig);
+        if (r < 0) return darwin_to_linux_errno(errno);
+        return 0;
     }
+
     if (sig == 0) return 0;
     if (signalfd_deliver_signal(sig, NULL)) {
         return 0;
     }
-    int ret = kill(getpid(), sig);
-    if (ret < 0) return darwin_to_linux_errno(errno);
+    int prc = pthread_kill(target_th, sig);
+    if (prc != 0) return darwin_to_linux_errno(prc);
     return 0;
 }
 
@@ -1197,9 +1280,14 @@ int64_t handle_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, si
 
 
 /* Memory Management */
+static pthread_mutex_t g_brk_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 int64_t handle_brk(uintptr_t brk_addr) {
+    pthread_mutex_lock(&g_brk_mutex);
     if (brk_addr == 0 || brk_addr < g_ltm.brk_start) {
-        return (int64_t)g_ltm.brk_current;
+        int64_t ret = (int64_t)g_ltm.brk_current;
+        pthread_mutex_unlock(&g_brk_mutex);
+        return ret;
     }
 
     if (brk_addr > g_ltm.brk_current) {
@@ -1212,11 +1300,15 @@ int64_t handle_brk(uintptr_t brk_addr) {
                            MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0);
             if (p == MAP_FAILED) {
                 ltm_log_error("brk mmap failed for expansion to %p", (void *)page_new);
-                return (int64_t)g_ltm.brk_current;
+                int64_t ret = (int64_t)g_ltm.brk_current;
+                pthread_mutex_unlock(&g_brk_mutex);
+                return ret;
             }
         }
         g_ltm.brk_current = brk_addr;
-        return (int64_t)g_ltm.brk_current;
+        int64_t ret = (int64_t)g_ltm.brk_current;
+        pthread_mutex_unlock(&g_brk_mutex);
+        return ret;
     }
 
     if (brk_addr < g_ltm.brk_current) {
@@ -1227,10 +1319,14 @@ int64_t handle_brk(uintptr_t brk_addr) {
             munmap((void *)page_new, page_cur - page_new);
         }
         g_ltm.brk_current = brk_addr;
-        return (int64_t)g_ltm.brk_current;
+        int64_t ret = (int64_t)g_ltm.brk_current;
+        pthread_mutex_unlock(&g_brk_mutex);
+        return ret;
     }
 
-    return (int64_t)g_ltm.brk_current;
+    int64_t ret = (int64_t)g_ltm.brk_current;
+    pthread_mutex_unlock(&g_brk_mutex);
+    return ret;
 }
 
 int64_t handle_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
@@ -1396,7 +1492,7 @@ int64_t handle_capset(void *hdr, const void *data) {
 }
 
 int64_t handle_gettid(void) {
-    return getpid();
+    return ltm_get_thread_tid();
 }
 
 static char g_hostname[65] = "ltm-mac";
@@ -1491,37 +1587,59 @@ int64_t handle_nanosleep(const struct linux_timespec *req, struct linux_timespec
 
 /* Exit */
 int64_t handle_exit(int status) {
-    ltm_trace("sys_exit(%d)", status);
-    if (g_ltm.child_tid_ptr) {
-        *g_ltm.child_tid_ptr = 0;
-        handle_futex((uint32_t *)g_ltm.child_tid_ptr, LINUX_FUTEX_WAKE, 1, NULL, NULL, 0);
+    ltm_trace("sys_exit(%d) on thread %lld", status, (long long)ltm_get_thread_tid());
+
+    int *tid_ptr = ltm_get_child_tid_ptr();
+    if (tid_ptr) {
+        *tid_ptr = 0;
+        handle_futex((uint32_t *)tid_ptr, LINUX_FUTEX_WAKE, 1, NULL, NULL, 0);
     }
-    exit(status);
+
+    int my_tid = (int)ltm_get_thread_tid();
+    pthread_mutex_lock(&g_thread_table_mutex);
+    for (int i = 0; i < LTM_MAX_THREADS; i++) {
+        if (g_thread_table[i].tid == my_tid) {
+            g_thread_table[i].active = 0;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_thread_table_mutex);
+
+    int remaining = atomic_fetch_sub(&g_active_thread_count, 1) - 1;
+    if (remaining <= 0) {
+        exit(status);
+    } else {
+        pthread_exit(NULL);
+    }
 }
 
 int64_t handle_exit_group(int status) {
     ltm_trace("sys_exit_group(%d)", status);
-    return handle_exit(status);
+    exit(status);
 }
 
 /* Threading & Futex */
 int64_t handle_set_tid_address(int *tidptr) {
-    g_ltm.child_tid_ptr = tidptr;
-    return getpid();
+    ltm_set_child_tid_ptr(tidptr);
+    return ltm_get_thread_tid();
 }
 
 int64_t handle_futex(uint32_t *uaddr, int op, uint32_t val,
                      const struct linux_timespec *timeout, uint32_t *uaddr2, uint32_t val3) {
     (void)uaddr2;
-    (void)val3;
     if (!uaddr) return -LINUX_EFAULT;
+    if (((uintptr_t)uaddr & 3) != 0) return -LINUX_EINVAL;
 
     int cmd = op & ~(LINUX_FUTEX_PRIVATE_FLAG | LINUX_FUTEX_CLOCK_REALTIME);
     uint32_t bucket_idx = ((uintptr_t)uaddr >> 2) % FUTEX_BUCKETS;
     futex_bucket_t *b = &g_futex_table[bucket_idx];
     init_futex_bucket(b);
 
-    if (cmd == LINUX_FUTEX_WAIT) {
+    if (cmd == LINUX_FUTEX_WAIT || cmd == LINUX_FUTEX_WAIT_BITSET) {
+        if (cmd == LINUX_FUTEX_WAIT_BITSET && val3 == 0) {
+            return -LINUX_EINVAL;
+        }
+
         pthread_mutex_lock(&b->mutex);
         if (*(volatile uint32_t *)uaddr != val) {
             pthread_mutex_unlock(&b->mutex);
@@ -1530,14 +1648,19 @@ int64_t handle_futex(uint32_t *uaddr, int op, uint32_t val,
 
         int r = 0;
         if (timeout) {
-            struct timespec now;
-            clock_gettime(CLOCK_REALTIME, &now);
             struct timespec abstime;
-            abstime.tv_sec = now.tv_sec + timeout->tv_sec;
-            abstime.tv_nsec = now.tv_nsec + timeout->tv_nsec;
-            if (abstime.tv_nsec >= 1000000000L) {
-                abstime.tv_sec += 1;
-                abstime.tv_nsec -= 1000000000L;
+            if ((op & LINUX_FUTEX_CLOCK_REALTIME) || cmd == LINUX_FUTEX_WAIT_BITSET) {
+                abstime.tv_sec = timeout->tv_sec;
+                abstime.tv_nsec = timeout->tv_nsec;
+            } else {
+                struct timespec now;
+                clock_gettime(CLOCK_REALTIME, &now);
+                abstime.tv_sec = now.tv_sec + timeout->tv_sec;
+                abstime.tv_nsec = now.tv_nsec + timeout->tv_nsec;
+                if (abstime.tv_nsec >= 1000000000L) {
+                    abstime.tv_sec += 1;
+                    abstime.tv_nsec -= 1000000000L;
+                }
             }
             r = pthread_cond_timedwait(&b->cond, &b->mutex, &abstime);
         } else {
@@ -1549,7 +1672,10 @@ int64_t handle_futex(uint32_t *uaddr, int op, uint32_t val,
         return 0;
     }
 
-    if (cmd == LINUX_FUTEX_WAKE) {
+    if (cmd == LINUX_FUTEX_WAKE || cmd == LINUX_FUTEX_WAKE_BITSET) {
+        if (cmd == LINUX_FUTEX_WAKE_BITSET && val3 == 0) {
+            return -LINUX_EINVAL;
+        }
         pthread_mutex_lock(&b->mutex);
         pthread_cond_broadcast(&b->cond);
         pthread_mutex_unlock(&b->mutex);
@@ -1559,31 +1685,183 @@ int64_t handle_futex(uint32_t *uaddr, int op, uint32_t val,
     return -LINUX_ENOSYS;
 }
 
+struct ltm_thread_arg {
+    arm_thread_state64_t state;
+    uint64_t flags;
+    void *stack;
+    int *ptid;
+    void *tls;
+    int *ctid;
+    int tid;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    int started;
+};
+
+static void *ltm_thread_entry(void *arg) {
+    struct ltm_thread_arg *targ = (struct ltm_thread_arg *)arg;
+
+    /* Allocate dedicated alternate signal stack for this thread (1MB) */
+    void *alt_stack = mmap(NULL, 1024 * 1024, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (alt_stack != MAP_FAILED) {
+        stack_t ss = {
+            .ss_sp = alt_stack,
+            .ss_size = 1024 * 1024,
+            .ss_flags = 0
+        };
+        sigaltstack(&ss, NULL);
+    }
+
+    pthread_mutex_lock(&targ->lock);
+    struct ltm_thread_arg local = *targ;
+
+    /* Initialize thread-local state */
+    s_is_main_thread = 0;
+    s_thread_tid = local.tid;
+    if ((local.flags & LINUX_CLONE_SETTLS) && local.tls) {
+        ltm_set_guest_tls((uintptr_t)local.tls);
+    }
+    if ((local.flags & LINUX_CLONE_CHILD_SETTID) && local.ctid) {
+        *local.ctid = local.tid;
+    }
+    if (local.flags & LINUX_CLONE_CHILD_CLEARTID) {
+        ltm_set_child_tid_ptr(local.ctid);
+    }
+
+    targ->started = 1;
+    pthread_cond_signal(&targ->cond);
+    pthread_mutex_unlock(&targ->lock);
+
+    /* Unblock signals for this thread */
+    sigset_t empty_mask;
+    sigemptyset(&empty_mask);
+    pthread_sigmask(SIG_SETMASK, &empty_mask, NULL);
+
+    ltm_log_debug("Thread %d started (guest SP=%p, PC=0x%llx, TLS=0x%lx)",
+                  local.tid, (void *)local.state.__sp,
+                  (unsigned long long)local.state.__pc,
+                  (unsigned long)ltm_get_guest_tls());
+
+    /* Resume guest execution on this native pthread */
+    ltm_resume_context(&local.state);
+
+    return NULL;
+}
+
 int64_t handle_clone(uint64_t flags, void *stack, int *ptid, void *tls, int *ctid, void *state_ptr) {
     arm_thread_state64_t *state = (arm_thread_state64_t *)state_ptr;
 
+    if (flags & LINUX_CLONE_THREAD) {
+        /* Thread Creation */
+        if (!stack) return -LINUX_EINVAL;
+
+        int child_tid = ltm_allocate_tid();
+
+        if ((flags & LINUX_CLONE_PARENT_SETTID) && ptid) {
+            *ptid = child_tid;
+        }
+
+        struct ltm_thread_arg targ;
+        memset(&targ, 0, sizeof(targ));
+        targ.flags = flags;
+        targ.stack = (void *)((uintptr_t)stack & ~0x0fULL);
+        targ.ptid = ptid;
+        targ.tls = tls;
+        targ.ctid = ctid;
+        targ.tid = child_tid;
+        targ.started = 0;
+        if (state) {
+            targ.state = *state;
+            targ.state.__x[0] = 0;
+            targ.state.__pc += 4;
+            targ.state.__sp = (uintptr_t)targ.stack;
+        }
+
+        pthread_mutex_init(&targ.lock, NULL);
+        pthread_cond_init(&targ.cond, NULL);
+
+        /* Register in thread table */
+        pthread_mutex_lock(&g_thread_table_mutex);
+        int slot = -1;
+        for (int i = 0; i < LTM_MAX_THREADS; i++) {
+            if (!g_thread_table[i].active) {
+                slot = i;
+                g_thread_table[i].tid = child_tid;
+                g_thread_table[i].active = 1;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&g_thread_table_mutex);
+
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+        atomic_fetch_add(&g_active_thread_count, 1);
+
+        pthread_t th;
+        int prc = pthread_create(&th, &attr, ltm_thread_entry, &targ);
+        pthread_attr_destroy(&attr);
+
+        if (prc != 0) {
+            atomic_fetch_sub(&g_active_thread_count, 1);
+            if (slot >= 0) {
+                pthread_mutex_lock(&g_thread_table_mutex);
+                g_thread_table[slot].active = 0;
+                pthread_mutex_unlock(&g_thread_table_mutex);
+            }
+            pthread_mutex_destroy(&targ.lock);
+            pthread_cond_destroy(&targ.cond);
+            return darwin_to_linux_errno(prc);
+        }
+
+        if (slot >= 0) {
+            pthread_mutex_lock(&g_thread_table_mutex);
+            g_thread_table[slot].pthread = th;
+            pthread_mutex_unlock(&g_thread_table_mutex);
+        }
+
+        /* Wait until child thread has initialized and copied its arguments */
+        pthread_mutex_lock(&targ.lock);
+        while (!targ.started) {
+            pthread_cond_wait(&targ.cond, &targ.lock);
+        }
+        pthread_mutex_unlock(&targ.lock);
+        pthread_mutex_destroy(&targ.lock);
+        pthread_cond_destroy(&targ.cond);
+
+        return child_tid;
+    }
+
+    /* Process Fork */
     pid_t pid = fork();
     if (pid < 0) return darwin_to_linux_errno(errno);
 
     if (pid == 0) {
-        /* Child process: re-init signal dispatcher and resume execution directly */
+        /* Child process: reset thread state and re-init dispatcher */
+        s_is_main_thread = 1;
+        s_thread_tid = 0;
+        atomic_store(&g_active_thread_count, 1);
+        atomic_store(&g_next_thread_tid, 0);
+        memset(g_thread_table, 0, sizeof(g_thread_table));
+
         syscall_dispatcher_init();
 
         if (state) {
             state->__x[0] = 0;
             state->__pc += 4;
             if (stack) {
-                state->__sp = (uintptr_t)stack;
+                state->__sp = (uintptr_t)stack & ~0x0fULL;
             }
         }
         if ((flags & LINUX_CLONE_SETTLS) && tls) {
-            g_ltm.guest_tls = (uintptr_t)tls;
+            ltm_set_guest_tls((uintptr_t)tls);
         }
         if ((flags & LINUX_CLONE_CHILD_SETTID) && ctid) {
             *ctid = getpid();
         }
         if (flags & LINUX_CLONE_CHILD_CLEARTID) {
-            g_ltm.child_tid_ptr = ctid;
+            ltm_set_child_tid_ptr(ctid);
         }
 
         if (state) {
@@ -5727,8 +6005,14 @@ int64_t handle_pkey_free(int pkey) {
 int64_t handle_clone3(struct linux_clone_args *cl_args, size_t size, void *state) {
     if (!cl_args) return -LINUX_EFAULT;
     if (size < 64) return -LINUX_EINVAL;
+
+    void *stack = NULL;
+    if (cl_args->stack) {
+        stack = (void *)(cl_args->stack + cl_args->stack_size);
+    }
+
     return handle_clone(cl_args->flags | cl_args->exit_signal,
-                        (void *)cl_args->stack,
+                        stack,
                         (int *)cl_args->parent_tid,
                         (void *)cl_args->tls,
                         (int *)cl_args->child_tid,

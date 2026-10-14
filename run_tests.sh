@@ -183,6 +183,9 @@ fi
 # Run Wave 2 syscall test suite as Test #10
 run_single_test "test_wave2_syscalls" "All Wave 2 syscalls verified across all 3 Mandate cases!"
 
+# Run multi-threading test suite
+run_single_test "test_pthreads" "test_pthreads passed!"
+
 # Run standalone syscall test binaries (Sprint 10)
 if [ -d "$BIN_DIR/syscalls" ]; then
     for sys_bin in "$BIN_DIR/syscalls"/test_sys_*; do

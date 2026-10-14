@@ -225,6 +225,24 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 - [x] **326 of 326 Tests Passing (100% Pass Rate)**:
   - 316 standalone per-syscall unit tests + 10 core integration test suites passing with 100% accuracy.
 
+### Milestone 17: Step 1 Complete — Full Native Multi-Threading Architecture (`pthreads` & `clone` Concurrency)
+- [x] **Native Darwin Pthread Mapping**: `handle_clone()` recognizes `CLONE_THREAD` and creates detached Darwin pthreads via `pthread_create()`, sharing virtual memory, file descriptors, and signal dispositions without process address space duplication.
+- [x] **Per-Thread Virtualized TLS (`TPIDR_EL0`)**: Integrated `__thread` thread-local storage (`s_guest_tls`), allowing concurrent threads to read and write private thread pointers via JIT instruction traps (`mrs/msr tpidr_el0`) without Darwin kernel register contention.
+- [x] **Independent 1MB Per-Thread Alternate Signal Stacks**: Each thread automatically allocates its own 16KB-aligned 1MB alternate signal stack and registers it via `sigaltstack()`, guaranteeing total immunity to guest stack overflows during Linux syscall trap delivery (`SIGTRAP`).
+- [x] **Thread-Safe Memory & JIT Subsystems**: Mutex-protected dynamic heap management (`handle_brk`) and runtime instruction patching (`patcher_patch_executable_range`), preventing race conditions in multithreaded runtimes.
+- [x] **Linux Thread Lifecycle & Futex Waking**:
+  - `CLONE_PARENT_SETTID`: Atomically stores child TID in parent memory prior to syscall return.
+  - `CLONE_CHILD_SETTID`: Atomically stores child TID in child memory during thread bootstrap.
+  - `CLONE_CHILD_CLEARTID`: Registers `child_tid_ptr`; upon thread termination in `handle_exit()`, clears `*child_tid_ptr = 0` and broadcasts a futex wake, enabling standard `pthread_join()` synchronization.
+- [x] **Targeted Thread Signaling (`tkill` / `tgkill`)**: Mapped to Darwin `pthread_kill()` via global active thread registry (`g_thread_table`), directing signals to specific worker threads.
+- [x] **Comprehensive Multi-Threading Test Suite (`tests/test_pthreads.c`)**:
+  - 4 concurrent worker threads sharing memory.
+  - Futex barrier start gate and child-TID join synchronization.
+  - Per-thread TLS isolation verification.
+  - Strict 3-Way Mandate: Happy path concurrency, boundary tests (NULL stack with `CLONE_VM`), error handling (`-EINVAL`, `-ESRCH`, `-EFAULT`).
+- [x] **327 of 327 Tests Passing (100% Pass Rate)**:
+  - 316 standalone per-syscall unit tests + 11 core integration test suites passing with 100% accuracy.
+
 ---
 
 

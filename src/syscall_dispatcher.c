@@ -44,16 +44,16 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
         if (type == 1) {
             /* Virtualized TLS read: mrs Xt, TPIDR_EL0 */
             if (reg < 31) {
-                state->__x[reg] = g_ltm.guest_tls;
+                state->__x[reg] = ltm_get_guest_tls();
             }
             state->__pc += 4;
             return;
         } else if (type == 2) {
             /* Virtualized TLS write: msr TPIDR_EL0, Xt */
             if (reg < 31) {
-                g_ltm.guest_tls = state->__x[reg];
+                ltm_set_guest_tls(state->__x[reg]);
             } else {
-                g_ltm.guest_tls = 0; /* xzr */
+                ltm_set_guest_tls(0); /* xzr */
             }
             state->__pc += 4;
             return;
