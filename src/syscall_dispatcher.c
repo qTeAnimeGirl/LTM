@@ -97,13 +97,30 @@ static void ltm_crash_handler(int sig, siginfo_t *si, void *ctx) {
     fprintf(stderr, "\n[LTM:CRASH] Fatal signal %d (%s) at address %p (tpidr_el0=0x%llx)\n",
             sig, sig == SIGSEGV ? "SIGSEGV" : (sig == SIGBUS ? "SIGBUS" : (sig == SIGILL ? "SIGILL" : "UNKNOWN")),
             si->si_addr, cur_tpidr);
-    fprintf(stderr, "  pc  = 0x%016llx (insn=0x%08x)\n", (unsigned long long)state->__pc, *(uint32_t *)state->__pc);
+    for (int i = 0; i < 31; i += 2) {
+        fprintf(stderr, "  x%-2d = 0x%016llx  x%-2d = 0x%016llx\n",
+                i, (unsigned long long)state->__x[i],
+                i+1, (i+1 < 31) ? (unsigned long long)state->__x[i+1] : 0ULL);
+    }
     fprintf(stderr, "  sp  = 0x%016llx\n", (unsigned long long)state->__sp);
     fprintf(stderr, "  lr  = 0x%016llx\n", (unsigned long long)state->__lr);
-    fprintf(stderr, "  x0  = 0x%016llx\n", (unsigned long long)state->__x[0]);
-    fprintf(stderr, "  x1  = 0x%016llx\n", (unsigned long long)state->__x[1]);
-    fprintf(stderr, "  x2  = 0x%016llx\n", (unsigned long long)state->__x[2]);
-    fprintf(stderr, "  x8  = 0x%016llx\n", (unsigned long long)state->__x[8]);
+
+    if (state->__pc >= 0x1000) {
+        uint32_t *code = (uint32_t *)(state->__pc - 16);
+        fprintf(stderr, "Code around PC:\n");
+        for (int i = -4; i <= 4; i++) {
+            fprintf(stderr, "  %s 0x%llx: 0x%08x\n", (i == 0 ? "=>" : "  "),
+                    (unsigned long long)(state->__pc + i * 4), code[i + 4]);
+        }
+    }
+    if (state->__sp >= 0x1000) {
+        uint64_t *stk = (uint64_t *)state->__sp;
+        fprintf(stderr, "Stack dump:\n");
+        for (int i = 0; i < 16; i += 2) {
+            fprintf(stderr, "  sp+%02x: 0x%016llx 0x%016llx\n",
+                    i * 8, (unsigned long long)stk[i], (unsigned long long)stk[i+1]);
+        }
+    }
     exit(128 + sig);
 }
 

@@ -1182,6 +1182,45 @@ static void ltm_host_signal_handler(int sig, siginfo_t *info, void *ucontext) {
     memcpy(&frame->saved_state, cur_state, sizeof(arm_thread_state64_t));
     frame->magic = LTM_SIGFRAME_MAGIC;
 
+    uint32_t fault_insn = 0;
+    if (cur_state->__pc >= 0x1000) {
+        fault_insn = *(uint32_t *)cur_state->__pc;
+    }
+    ltm_log_error("Guest signal %d delivered: PC=0x%llx (insn=0x%08x), fault_addr=%p",
+                  sig, (unsigned long long)cur_state->__pc, fault_insn, info ? info->si_addr : NULL);
+    for (int i = 0; i < 31; i += 2) {
+        ltm_log_error("  x%-2d = 0x%016llx  x%-2d = 0x%016llx",
+                      i, (unsigned long long)cur_state->__x[i],
+                      i+1, (i+1 < 31) ? (unsigned long long)cur_state->__x[i+1] : 0ULL);
+    }
+    ltm_log_error("  sp   = 0x%016llx  lr   = 0x%016llx",
+                  (unsigned long long)cur_state->__sp, (unsigned long long)cur_state->__lr);
+
+    if (cur_state->__pc >= 0x1000) {
+        uint32_t *code = (uint32_t *)(cur_state->__pc - 16);
+        ltm_log_error("Code around PC:");
+        for (int i = -4; i <= 4; i++) {
+            ltm_log_error("  %s 0x%llx: 0x%08x", (i == 0 ? "=>" : "  "),
+                          (unsigned long long)(cur_state->__pc + i * 4), code[i + 4]);
+        }
+    }
+    if (cur_state->__sp >= 0x1000) {
+        uint64_t *stk = (uint64_t *)cur_state->__sp;
+        ltm_log_error("Stack dump:");
+        for (int i = 0; i < 16; i += 2) {
+            ltm_log_error("  sp+%02x: 0x%016llx 0x%016llx",
+                          i * 8, (unsigned long long)stk[i], (unsigned long long)stk[i+1]);
+        }
+    }
+    if (cur_state->__x[8] >= 0x1000) {
+        uint32_t *state_mem = (uint32_t *)cur_state->__x[8];
+        ltm_log_error("Memory at x8 (%p):", (void *)cur_state->__x[8]);
+        for (int i = 0; i < 32; i += 4) {
+            ltm_log_error("  x8+%02x: 0x%08x 0x%08x 0x%08x 0x%08x",
+                          i * 4, state_mem[i], state_mem[i+1], state_mem[i+2], state_mem[i+3]);
+        }
+    }
+
     /* Setup registers to execute guest signal handler */
     arm_thread_state64_t target_state;
     memset(&target_state, 0, sizeof(target_state));
