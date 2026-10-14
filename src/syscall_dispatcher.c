@@ -1344,6 +1344,83 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
             ret = handle_pidfd_getfd((int)a0, (int)a1, (unsigned int)a2);
             break;
 
+        /* Wave 7 Syscalls */
+        case LINUX_SYS_io_setup:
+            ret = handle_io_setup((unsigned)a0, (linux_aio_context_t *)a1);
+            break;
+        case LINUX_SYS_io_destroy:
+            ret = handle_io_destroy((linux_aio_context_t)a0);
+            break;
+        case LINUX_SYS_io_submit:
+            ret = handle_io_submit((linux_aio_context_t)a0, (long)a1, (struct linux_iocb **)a2);
+            break;
+        case LINUX_SYS_io_cancel:
+            ret = handle_io_cancel((linux_aio_context_t)a0, (struct linux_iocb *)a1, (struct linux_io_event *)a2);
+            break;
+        case LINUX_SYS_io_getevents:
+            ret = handle_io_getevents((linux_aio_context_t)a0, (long)a1, (long)a2, (struct linux_io_event *)a3, (struct linux_timespec *)a4);
+            break;
+        case LINUX_SYS_lookup_dcookie:
+            ret = handle_lookup_dcookie((uint64_t)a0, (char *)a1, (size_t)a2);
+            break;
+        case LINUX_SYS_umount2:
+            ret = handle_umount2((const char *)a0, (int)a1);
+            break;
+        case LINUX_SYS_mount:
+            ret = handle_mount((const char *)a0, (const char *)a1, (const char *)a2, (unsigned long)a3, (const void *)a4);
+            break;
+        case LINUX_SYS_pivot_root:
+            ret = handle_pivot_root((const char *)a0, (const char *)a1);
+            break;
+        case LINUX_SYS_nfsservctl:
+            ret = handle_nfsservctl((int)a0, (void *)a1, (void *)a2);
+            break;
+        case LINUX_SYS_quotactl:
+            ret = handle_quotactl((int)a0, (const char *)a1, (int)a2, (void *)a3);
+            break;
+        case LINUX_SYS_vmsplice:
+            ret = handle_vmsplice((int)a0, (const struct iovec *)a1, (unsigned long)a2, (unsigned int)a3);
+            break;
+        case LINUX_SYS_acct:
+            ret = handle_acct((const char *)a0);
+            break;
+        case LINUX_SYS_unshare:
+            ret = handle_unshare((int)a0);
+            break;
+        case LINUX_SYS_set_robust_list:
+            ret = handle_set_robust_list((struct linux_robust_list_head *)a0, (size_t)a1);
+            break;
+        case LINUX_SYS_get_robust_list:
+            ret = handle_get_robust_list((int)a0, (struct linux_robust_list_head **)a1, (size_t *)a2);
+            break;
+        case LINUX_SYS_kexec_load:
+            ret = handle_kexec_load((unsigned long)a0, (unsigned long)a1, (struct linux_kexec_segment *)a2, (unsigned long)a3);
+            break;
+        case LINUX_SYS_init_module:
+            ret = handle_init_module((void *)a0, (unsigned long)a1, (const char *)a2);
+            break;
+        case LINUX_SYS_delete_module:
+            ret = handle_delete_module((const char *)a0, (unsigned int)a1);
+            break;
+        case LINUX_SYS_syslog:
+            ret = handle_syslog((int)a0, (char *)a1, (int)a2);
+            break;
+        case LINUX_SYS_ptrace:
+            ret = handle_ptrace((long)a0, (pid_t)a1, (void *)a2, (void *)a3);
+            break;
+        case LINUX_SYS_restart_syscall:
+            ret = handle_restart_syscall();
+            break;
+        case LINUX_SYS_reboot:
+            ret = handle_reboot((int)a0, (int)a1, (int)a2, (void *)a3);
+            break;
+        case LINUX_SYS_add_key:
+            ret = handle_add_key((const char *)a0, (const char *)a1, (const void *)a2, (size_t)a3, (int32_t)a4);
+            break;
+        case LINUX_SYS_request_key:
+            ret = handle_request_key((const char *)a0, (const char *)a1, (const char *)a2, (int32_t)a3);
+            break;
+
         default:
             ltm_log_debug("Unhandled Linux syscall: %llu (%s)", (unsigned long long)num, linux_syscall_name((int)num));
             ret = -LINUX_ENOSYS;

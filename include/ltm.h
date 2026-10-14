@@ -453,6 +453,14 @@
 #define LINUX_EALREADY        114
 #define LINUX_EINPROGRESS     115
 #define LINUX_ESTALE          116
+#define LINUX_ENOKEY          126
+#define LINUX_EKEYEXPIRED     127
+#define LINUX_EKEYREVOKED     128
+#define LINUX_EKEYREJECTED    129
+
+/* Linux Reboot Magics */
+#define LINUX_REBOOT_MAGIC1   0xfee1dead
+#define LINUX_REBOOT_MAGIC2   672274793
 
 /* Linux Auxiliary Vector Types */
 #define LINUX_AT_NULL         0

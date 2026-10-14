@@ -617,5 +617,73 @@ int64_t handle_rt_tgsigqueueinfo(pid_t tgid, pid_t tid, int sig, struct linux_si
 int64_t handle_pidfd_send_signal(int pidfd, int sig, struct linux_siginfo *info, unsigned int flags);
 int64_t handle_pidfd_getfd(int pidfd, int targetfd, unsigned int flags);
 
+/* Wave 7: Linux AIO, System & Module Control, Robust Mutexes, Keys */
+typedef unsigned long linux_aio_context_t;
+
+struct linux_io_event {
+    uint64_t data;
+    uint64_t obj;
+    int64_t  res;
+    int64_t  res2;
+};
+
+struct linux_iocb {
+    uint64_t aio_data;
+    uint32_t aio_key;
+    uint32_t aio_reserved1;
+    uint16_t aio_lio_opcode;
+    int16_t  aio_reqprio;
+    int32_t  aio_fildes;
+    uint64_t aio_buf;
+    uint64_t aio_nbytes;
+    int64_t  aio_offset;
+    uint64_t aio_reserved2;
+    uint32_t aio_flags;
+    uint32_t aio_resfd;
+};
+
+struct linux_robust_list {
+    struct linux_robust_list *next;
+};
+
+struct linux_robust_list_head {
+    struct linux_robust_list list;
+    long futex_offset;
+    struct linux_robust_list *list_op_pending;
+};
+
+struct linux_kexec_segment {
+    const void *buf;
+    size_t bufsz;
+    const void *mem;
+    size_t memsz;
+};
+
+int64_t handle_io_setup(unsigned nr_events, linux_aio_context_t *ctx_idp);
+int64_t handle_io_destroy(linux_aio_context_t ctx_id);
+int64_t handle_io_submit(linux_aio_context_t ctx_id, long nr, struct linux_iocb **iocbpp);
+int64_t handle_io_cancel(linux_aio_context_t ctx_id, struct linux_iocb *iocb, struct linux_io_event *result);
+int64_t handle_io_getevents(linux_aio_context_t ctx_id, long min_nr, long nr, struct linux_io_event *events, struct linux_timespec *timeout);
+int64_t handle_lookup_dcookie(uint64_t cookie, char *buf, size_t len);
+int64_t handle_umount2(const char *target, int flags);
+int64_t handle_mount(const char *dev_name, const char *dir_name, const char *type, unsigned long flags, const void *data);
+int64_t handle_pivot_root(const char *new_root, const char *put_old);
+int64_t handle_nfsservctl(int cmd, void *argp, void *resp);
+int64_t handle_quotactl(int cmd, const char *special, int id, void *addr);
+int64_t handle_vmsplice(int fd, const struct iovec *iov, unsigned long nr_segs, unsigned int flags);
+int64_t handle_acct(const char *filename);
+int64_t handle_unshare(int flags);
+int64_t handle_set_robust_list(struct linux_robust_list_head *head, size_t len);
+int64_t handle_get_robust_list(int pid, struct linux_robust_list_head **head_ptr, size_t *len_ptr);
+int64_t handle_kexec_load(unsigned long entry, unsigned long nr_segments, struct linux_kexec_segment *segments, unsigned long flags);
+int64_t handle_init_module(void *module_image, unsigned long len, const char *param_values);
+int64_t handle_delete_module(const char *name_user, unsigned int flags);
+int64_t handle_syslog(int type, char *bufp, int len);
+int64_t handle_ptrace(long request, pid_t pid, void *addr, void *data);
+int64_t handle_restart_syscall(void);
+int64_t handle_reboot(int magic1, int magic2, int cmd, void *arg);
+int64_t handle_add_key(const char *type, const char *description, const void *payload, size_t plen, int32_t ringid);
+int64_t handle_request_key(const char *type, const char *description, const char *callout_info, int32_t destringid);
+
 #endif /* SYSCALLS_H */
 

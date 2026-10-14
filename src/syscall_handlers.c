@@ -5289,6 +5289,191 @@ int64_t handle_pidfd_getfd(int pidfd, int targetfd, unsigned int flags) {
     return -LINUX_ESRCH;
 }
 
+/* ========================================================================= */
+/* Wave 7: Linux AIO, System & Module Control, Robust Mutexes, Keyrings      */
+/* ========================================================================= */
+
+int64_t handle_io_setup(unsigned nr_events, linux_aio_context_t *ctx_idp) {
+    if (nr_events == 0) return -LINUX_EINVAL;
+    if (!ctx_idp) return -LINUX_EFAULT;
+    *ctx_idp = (linux_aio_context_t)(0x1000 + (nr_events & 0x7FFF));
+    return 0;
+}
+
+int64_t handle_io_destroy(linux_aio_context_t ctx_id) {
+    if (ctx_id == 0) return -LINUX_EINVAL;
+    return 0;
+}
+
+int64_t handle_io_submit(linux_aio_context_t ctx_id, long nr, struct linux_iocb **iocbpp) {
+    if (ctx_id == 0 || nr < 0) return -LINUX_EINVAL;
+    if (nr > 0 && !iocbpp) return -LINUX_EFAULT;
+    return nr;
+}
+
+int64_t handle_io_cancel(linux_aio_context_t ctx_id, struct linux_iocb *iocb, struct linux_io_event *result) {
+    if (ctx_id == 0 || !iocb || !result) return -LINUX_EINVAL;
+    return -LINUX_EAGAIN;
+}
+
+int64_t handle_io_getevents(linux_aio_context_t ctx_id, long min_nr, long nr, struct linux_io_event *events, struct linux_timespec *timeout) {
+    (void)timeout;
+    if (ctx_id == 0 || min_nr < 0 || nr < 0 || min_nr > nr) return -LINUX_EINVAL;
+    if (nr > 0 && !events) return -LINUX_EFAULT;
+    return 0;
+}
+
+int64_t handle_lookup_dcookie(uint64_t cookie, char *buf, size_t len) {
+    (void)cookie;
+    if (!buf) return -LINUX_EFAULT;
+    if (len == 0) return -LINUX_EINVAL;
+    return -LINUX_ENOSYS;
+}
+
+int64_t handle_umount2(const char *target, int flags) {
+    (void)flags;
+    if (!target) return -LINUX_EFAULT;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_mount(const char *dev_name, const char *dir_name, const char *type, unsigned long flags, const void *data) {
+    (void)dev_name; (void)type; (void)flags; (void)data;
+    if (!dir_name) return -LINUX_EFAULT;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_pivot_root(const char *new_root, const char *put_old) {
+    if (!new_root || !put_old) return -LINUX_EFAULT;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_nfsservctl(int cmd, void *argp, void *resp) {
+    (void)cmd; (void)argp; (void)resp;
+    return -LINUX_ENOSYS;
+}
+
+int64_t handle_quotactl(int cmd, const char *special, int id, void *addr) {
+    (void)id; (void)addr;
+    if (!special && cmd != 0x800003 /* Q_SYNC */) return -LINUX_EFAULT;
+    return -LINUX_ENOSYS;
+}
+
+int64_t handle_vmsplice(int fd, const struct iovec *iov, unsigned long nr_segs, unsigned int flags) {
+    (void)flags;
+    if (fd < 0) return -LINUX_EBADF;
+    if (!iov) return -LINUX_EFAULT;
+    if (nr_segs == 0) return -LINUX_EINVAL;
+    ssize_t total = writev(fd, iov, (int)nr_segs);
+    if (total < 0) return darwin_to_linux_errno(errno);
+    return total;
+}
+
+int64_t handle_acct(const char *filename) {
+    if (!filename) {
+        int r = acct(NULL);
+        if (r < 0) return darwin_to_linux_errno(errno);
+        return 0;
+    }
+    char host_path[1024];
+    int r = sandbox_resolve_path(AT_FDCWD, filename, host_path, sizeof(host_path), 0);
+    if (r < 0) return r;
+    int res = acct(host_path);
+    if (res < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_unshare(int flags) {
+    if (flags == 0) return 0;
+    if (flags & ~0x7e020000) return -LINUX_EINVAL;
+    return -LINUX_EPERM;
+}
+
+static __thread struct linux_robust_list_head *g_robust_head = NULL;
+static __thread size_t g_robust_len = 0;
+
+int64_t handle_set_robust_list(struct linux_robust_list_head *head, size_t len) {
+    if (len != sizeof(struct linux_robust_list_head)) return -LINUX_EINVAL;
+    g_robust_head = head;
+    g_robust_len = len;
+    return 0;
+}
+
+int64_t handle_get_robust_list(int pid, struct linux_robust_list_head **head_ptr, size_t *len_ptr) {
+    if (pid < 0) return -LINUX_ESRCH;
+    if (!head_ptr || !len_ptr) return -LINUX_EFAULT;
+    *head_ptr = g_robust_head;
+    *len_ptr = g_robust_len ? g_robust_len : sizeof(struct linux_robust_list_head);
+    return 0;
+}
+
+int64_t handle_kexec_load(unsigned long entry, unsigned long nr_segments, struct linux_kexec_segment *segments, unsigned long flags) {
+    (void)entry; (void)flags;
+    if (nr_segments > 16) return -LINUX_EINVAL;
+    if (nr_segments > 0 && !segments) return -LINUX_EFAULT;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_init_module(void *module_image, unsigned long len, const char *param_values) {
+    (void)len; (void)param_values;
+    if (!module_image) return -LINUX_EFAULT;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_delete_module(const char *name_user, unsigned int flags) {
+    (void)flags;
+    if (!name_user) return -LINUX_EFAULT;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_syslog(int type, char *bufp, int len) {
+    if (type < 1 || type > 10) return -LINUX_EINVAL;
+    static const char simulated_klog[] = "<6>[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x610f0000]\n<6>[    0.000000] Linux version LTM 2026.1A (aarch64)\n";
+    size_t klog_sz = sizeof(simulated_klog) - 1;
+    if (type == 9 || type == 10) return (int64_t)klog_sz;
+    if (type == 1 || type == 6 || type == 7) return 0;
+    if (type == 2 || type == 3 || type == 4) {
+        if (!bufp) return -LINUX_EFAULT;
+        if (len <= 0) return 0;
+        size_t n = (size_t)len < klog_sz ? (size_t)len : klog_sz;
+        memcpy(bufp, simulated_klog, n);
+        return (int64_t)n;
+    }
+    return 0;
+}
+
+int64_t handle_ptrace(long request, pid_t pid, void *addr, void *data) {
+    (void)addr; (void)data;
+    if (request == 0 /* PTRACE_TRACEME */) return 0;
+    if (pid < 0) return -LINUX_ESRCH;
+    if (request < 0 || request > 0x4209) return -LINUX_EIO;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_restart_syscall(void) {
+    return -LINUX_EINTR;
+}
+
+int64_t handle_reboot(int magic1, int magic2, int cmd, void *arg) {
+    (void)cmd; (void)arg;
+    if (magic1 != (int)LINUX_REBOOT_MAGIC1) return -LINUX_EINVAL;
+    if (magic2 != (int)LINUX_REBOOT_MAGIC2 && magic2 != 85072278 && magic2 != 369367448 && magic2 != 537993216) return -LINUX_EINVAL;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_add_key(const char *type, const char *description, const void *payload, size_t plen, int32_t ringid) {
+    (void)payload; (void)plen; (void)ringid;
+    if (!type || !description) return -LINUX_EFAULT;
+    if (strcmp(type, "user") != 0 && strcmp(type, "logon") != 0 && strcmp(type, "keyring") != 0) return -LINUX_EINVAL;
+    return 1001; /* Synthetic key serial number */
+}
+
+int64_t handle_request_key(const char *type, const char *description, const char *callout_info, int32_t destringid) {
+    (void)callout_info; (void)destringid;
+    if (!type || !description) return -LINUX_EFAULT;
+    return -LINUX_ENOKEY;
+}
+
+
 
 
 

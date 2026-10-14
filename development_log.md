@@ -2424,3 +2424,67 @@ Every newly implemented system call was authored with its own dedicated standalo
   Failed      : 0
   ALL 244 TESTS PASSED! Translation module validated with 100% accuracy.
   ```
+
+---
+
+## Sprint 16: Wave 7 Syscall Expansion — Linux AIO, System & Module Security Guards, Robust Mutexes, and Keyrings
+
+**Date**: 2026-10-14
+**Author**: Engineering Swarm (Lead Architect, Core Systems Coder, Diligent Tester, Helpful Planner, Systems Critic)
+
+### 1. Architectural Mission & Scope
+In Sprint 16, the swarm executed **Wave 7** of the Linux ARM64 system call roadmap, implementing and certifying 25 advanced system calls covering the Linux asynchronous I/O (AIO) engine, kernel module guards, process namespace and accounting controls, robust futex mutex lists, kernel printk logging, process tracing, system reboot safeguards, and cryptographic keyrings.
+
+Every newly implemented system call was authored with its own dedicated standalone unit test in `tests/syscalls/`, strictly following the **Strict 3-Way Mandate** (Case A: Standard Happy Path, Case B: Boundary / Edge Cases, Case C: Error / Errno Mapping).
+
+### 2. Syscalls Implemented & Architectural Translation
+1. **Linux Asynchronous I/O (AIO) Subsystem (5 Syscalls)**:
+   - `io_setup` (0): Allocates Linux AIO context tracking structure with maximum concurrent event capacity.
+   - `io_destroy` (1): Destroys Linux AIO context and releases allocated tracking resources.
+   - `io_submit` (2): Submits array of asynchronous I/O control blocks (`struct iocb`), validating parameters and pointers.
+   - `io_cancel` (3): Requests cancellation of in-flight asynchronous I/O request, returning `-EAGAIN` or completion state.
+   - `io_getevents` (4): Reads completed AIO events from queue with timeout and range validation.
+2. **Profiling & System Information (1 Syscall)**:
+   - `lookup_dcookie` (18): Look up path for cookie used by oprofile/perf, returning `-ENOSYS`.
+3. **Filesystem Mount & Containment Subsystem (3 Syscalls)**:
+   - `umount2` (39): Filesystem unmount protection strictly preventing host escapes and container dismounting (`-EPERM`).
+   - `mount` (40): Filesystem mount enforcement safeguarding host mounts (`-EPERM`).
+   - `pivot_root` (41): Root filesystem pivot protection preserving container root isolation (`-EPERM`).
+4. **Quota & Legacy Control (2 Syscalls)**:
+   - `nfsservctl` (42): Obsolete NFS control returning official Linux `-ENOSYS`.
+   - `quotactl` (60): Filesystem quota control delegating or returning safe status.
+5. **Zero-Copy Memory Pipe Splicing (1 Syscall)**:
+   - `vmsplice` (75): Splices user memory buffer pages directly into a pipe file descriptor using vectorized Darwin `writev()`.
+6. **Process Accounting & Execution Context (2 Syscalls)**:
+   - `acct` (89): Process accounting toggle via Darwin `acct()`.
+   - `unshare` (97): Disassociates process execution context and namespace flags.
+7. **Robust Futex Mutex Lists (2 Syscalls)**:
+   - `set_robust_list` (99): Registers per-thread robust futex mutex list head for glibc/musl robust mutex handling.
+   - `get_robust_list` (100): Retrieves registered robust list head pointer and 24-byte structure length.
+8. **Kernel Boot & Module Safeguards (3 Syscalls)**:
+   - `kexec_load` (104): Kernel image boot loader guard returning `-EPERM` in userspace container.
+   - `init_module` (105): Kernel module insertion guard returning `-EPERM` in userspace container.
+   - `delete_module` (106): Kernel module deletion guard returning `-EPERM` in userspace container.
+9. **Kernel Logging & Process Tracing (2 Syscalls)**:
+   - `syslog` (116): Kernel printk buffer access, simulating boot log banners and buffer sizing (`SYSLOG_ACTION_SIZE_BUFFER`).
+   - `ptrace` (117): Process tracing control, supporting `PTRACE_TRACEME` (0) for self-tracing debugging.
+10. **Syscall Restart & System Reboot (2 Syscalls)**:
+    - `restart_syscall` (128): Interrupted system call restart mechanism returning `-EINTR`.
+    - `reboot` (142): Verifies Linux reboot magic numbers (`0xfee1dead`, `672274793`, etc.) and enforces container shutdown safety (`-EPERM`).
+11. **Security Keyrings Subsystem (2 Syscalls)**:
+    - `add_key` (217): Cryptographic keyring key creation, validating type ("user", "keyring", "logon") and returning synthetic key serial.
+    - `request_key` (218): Keyring key lookup, returning `-ENOKEY` for missing keys.
+
+### 3. Verification & 100% Pass Rate
+- All 25 new standalone unit tests passed on their very first run with 100% compliance with the Strict 3-Way Mandate.
+- Executed the full automated test suite:
+  ```
+  ======================================================
+                     TEST SUITE SUMMARY                 
+  ======================================================
+  Total Tests : 269
+  Passed      : 269
+  Failed      : 0
+  ALL 269 TESTS PASSED! Translation module validated with 100% accuracy.
+  ```
+

@@ -273,6 +273,31 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_mlock2              284
 #define SYS_pidfd_send_signal   424
 #define SYS_pidfd_getfd         438
+#define SYS_io_setup            0
+#define SYS_io_destroy          1
+#define SYS_io_submit           2
+#define SYS_io_cancel           3
+#define SYS_io_getevents        4
+#define SYS_lookup_dcookie      18
+#define SYS_umount2             39
+#define SYS_mount               40
+#define SYS_pivot_root          41
+#define SYS_nfsservctl          42
+#define SYS_quotactl            60
+#define SYS_vmsplice            75
+#define SYS_acct                89
+#define SYS_unshare             97
+#define SYS_set_robust_list     99
+#define SYS_get_robust_list     100
+#define SYS_kexec_load          104
+#define SYS_init_module         105
+#define SYS_delete_module       106
+#define SYS_syslog              116
+#define SYS_ptrace              117
+#define SYS_restart_syscall     128
+#define SYS_reboot              142
+#define SYS_add_key             217
+#define SYS_request_key         218
 
 /* File open flags */
 #define AT_FDCWD        (-100)
@@ -343,6 +368,10 @@ typedef enum { false = 0, true = 1 } bool;
 #define ENOSYS          38
 #define ELOOP           40
 #define ENODATA         61
+#define ENOKEY          126
+#define EKEYEXPIRED     127
+#define EKEYREVOKED     128
+#define EKEYREJECTED    129
 
 /* Extended attributes flags */
 #define XATTR_CREATE    1
@@ -1913,6 +1942,125 @@ static inline int sys_pidfd_send_signal(int pidfd, int sig, void *info, unsigned
 static inline int sys_pidfd_getfd(int pidfd, int targetfd, unsigned int flags) {
     return (int)sys_syscall3(SYS_pidfd_getfd, pidfd, targetfd, flags);
 }
+
+/* Wave 7 Structures & Wrappers */
+typedef unsigned long aio_context_t;
+
+struct io_event {
+    uint64_t data;
+    uint64_t obj;
+    int64_t  res;
+    int64_t  res2;
+};
+
+struct iocb {
+    uint64_t aio_data;
+    uint32_t aio_key;
+    uint32_t aio_reserved1;
+    uint16_t aio_lio_opcode;
+    int16_t  aio_reqprio;
+    int32_t  aio_fildes;
+    uint64_t aio_buf;
+    uint64_t aio_nbytes;
+    int64_t  aio_offset;
+    uint64_t aio_reserved2;
+    uint32_t aio_flags;
+    uint32_t aio_resfd;
+};
+
+struct robust_list {
+    struct robust_list *next;
+};
+
+struct robust_list_head {
+    struct robust_list list;
+    long futex_offset;
+    struct robust_list *list_op_pending;
+};
+
+struct kexec_segment {
+    const void *buf;
+    size_t bufsz;
+    const void *mem;
+    size_t memsz;
+};
+
+static inline int sys_io_setup(unsigned nr_events, aio_context_t *ctx_idp) {
+    return (int)sys_syscall2(SYS_io_setup, nr_events, (long)ctx_idp);
+}
+static inline int sys_io_destroy(aio_context_t ctx_id) {
+    return (int)sys_syscall1(SYS_io_destroy, ctx_id);
+}
+static inline int sys_io_submit(aio_context_t ctx_id, long nr, struct iocb **iocbpp) {
+    return (int)sys_syscall3(SYS_io_submit, ctx_id, nr, (long)iocbpp);
+}
+static inline int sys_io_cancel(aio_context_t ctx_id, struct iocb *iocb, struct io_event *result) {
+    return (int)sys_syscall3(SYS_io_cancel, ctx_id, (long)iocb, (long)result);
+}
+static inline int sys_io_getevents(aio_context_t ctx_id, long min_nr, long nr, struct io_event *events, struct timespec *timeout) {
+    return (int)sys_syscall5(SYS_io_getevents, ctx_id, min_nr, nr, (long)events, (long)timeout);
+}
+static inline int sys_lookup_dcookie(uint64_t cookie, char *buf, size_t len) {
+    return (int)sys_syscall3(SYS_lookup_dcookie, cookie, (long)buf, len);
+}
+static inline int sys_umount2(const char *target, int flags) {
+    return (int)sys_syscall2(SYS_umount2, (long)target, flags);
+}
+static inline int sys_mount(const char *dev_name, const char *dir_name, const char *type, unsigned long flags, const void *data) {
+    return (int)sys_syscall5(SYS_mount, (long)dev_name, (long)dir_name, (long)type, flags, (long)data);
+}
+static inline int sys_pivot_root(const char *new_root, const char *put_old) {
+    return (int)sys_syscall2(SYS_pivot_root, (long)new_root, (long)put_old);
+}
+static inline int sys_nfsservctl(int cmd, void *argp, void *resp) {
+    return (int)sys_syscall3(SYS_nfsservctl, cmd, (long)argp, (long)resp);
+}
+static inline int sys_quotactl(int cmd, const char *special, int id, void *addr) {
+    return (int)sys_syscall4(SYS_quotactl, cmd, (long)special, id, (long)addr);
+}
+static inline int sys_vmsplice(int fd, const struct iovec *iov, unsigned long nr_segs, unsigned int flags) {
+    return (int)sys_syscall4(SYS_vmsplice, fd, (long)iov, nr_segs, flags);
+}
+static inline int sys_acct(const char *filename) {
+    return (int)sys_syscall1(SYS_acct, (long)filename);
+}
+static inline int sys_unshare(int flags) {
+    return (int)sys_syscall1(SYS_unshare, flags);
+}
+static inline int sys_set_robust_list(struct robust_list_head *head, size_t len) {
+    return (int)sys_syscall2(SYS_set_robust_list, (long)head, len);
+}
+static inline int sys_get_robust_list(int pid, struct robust_list_head **head_ptr, size_t *len_ptr) {
+    return (int)sys_syscall3(SYS_get_robust_list, pid, (long)head_ptr, (long)len_ptr);
+}
+static inline int sys_kexec_load(unsigned long entry, unsigned long nr_segments, struct kexec_segment *segments, unsigned long flags) {
+    return (int)sys_syscall4(SYS_kexec_load, entry, nr_segments, (long)segments, flags);
+}
+static inline int sys_init_module(void *module_image, unsigned long len, const char *param_values) {
+    return (int)sys_syscall3(SYS_init_module, (long)module_image, len, (long)param_values);
+}
+static inline int sys_delete_module(const char *name_user, unsigned int flags) {
+    return (int)sys_syscall2(SYS_delete_module, (long)name_user, flags);
+}
+static inline int sys_syslog(int type, char *bufp, int len) {
+    return (int)sys_syscall3(SYS_syslog, type, (long)bufp, len);
+}
+static inline int sys_ptrace(long request, pid_t pid, void *addr, void *data) {
+    return (int)sys_syscall4(SYS_ptrace, request, pid, (long)addr, (long)data);
+}
+static inline int sys_restart_syscall(void) {
+    return (int)sys_syscall0(SYS_restart_syscall);
+}
+static inline int sys_reboot(int magic1, int magic2, int cmd, void *arg) {
+    return (int)sys_syscall4(SYS_reboot, magic1, magic2, cmd, (long)arg);
+}
+static inline int sys_add_key(const char *type, const char *description, const void *payload, size_t plen, int32_t ringid) {
+    return (int)sys_syscall5(SYS_add_key, (long)type, (long)description, (long)payload, plen, ringid);
+}
+static inline int sys_request_key(const char *type, const char *description, const char *callout_info, int32_t destringid) {
+    return (int)sys_syscall4(SYS_request_key, (long)type, (long)description, (long)callout_info, destringid);
+}
+
 
 /* String / memory utilities */
 static inline size_t ltm_strlen(const char *s) {
