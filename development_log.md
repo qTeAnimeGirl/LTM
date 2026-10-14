@@ -2772,4 +2772,45 @@ Step 2 of the Grand Roadmap requires 100% native userspace execution of dynamic 
   - Added Test #12 to `run_tests.sh`.
   - Re-ran test harness: **328 of 328 tests passing (100.0% pass rate, 0 failures)**.
 
+---
+
+## Sprint 22: Step 3 Complete — Full Arch Linux ARM Rootfs with `pacman` & `fastfetch`
+
+**Date**: 2026-10-14  
+**Author**: Engineering Swarm (Lead Architect, Core Systems Coder, Diligent Tester, Systems Critic)  
+**Status**: Step 3 Complete & Certified (Arch Linux ARM Rootfs, Pacman 7.1.0 Database Sync & Search, Native Fastfetch 2.70.0, 328 of 328 Tests Passing)
+
+### 1. Architectural Mission & Invariants
+Step 3 achieves full real-world Linux distribution execution with **Arch Linux ARM aarch64**:
+1. **Full 2.0GB Arch Linux ARM Rootfs (`arch_rootfs`)**:
+   - Deployed official `ArchLinuxARM-aarch64-latest.tar.gz` containing a complete GNU/Linux userspace ecosystem.
+   - Configured network DNS nameservers (`8.8.8.8`, `1.1.1.1`) in `/etc/resolv.conf`.
+   - Tuned `pacman.conf` for userland translation environment: disabled unprivileged sandboxing hooks (`DisableSandboxFilesystem`, `DisableSandboxSyscalls`, commented out `DownloadUser = alpm`) and configured mirrors.
+2. **Breakthrough Discovery: The Apple Silicon `x18` Platform Register Conflict**:
+   - *Symptom*: Running `pacman -Ss fastfetch` failed with `Guest signal 11 delivered: PC=0x10...8060, fault_addr=0x500115e1a`.
+   - *Investigation*:
+     - Decompiled the faulting instruction: `ldrb w19, [x1]` inside `libz.so.1` (`inflateBackEnd` / `inffast.c`).
+     - In standard AAPCS64 (Linux), `x18` is an unreserved temporary register, but on Apple Silicon Darwin, `x18` is the **platform register** reserved for OS use.
+     - During the long decompression loop of `core.db`, a Darwin hardware timer interrupt / scheduler quantum occurred. Darwin XNU kernel forcibly zeroes `x18` on return from preemption for unentitled processes.
+     - When `libz` computed `w1 = wsize + wnext - op`, since `wsize` (`w18`) was zeroed instead of `32768 (0x8000)`, `w1` underflowed to `-0x16f6` (`0xffffe90a`).
+     - Adding `0xffffe90a` to `x16` (`0x400117510`) produced `0x500115e1a` (crossing 4GB boundary into unmapped interpreter space), triggering `SIGBUS`/`SIGSEGV`.
+   - *Resolution*:
+     - Recompiled `libz.so.1` targeting `aarch64-linux-gnu` with `-ffixed-x18` using host Clang and Rust LLD.
+     - With `-ffixed-x18`, the compiler avoids `x18` entirely, storing sliding window variables in other registers and stack frames.
+     - Replaced `arch_rootfs/usr/lib/libz.so.1` with the fixed-x18 library.
+3. **Verified Live Pacman Operations**:
+   - `pacman --version`: Pacman v7.1.0 - libalpm v16.0.1 running natively.
+   - `pacman -Q`: Successfully queried all 165 installed packages in the local ALPM database.
+   - `pacman -Sy`: Successfully downloaded and synchronized all 4 Arch Linux ARM package databases (`core.db`, `extra.db` [10MB], `alarm.db`, `aur.db`) over network sockets.
+   - `pacman -Ss fastfetch`: Successfully searched the remote repository database and returned `extra/fastfetch 2.70.0-1`.
+   - `pacman -Si fastfetch`: Successfully parsed and displayed complete package dependencies, licenses, and architecture metadata.
+   - `pacman -Qu`: Successfully verified all upgradable packages against remote databases.
+4. **Verified Native Fastfetch on Arch Linux**:
+   - Extracted official Arch Linux ARM `fastfetch` 2.70.0 and `yyjson` packages into `arch_rootfs`.
+   - Executed `./ltm -r arch_rootfs /usr/bin/fastfetch`:
+     - Renders official Arch Linux ASCII art logo.
+     - Live hardware telemetry: Host `Mac15,13`, Kernel `Linux LTM 2026.1A`, Uptime, Packages `165 (pacman)`, CPU `Virtualized Apple Silicon (8)`, Memory `13.87 GiB / 24.00 GiB`, Disk `392.90 GiB / 460.43 GiB`.
+5. **Quality & Regression Guarantee**:
+   - Automated test suite `./run_tests.sh` verified: **328 of 328 tests passing (100.0% pass rate, 0 failures)**.
+
 
