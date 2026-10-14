@@ -48,7 +48,7 @@ if [ -z "$LLD" ] || [ ! -x "$LLD" ]; then
 fi
 echo "[+] Using LLD: $LLD"
 
-CFLAGS="-target aarch64-linux-gnu -O2 -ffreestanding -nostdlib -ffixed-x18 -I$SCRIPT_DIR"
+CFLAGS="-target aarch64-linux-gnu -O2 -ffreestanding -nostdlib -ffixed-x18 -I$SCRIPT_DIR -I$INCLUDE_DIR"
 
 build_asm() {
     local src="$1"
@@ -65,8 +65,13 @@ build_asm() {
 build_c() {
     local src="$1"
     local name="$(basename "$src" .c)"
-    local obj="$BIN_DIR/$name.o"
-    local out="$BIN_DIR/$name"
+    local out_dir="$BIN_DIR"
+    if [[ "$src" == *"/syscalls/"* ]]; then
+        out_dir="$BIN_DIR/syscalls"
+        mkdir -p "$out_dir"
+    fi
+    local obj="$out_dir/$name.o"
+    local out="$out_dir/$name"
 
     echo "  -> Compiling & linking $name.c..."
     "$CLANG" $CFLAGS -c "$src" -o "$obj"
@@ -87,6 +92,15 @@ for c_file in "$SCRIPT_DIR"/*.c; do
         build_c "$c_file"
     fi
 done
+
+# Build Standalone Syscall tests (Sprint 10)
+if [ -d "$SCRIPT_DIR/syscalls" ]; then
+    for c_file in "$SCRIPT_DIR/syscalls"/*.c; do
+        if [ -f "$c_file" ]; then
+            build_c "$c_file"
+        fi
+    done
+fi
 
 echo "[+] Successfully built all Linux ARM64 test binaries into $BIN_DIR"
 ls -la "$BIN_DIR"

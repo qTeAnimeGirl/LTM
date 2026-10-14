@@ -26,12 +26,23 @@ typedef unsigned long uintptr_t;
 typedef enum { false = 0, true = 1 } bool;
 
 /* Linux ARM64 System Call Numbers */
+#define SYS_getcwd          17
+#define SYS_dup             23
+#define SYS_dup3            24
 #define SYS_flock           32
+#define SYS_mkdirat         34
+#define SYS_unlinkat        35
+#define SYS_symlinkat       36
+#define SYS_linkat          37
+#define SYS_renameat        38
 #define SYS_statfs          43
 #define SYS_fstatfs         44
 #define SYS_truncate        45
 #define SYS_ftruncate       46
 #define SYS_fallocate       47
+#define SYS_faccessat       48
+#define SYS_chdir           49
+#define SYS_fchdir          50
 #define SYS_chroot          51
 #define SYS_fchmod          52
 #define SYS_fchmodat        53
@@ -39,6 +50,7 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_fchown          55
 #define SYS_openat          56
 #define SYS_close           57
+#define SYS_pipe2           59
 #define SYS_getdents64      61
 #define SYS_lseek           62
 #define SYS_read            63
@@ -46,7 +58,9 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_pread64         67
 #define SYS_pwrite64        68
 #define SYS_signalfd4       74
+#define SYS_readlinkat      78
 #define SYS_newfstatat      79
+#define SYS_fstat           80
 #define SYS_sync            81
 #define SYS_fsync           82
 #define SYS_fdatasync       83
@@ -59,6 +73,9 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_sched_setaffinity 122
 #define SYS_sched_getaffinity 123
 #define SYS_sched_yield     124
+#define SYS_kill            129
+#define SYS_tkill           130
+#define SYS_tgkill          131
 #define SYS_times           153
 #define SYS_setpgid         154
 #define SYS_getpgid         155
@@ -73,6 +90,13 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_geteuid         175
 #define SYS_getgid          176
 #define SYS_getegid         177
+#define SYS_sysinfo         179
+#define SYS_socket          198
+#define SYS_socketpair      199
+#define SYS_bind            200
+#define SYS_listen          201
+#define SYS_accept          202
+#define SYS_connect         203
 #define SYS_readahead       213
 #define SYS_brk             214
 #define SYS_munmap          215
@@ -80,6 +104,8 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_madvise         233
 #define SYS_accept4         242
 #define SYS_syncfs          267
+#define SYS_renameat2       276
+#define SYS_getrandom       278
 #define SYS_memfd_create    279
 #define SYS_copy_file_range 285
 #define SYS_close_range     436
@@ -96,6 +122,10 @@ typedef enum { false = 0, true = 1 } bool;
 #define O_TRUNC         00001000
 #define O_APPEND        00002000
 #define O_DIRECTORY     00040000
+
+#define AT_SYMLINK_NOFOLLOW 0x100
+#define AT_REMOVEDIR        0x200
+#define AT_EMPTY_PATH       0x1000
 
 /* Seek flags */
 #define SEEK_SET        0
@@ -159,6 +189,11 @@ typedef enum { false = 0, true = 1 } bool;
 #define MFD_CLOEXEC         0x0001U
 #define MFD_ALLOW_SEALING   0x0002U
 
+/* Getrandom Flags */
+#define GRND_NONBLOCK       0x0001
+#define GRND_RANDOM         0x0002
+#define GRND_INSECURE       0x0004
+
 /* Close Range Flags */
 #define CLOSE_RANGE_UNSHARE (1U << 1)
 #define CLOSE_RANGE_CLOEXEC (1U << 2)
@@ -209,6 +244,84 @@ struct linux_itimerspec {
 #define RUSAGE_SELF     0
 #define RUSAGE_CHILDREN (-1)
 #define RUSAGE_THREAD   1
+
+/* Linux Stat 64 (128 bytes) */
+struct linux_stat {
+    uint64_t st_dev;
+    uint64_t st_ino;
+    uint32_t st_mode;
+    uint32_t st_nlink;
+    uint32_t st_uid;
+    uint32_t st_gid;
+    uint64_t st_rdev;
+    uint64_t __pad1;
+    int64_t  st_size;
+    int32_t  st_blksize;
+    int32_t  __pad2;
+    int64_t  st_blocks;
+    int64_t  st_atime_sec;
+    uint64_t st_atime_nsec;
+    int64_t  st_mtime_sec;
+    uint64_t st_mtime_nsec;
+    int64_t  st_ctime_sec;
+    uint64_t st_ctime_nsec;
+    int32_t  __pad3[2];
+};
+
+/* Linux signalfd_siginfo (128 bytes) */
+struct linux_signalfd_siginfo {
+    uint32_t ssi_signo;
+    int32_t  ssi_errno;
+    int32_t  ssi_code;
+    uint32_t ssi_pid;
+    uint32_t ssi_uid;
+    int32_t  ssi_fd;
+    uint32_t ssi_tid;
+    uint32_t ssi_band;
+    uint32_t ssi_overrun;
+    uint32_t ssi_trapno;
+    int32_t  ssi_status;
+    int32_t  ssi_int;
+    uint64_t ssi_ptr;
+    uint64_t ssi_utime;
+    uint64_t ssi_stime;
+    uint64_t ssi_addr;
+    uint16_t ssi_addr_lsb;
+    uint16_t __pad2;
+    int32_t  ssi_syscall;
+    uint64_t ssi_call_addr;
+    uint32_t ssi_arch;
+    uint8_t  __pad[28];
+};
+
+/* Linux sysinfo structure (112 bytes) */
+struct linux_sysinfo {
+    int64_t  uptime;
+    uint64_t loads[3];
+    uint64_t totalram;
+    uint64_t freeram;
+    uint64_t sharedram;
+    uint64_t bufferram;
+    uint64_t totalswap;
+    uint64_t freeswap;
+    uint16_t procs;
+    uint16_t pad;
+    uint32_t __pad;
+    uint64_t totalhigh;
+    uint64_t freehigh;
+    uint32_t mem_unit;
+    char     _f[20 - 2 * sizeof(uint64_t) - sizeof(uint32_t)];
+};
+
+/* Linux utsname structure (390 bytes) */
+struct linux_utsname {
+    char sysname[65];
+    char nodename[65];
+    char release[65];
+    char version[65];
+    char machine[65];
+    char domainname[65];
+};
 
 /* Directory entry 64 */
 struct linux_dirent64 {
@@ -569,6 +682,10 @@ static inline int sys_memfd_create(const char *name, unsigned int flags) {
     return (int)sys_syscall2(SYS_memfd_create, (long)name, flags);
 }
 
+static inline ssize_t sys_getrandom(void *buf, size_t buflen, unsigned int flags) {
+    return (ssize_t)sys_syscall3(SYS_getrandom, (long)buf, buflen, flags);
+}
+
 static inline ssize_t sys_copy_file_range(int fd_in, off_t *off_in, int fd_out, off_t *off_out, size_t len, unsigned int flags) {
     return (ssize_t)sys_syscall6(SYS_copy_file_range, fd_in, (long)off_in, fd_out, (long)off_out, len, flags);
 }
@@ -583,6 +700,134 @@ static inline int sys_openat2(int dirfd, const char *pathname, struct linux_open
 
 static inline int sys_faccessat2(int dirfd, const char *pathname, int mode, int flags) {
     return (int)sys_syscall4(SYS_faccessat2, dirfd, (long)pathname, mode, flags);
+}
+
+static inline int sys_getcwd(char *buf, size_t size) {
+    return (int)sys_syscall2(SYS_getcwd, (long)buf, size);
+}
+
+static inline int sys_dup(int oldfd) {
+    return (int)sys_syscall1(SYS_dup, oldfd);
+}
+
+static inline int sys_dup3(int oldfd, int newfd, int flags) {
+    return (int)sys_syscall3(SYS_dup3, oldfd, newfd, flags);
+}
+
+static inline int sys_mkdirat(int dirfd, const char *pathname, int mode) {
+    return (int)sys_syscall3(SYS_mkdirat, dirfd, (long)pathname, mode);
+}
+
+static inline int sys_unlinkat(int dirfd, const char *pathname, int flags) {
+    return (int)sys_syscall3(SYS_unlinkat, dirfd, (long)pathname, flags);
+}
+
+static inline int sys_symlinkat(const char *target, int newdirfd, const char *linkpath) {
+    return (int)sys_syscall3(SYS_symlinkat, (long)target, newdirfd, (long)linkpath);
+}
+
+static inline int sys_linkat(int olddirfd, const char *oldpath, int newdirfd, const char *linkpath, int flags) {
+    return (int)sys_syscall5(SYS_linkat, olddirfd, (long)oldpath, newdirfd, (long)linkpath, flags);
+}
+
+static inline int sys_renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath) {
+    return (int)sys_syscall4(SYS_renameat, olddirfd, (long)oldpath, newdirfd, (long)newpath);
+}
+
+static inline int sys_renameat2(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, unsigned int flags) {
+    return (int)sys_syscall5(SYS_renameat2, olddirfd, (long)oldpath, newdirfd, (long)newpath, flags);
+}
+
+static inline int sys_faccessat(int dirfd, const char *pathname, int mode, int flags) {
+    return (int)sys_syscall4(SYS_faccessat, dirfd, (long)pathname, mode, flags);
+}
+
+static inline int sys_chdir(const char *path) {
+    return (int)sys_syscall1(SYS_chdir, (long)path);
+}
+
+static inline int sys_fchdir(int fd) {
+    return (int)sys_syscall1(SYS_fchdir, fd);
+}
+
+static inline int sys_pipe2(int pipefd[2], int flags) {
+    return (int)sys_syscall2(SYS_pipe2, (long)pipefd, flags);
+}
+
+static inline int sys_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) {
+    return (int)sys_syscall4(SYS_readlinkat, dirfd, (long)pathname, (long)buf, bufsiz);
+}
+
+static inline int sys_fstat(int fd, struct linux_stat *statbuf) {
+    return (int)sys_syscall2(SYS_fstat, fd, (long)statbuf);
+}
+
+static inline int sys_newfstatat(int dirfd, const char *pathname, struct linux_stat *statbuf, int flags) {
+    return (int)sys_syscall4(SYS_newfstatat, dirfd, (long)pathname, (long)statbuf, flags);
+}
+
+static inline int sys_kill(int pid, int sig) {
+    return (int)sys_syscall2(SYS_kill, pid, sig);
+}
+
+static inline int sys_tkill(int tid, int sig) {
+    return (int)sys_syscall2(SYS_tkill, tid, sig);
+}
+
+static inline int sys_tgkill(int tgid, int tid, int sig) {
+    return (int)sys_syscall3(SYS_tgkill, tgid, tid, sig);
+}
+
+static inline int sys_uname(struct linux_utsname *buf) {
+    return (int)sys_syscall1(SYS_uname, (long)buf);
+}
+
+static inline int sys_sysinfo(struct linux_sysinfo *info) {
+    return (int)sys_syscall1(SYS_sysinfo, (long)info);
+}
+
+static inline int sys_getppid(void) {
+    return (int)sys_syscall0(SYS_getppid);
+}
+
+static inline int sys_getuid(void) {
+    return (int)sys_syscall0(SYS_getuid);
+}
+
+static inline int sys_geteuid(void) {
+    return (int)sys_syscall0(SYS_geteuid);
+}
+
+static inline int sys_getgid(void) {
+    return (int)sys_syscall0(SYS_getgid);
+}
+
+static inline int sys_getegid(void) {
+    return (int)sys_syscall0(SYS_getegid);
+}
+
+static inline int sys_socket(int domain, int type, int protocol) {
+    return (int)sys_syscall3(SYS_socket, domain, type, protocol);
+}
+
+static inline int sys_socketpair(int domain, int type, int protocol, int sv[2]) {
+    return (int)sys_syscall4(SYS_socketpair, domain, type, protocol, (long)sv);
+}
+
+static inline int sys_bind(int fd, const void *addr, unsigned int len) {
+    return (int)sys_syscall3(SYS_bind, fd, (long)addr, len);
+}
+
+static inline int sys_listen(int fd, int backlog) {
+    return (int)sys_syscall2(SYS_listen, fd, backlog);
+}
+
+static inline int sys_accept(int fd, void *addr, void *len) {
+    return (int)sys_syscall3(SYS_accept, fd, (long)addr, (long)len);
+}
+
+static inline int sys_connect(int fd, const void *addr, unsigned int len) {
+    return (int)sys_syscall3(SYS_connect, fd, (long)addr, len);
 }
 
 /* String / memory utilities */

@@ -40,12 +40,14 @@ static bool g_sock_is_icmp[MAX_TRACKED_FDS];
 
 /* File I/O */
 int64_t handle_read(int fd, void *buf, size_t count) {
+    if (count > 0 && !buf) return -LINUX_EFAULT;
     ssize_t ret = read(fd, buf, count);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return ret;
 }
 
 int64_t handle_write(int fd, const void *buf, size_t count) {
+    if (count > 0 && !buf) return -LINUX_EFAULT;
     ssize_t ret = write(fd, buf, count);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return ret;
@@ -222,6 +224,7 @@ int64_t handle_fstat(int fd, struct linux_stat *statbuf) {
 
 int64_t handle_newfstatat(int dirfd, const char *pathname, struct linux_stat *statbuf, int flags) {
     if (!statbuf) return -LINUX_EFAULT;
+    if (!pathname) return -LINUX_EFAULT;
 
     if (pathname && sandbox_is_virtual_path(pathname)) {
         struct stat st;
@@ -1493,7 +1496,8 @@ int64_t handle_prlimit64(int pid, int resource, const struct linux_rlimit64 *new
 }
 
 int64_t handle_getrandom(void *buf, size_t buflen, unsigned int flags) {
-    (void)flags;
+    if (flags & ~(1U | 2U | 4U)) return -LINUX_EINVAL;
+    if (buflen == 0) return 0;
     if (!buf) return -LINUX_EFAULT;
     arc4random_buf(buf, buflen);
     return buflen;

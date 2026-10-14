@@ -1822,3 +1822,307 @@ ALL TESTS PASSED! Translation module validated.
 ```
 
 
+
+---
+
+## [Sprint 10: Per-Syscall Test Architecture & Audit Specification]
+
+**Date**: 2026-10-14  
+**Author**: The Critical Analyst & Security Auditor  
+**Scope**: Per-Syscall Test Architecture for `tests/syscalls/`, Hermetic Isolation Standards, and Standalone Test Generation Mandate  
+**Status**: Architecture Audited, Audit Criteria Formulated & Swarm Directives Issued  
+
+---
+
+### 1. Executive Summary & Purpose
+
+In accordance with strict architectural priorities established for **LTM (Linux To Mac)**:
+1. **Compatibility**: Bit-accurate semantics and standard Linux ARM64 errno mapping.
+2. **No Hardcoded Telemetry**: Dynamic host metrics streamed directly via `sysctl` and Mach VM counters.
+3. **Optimization**: Direct, near-native binary execution without emulation overhead.
+4. **Security**: Absolute sandbox containment, zero host breakouts, and in-jail virtualized chroot.
+5. **Clear Documentation**: Rigorous cross-team hand-offs and exhaustive architectural logging.
+6. **Separate, Isolated Test Binaries**: **Every system call must have its own dedicated, freestanding test binary.**
+
+While monolithic test suites (`test_wave1_syscalls.c` and `test_wave2_syscalls.c`) demonstrated the functional viability of Waves 1 and 2, bundling 14 to 18 syscalls into single binaries introduces **architectural fragility, state pollution, and cascading failure risks**:
+- If an unhandled edge case in Syscall 47 triggers a crash, subsequent tests for Syscalls 51 through 439 are never executed.
+- Shared temporary files (e.g. `wave2_test_file.tmp`), inherited umasks, and dirty process states leak between test cases.
+- Automated CI and regression harnesses cannot report per-syscall pass/fail metrics.
+
+Sprint 10 mandates the complete decomposition and generation of **standalone, self-contained test binaries in `tests/syscalls/`**, with each syscall verified by an independent ELF executable executing the **3-Way Mandate** in complete isolation.
+
+---
+
+### 2. Architecture of the Per-Syscall Test Framework
+
+```
+tests/
+├── include/
+│   └── ltm_test.h                     # Freestanding test primitives (ARM64 assembly svc #0)
+├── syscalls/                           # Dedicated directory for per-syscall test sources
+│   ├── test_sys_32_flock.c
+│   ├── test_sys_43_statfs.c
+│   ├── test_sys_44_fstatfs.c
+│   ├── test_sys_45_truncate.c
+│   ├── test_sys_46_ftruncate.c
+│   ├── test_sys_47_fallocate.c
+│   ├── test_sys_51_chroot.c
+│   ├── test_sys_52_fchmod.c
+│   ├── test_sys_53_fchmodat.c
+│   ├── ...
+│   └── test_sys_439_faccessat2.c
+├── bin/                               # Compiled static Linux ARM64 test binaries
+│   ├── test_sys_32_flock
+│   ├── test_sys_43_statfs
+│   └── ...
+├── build_tests.sh                     # Automated compiler iterating over tests/syscalls/*.c
+└── run_tests.sh                       # Test harness discovering and running all standalone tests
+```
+
+#### Compilation & Linker Requirements
+Each standalone test binary must be compiled with strict freestanding flags:
+```bash
+clang -target aarch64-linux-gnu -O2 -ffreestanding -nostdlib -ffixed-x18 -Itests -c <src.c> -o <obj.o>
+rust-lld -flavor gnu -static --image-base=0x400000000 <obj.o> -o <bin>
+```
+- **Darwin 4GB PAGEZERO Bypass**: Linked with `--image-base=0x400000000`.
+- **Register x18 Preservation**: `-ffixed-x18` reserves the platform register across signal/trap transitions.
+- **Freestanding Entry**: No host libc; execution starts at `_start` in `ltm_test.h`, setting up stack frame and jumping to `ltm_test_main()`.
+
+---
+
+### 3. The 4 Non-Negotiable Audit Criteria
+
+Every standalone test binary generated in `tests/syscalls/` must satisfy the following four audit criteria:
+
+#### Criterion 1: 100% Freestanding & Self-Contained Execution
+- Must strictly `#include "tests/include/ltm_test.h"` and implement:
+  ```c
+  int ltm_test_main(int argc, char **argv, char **envp)
+  ```
+- Must use direct ARM64 syscall wrappers (`sys_openat`, `sys_read`, `sys_write`, `sys_close`, `sys_syscall*`) without external libraries.
+- Must execute deterministically and exit cleanly with code 0 on success (`TEST_PASS()`) or non-zero on failure (`TEST_FAIL()`).
+
+#### Criterion 2: Hermetic Isolation & Self-Cleanup
+- **Unique File Paths**: Any test creating temporary files or directories MUST use an isolated, unique path following the template:
+  `tmp_sys_<syscall_num>.tmp` or `tmp_sys_<syscall_num>_<action>.tmp` (e.g., `tmp_sys_47.tmp`, `tmp_sys_285_dst.tmp`).
+- **Guaranteed Cleanup**: Every test MUST clean up all temporary files, directories, and artifacts before exiting:
+  ```c
+  sys_unlinkat(AT_FDCWD, "tmp_sys_<num>.tmp", 0);
+  ```
+  Cleanup must execute in both success and error branches (or at initialization before test execution).
+- **No Cross-Test Dependencies**: A test binary must NEVER depend on state, files, or descriptors created by any other test binary.
+- **State Hygiene**: Any mutations to process state (e.g. umask, signal masks, process groups) must be restored before `ltm_test_main()` completes.
+
+#### Criterion 3: Strict 3-Way Mandate Coverage (Every Syscall)
+Every single test binary MUST execute and assert all three verification cases:
+1. **Case A: Standard Happy Path**:
+   - Nominal inputs and parameters.
+   - Successful return code (`ret >= 0`).
+   - Side effects explicitly verified (e.g. file size updated, memory readable, status flags set).
+2. **Case B: Boundary / Edge Cases**:
+   - Zero-length buffers, zero counts (`count = 0`), zero lengths.
+   - `NULL` where explicitly permitted by POSIX/Linux (e.g., `times(NULL)`, `readv(fd, NULL, 0)`, `accept(fd, NULL, NULL)`).
+   - Maximum limits, offset boundary conditions, sequential or repeated invocations.
+   - Disarming or no-op states (e.g. timer value 0, `fchown(fd, -1, -1)`).
+3. **Case C: Error Handling & Errno Mapping**:
+   - Closed or invalid file descriptors (`fd = -1`, `fd = 9999`) -> `-LINUX_EBADF` (-9).
+   - Bad memory pointers / `NULL` paths -> `-LINUX_EFAULT` (-14).
+   - Invalid flags, negative lengths, invalid modes -> `-LINUX_EINVAL` (-22).
+   - Nonexistent files or paths -> `-LINUX_ENOENT` (-2).
+   - Sandbox escape / containment violations -> `-LINUX_EACCES` (-13).
+   - Component not a directory -> `-LINUX_ENOTDIR` (-20) or directory where file required -> `-LINUX_EISDIR` (-21).
+
+#### Criterion 4: Zero Resource Leaks
+- Every file descriptor opened (`openat`, `pipe2`, `socket`, `timerfd_create`, `memfd_create`) must be explicitly closed with `sys_close` before exit.
+- Any mapped pages (`sys_mmap`) should be unmapped (`sys_munmap`) or verified clean.
+- Any forked or cloned child processes must be awaited via `sys_wait4` to prevent zombies.
+
+---
+
+### 4. Decomposition Catalog: 40 Standalone Syscall Test Binaries
+
+The test suite must be decomposed into the following 40 standalone test sources under `tests/syscalls/`:
+
+| Binary Name | Syscall # | Syscall Name | Primary Verifications |
+|:---|:---:|:---|:---|
+| `test_sys_32_flock` | 32 | `flock` | Shared/exclusive locks, unlock, non-blocking contention (`-EAGAIN`), invalid flags (`-EINVAL`). |
+| `test_sys_43_statfs` | 43 | `statfs` | Rootfs magic (`0xEF53`), block counts, NULL buffer (`-EFAULT`), missing path (`-ENOENT`). |
+| `test_sys_44_fstatfs` | 44 | `fstatfs` | Open descriptor stats, NULL buffer (`-EFAULT`), invalid fd (`-EBADF`). |
+| `test_sys_45_truncate` | 45 | `truncate` | Length truncation, zero length, negative length (`-EINVAL`), missing path (`-ENOENT`). |
+| `test_sys_46_ftruncate` | 46 | `ftruncate` | Descriptor truncation, sparse expansion, negative length (`-EINVAL`), invalid fd (`-EBADF`). |
+| `test_sys_47_fallocate` | 47 | `fallocate` | Space allocation, `FALLOC_FL_KEEP_SIZE`, negative offset (`-EINVAL`), pipe (`-ESPIPE`), invalid fd (`-EBADF`). |
+| `test_sys_51_chroot` | 51 | `chroot` | In-jail rootfs switching, no-op `chroot("/")`, nonexistent path (`-ENOENT`), escape attempt (`-EACCES`). |
+| `test_sys_52_fchmod` | 52 | `fchmod` | Mode changes (0644, 0755), invalid fd (`-EBADF`). |
+| `test_sys_53_fchmodat` | 53 | `fchmodat` | Path mode change, `AT_SYMLINK_NOFOLLOW`, NULL path (`-EFAULT`), missing path (`-ENOENT`). |
+| `test_sys_54_fchownat` | 54 | `fchownat` | Container ownership preservation, -1/-1 no-op, NULL path (`-EFAULT`), missing path (`-ENOENT`). |
+| `test_sys_55_fchown` | 55 | `fchown` | Descriptor ownership, invalid fd (`-EBADF`). |
+| `test_sys_67_pread64` | 67 | `pread64` | Positional read, zero count, file offset invariance, negative offset (`-EINVAL`), invalid fd (`-EBADF`). |
+| `test_sys_68_pwrite64` | 68 | `pwrite64` | Positional write, zero count, file offset invariance, negative offset (`-EINVAL`), invalid fd (`-EBADF`). |
+| `test_sys_74_signalfd4` | 74 | `signalfd4` | Signal mask delivery via pipe, nonblocking read, mask update (`ufd >= 0`), invalid sizemask (`-EINVAL`). |
+| `test_sys_81_sync` | 81 | `sync` | Infallible filesystem sync (returns 0), rapid sequential calls. |
+| `test_sys_82_fsync` | 82 | `fsync` | Flush dirty file buffers, invalid fd (`-EBADF`), pipe (`-EINVAL`/`-EBADF`). |
+| `test_sys_83_fdatasync` | 83 | `fdatasync` | Data sync, invalid fd (`-EBADF`). |
+| `test_sys_85_timerfd_create` | 85 | `timerfd_create` | Clock selection (`CLOCK_MONOTONIC`), `TFD_CLOEXEC`, `TFD_NONBLOCK`, invalid clock (`-EINVAL`). |
+| `test_sys_86_timerfd_settime` | 86 | `timerfd_settime` | Arming one-shot/periodic timer, poll wakeup, disarm (0 value), NULL pointer (`-EFAULT`). |
+| `test_sys_87_timerfd_gettime` | 87 | `timerfd_gettime` | Query remaining interval on active/disarmed timer, NULL pointer (`-EFAULT`), invalid fd (`-EBADF`). |
+| `test_sys_115_clock_nanosleep` | 115 | `clock_nanosleep` | Relative sleep, `TIMER_ABSTIME` with past timestamp (immediate 0), NULL request (`-EFAULT`), invalid nsec (`-EINVAL`). |
+| `test_sys_122_sched_setaffinity` | 122 | `sched_setaffinity` | CPU affinity mask setting, zero length (`-EINVAL`), NULL mask (`-EFAULT`), invalid PID (`-ESRCH`). |
+| `test_sys_123_sched_getaffinity` | 123 | `sched_getaffinity` | Query CPU bitmask (`hw.ncpu`), zero length (`-EINVAL`), NULL mask (`-EFAULT`). |
+| `test_sys_124_sched_yield` | 124 | `sched_yield` | Execution yield (returns 0), tight loop stability, register preservation. |
+| `test_sys_153_times` | 153 | `times` | Ticks retrieval, `times(NULL)` (POSIX permitted), invalid pointer (`-EFAULT`). |
+| `test_sys_154_setpgid` | 154 | `setpgid` | Process group setting, invalid PID (`-EINVAL`/`-ESRCH`). |
+| `test_sys_155_getpgid` | 155 | `getpgid` | Query PGID for 0 and current PID, negative PID (`-EINVAL`/`-ESRCH`). |
+| `test_sys_156_getsid` | 156 | `getsid` | Query session ID for 0 and current PID, invalid PID (`-ESRCH`). |
+| `test_sys_157_setsid` | 157 | `setsid` | New session creation, calling when already group leader (`-EPERM`). |
+| `test_sys_165_getrusage` | 165 | `getrusage` | Resource usage (`RUSAGE_SELF`, `RUSAGE_CHILDREN`), KB maxrss scaling, invalid who (`-EINVAL`), NULL pointer (`-EFAULT`). |
+| `test_sys_166_umask` | 166 | `umask` | Query and set creation mask, upper bits masking, boundary 0777. |
+| `test_sys_213_readahead` | 213 | `readahead` | Readahead on valid file, zero count, invalid fd (`-EBADF`). |
+| `test_sys_233_madvise` | 233 | `madvise` | `MADV_NORMAL`, `MADV_DONTNEED`, Apple Silicon 16KB page alignment enforcement, unaligned addr (`-EINVAL`). |
+| `test_sys_242_accept4` | 242 | `accept4` | Connection accept with `SOCK_CLOEXEC | SOCK_NONBLOCK`, anonymous accept, invalid flags (`-EINVAL`), NULL len (`-EFAULT`). |
+| `test_sys_267_syncfs` | 267 | `syncfs` | Flush filesystem containing fd, invalid fd (`-EBADF`). |
+| `test_sys_279_memfd_create` | 279 | `memfd_create` | Anonymous memory fd, write/read, cloexec, immediate host unlinking, NULL name (`-EFAULT`), long name (`-EINVAL`). |
+| `test_sys_285_copy_file_range` | 285 | `copy_file_range` | In-kernel buffer copy, NULL offsets (advancing position), append-only fd (`-EBADF`), pipe (`-EINVAL`), flags != 0 (`-EINVAL`). |
+| `test_sys_436_close_range` | 436 | `close_range` | Range closure, `CLOSE_RANGE_CLOEXEC`, internal translation handle preservation, `first > last` (`-EINVAL`). |
+| `test_sys_437_openat2` | 437 | `openat2` | `struct linux_open_how` resolution, `RESOLVE_BENEATH` escape block (`-EXDEV`), `RESOLVE_NO_SYMLINKS` (`-ELOOP`), NULL how (`-EFAULT`). |
+| `test_sys_439_faccessat2` | 439 | `faccessat2` | Access check, `AT_SYMLINK_NOFOLLOW`, `AT_EACCESS`, invalid mode (`-EINVAL`), NULL path (`-EFAULT`), missing path (`-ENOENT`). |
+
+---
+
+### 5. Swarm Directives & Supervision Plan
+
+#### 🛠️ Directives for The Brilliant Coder (Core Systems)
+1. **Update Build System (`tests/build_tests.sh`)**:
+   - Ensure the compiler scans both `tests/*.c` and `tests/syscalls/*.c`, linking all objects into `tests/bin/`.
+2. **Decompose Wave 1 and Wave 2 Test Code**:
+   - Break down `test_wave1_syscalls.c` and `test_wave2_syscalls.c` into individual `tests/syscalls/test_sys_*.c` sources.
+   - Enforce clean file paths (`tmp_sys_<num>.tmp`) and automatic cleanup in every source file.
+3. **Audit Implementation Conformance**:
+   - Confirm that any edge cases uncovered during decomposition (e.g. `times(NULL)`, `madvise` 16KB boundary checks) are handled cleanly in `src/syscall_handlers.c`.
+
+#### 🧪 Directives for The Diligent Tester (QA & Validation)
+1. **Update Test Runner (`run_tests.sh`)**:
+   - Add dynamic discovery or sequential execution of all `tests/bin/test_sys_*` binaries.
+   - Ensure individual test timing and clear ANSI pass/fail status per system call.
+2. **Execute Full Suite Validation**:
+   - Compile all 40+ standalone test binaries.
+   - Verify that 100% of standalone tests pass with zero regressions across core tests (`test_hello`, `test_args_env`, `test_file_io`, `test_memory`, `test_sandbox_defense`, `test_ps_procfs`, `busybox ps`).
+3. **Verify Self-Cleanup**:
+   - Confirm that no temporary files (`tmp_sys_*.tmp`) linger in the workspace following test execution.
+
+---
+
+## [Sprint 10: Granular Per-Syscall Testing Framework & Swarm Quality Mandate]
+
+**Date**: 2026-10-14  
+**Author**: Engineering Swarm (Lead Architect, Helpful Planner)  
+**Status**: Architecture Finalized & Handed Off to Coder, Tester, and Critic  
+
+### 1. User Directive & Core Philosophy
+The user has issued a direct, overarching quality and testing mandate:
+> *"Yes, make good testing, because at the end of the day, the speed of development isn't as critical, as compatibility and safety. Our priorities should be:
+> 1. Compatibility
+> 2. No hardcoded data, usage of REAL mac hardware
+> 3. Optimization, everything should be tested, optimized and run with near native speed
+> 4. Security, MacOS filesystem should be safe and not being affected
+> 5. Good documentation of progress and clear communication between all of workers in your team of developers"
+> 
+> "Why don't you make separate test for each syscall?"*
+
+---
+
+### 2. Architectural Specification: Granular Per-Syscall Testing Framework
+
+#### 2.1 Directory Structure & Organization
+All syscall tests are transitioned from monolithic test suites into isolated, standalone Linux ARM64 ELF executables:
+- **Test Source Directory**: `tests/syscalls/`
+- **Source Naming Convention**: `tests/syscalls/test_sys_<number>_<name>.c`
+  (e.g., `test_sys_032_flock.c`, `test_sys_047_fallocate.c`, `test_sys_056_openat.c`, `test_sys_064_write.c`, `test_sys_279_memfd_create.c`).
+- **Binary Output Directory**: `tests/bin/syscalls/`
+- **Compiled Output**: `tests/bin/syscalls/test_sys_<number>_<name>` (standalone ELF static binary, linked at `--image-base=0x400000000` with `-ffreestanding -nostdlib -ffixed-x18`).
+
+#### 2.2 Uniform Test Contract: The 3-Way Mandate
+Every single `test_sys_<number>_<name>.c` file must strictly implement:
+1. **Case A (Happy Path)**:
+   - Typical parameters with valid file descriptors / buffers.
+   - Assert return code >= 0.
+   - Assert expected functional side-effects (file size changed, bytes read/written, attributes updated).
+2. **Case B (Boundary / Edge Cases)**:
+   - Zero lengths, zero offsets, edge flag combinations.
+   - Extreme values, sparse file expansion, default PIDs (e.g. pid 0).
+3. **Case C (Error / Errno Translation)**:
+   - Bad file descriptors (`-EBADF`).
+   - Bad / NULL pointers (`-EFAULT`).
+   - Invalid flags or parameters (`-EINVAL`).
+   - Non-existent paths (`-ENOENT`).
+   - Host breakout rejection (`-EACCES`/`-EPERM`).
+
+#### 2.3 Compilation & Harness Integration
+1. **`tests/build_tests.sh`**:
+   - Discovers all `tests/syscalls/*.c` sources.
+   - Compiles each into `tests/bin/syscalls/test_sys_<number>_<name>`.
+   - Supports building individual tests (e.g. `./tests/build_tests.sh sys_047_fallocate`).
+2. **`run_tests.sh`**:
+   - Executes core integration tests (`test_hello`, `test_args_env`, `test_file_io`, `test_memory`, `test_procfs`, `test_sandbox_defense`, `test_ps_procfs`, `busybox ps`).
+   - Iterates through every standalone binary in `tests/bin/syscalls/`.
+   - Renders a 1-to-1 ANSI-colored verification table displaying each syscall's number, name, pass/fail status, and execution duration.
+
+---
+
+### 3. Swarm Hand-Off Directives
+
+#### 🛠️ For The Brilliant Coder (Core Systems)
+- Support per-syscall testing by maintaining strict adherence to the 5 Golden Architectural Invariants.
+- Review error code returns to ensure 100% compliance with Linux ABI specifications (e.g. `EBADF`, `EFAULT`, `EINVAL`, `ENOENT`, `EOPNOTSUPP`).
+
+#### 🧪 For The Diligent Tester (QA & Validation)
+1. **Directory Setup**: Create `tests/syscalls/` and `tests/bin/syscalls/`.
+2. **Author Test Programs**: Implement `test_sys_<number>_<name>.c` for each system call, strictly adhering to the 3-Way Mandate (Case A: Happy, Case B: Boundary, Case C: Errno).
+3. **Build Tooling**: Update `tests/build_tests.sh` to compile all `tests/syscalls/*.c` into `tests/bin/syscalls/`.
+4. **Harness Tooling**: Update `run_tests.sh` to execute every per-syscall test and print the detailed 1-to-1 syscall summary table.
+
+#### 🔍 For The Critical Analyst (Security & Code Review)
+- Verify that every individual test file contains genuine Case A, Case B, and Case C assertions.
+- Verify that tests do not write outside the sandbox directory or leave dangling temporary files.
+- Audit execution times to ensure near-native Apple Silicon execution speeds.
+
+
+---
+
+### [Sprint 10 Execution Results & Validation Report]
+- **Timestamp**: 2026-10-14 19:15 UTC
+- **Author**: The Helpful Planner & Engineering Swarm
+- **Status**: ALL TESTS PASSED (65 of 65) - 100% Pass Rate
+- **Achievements & Metrics**:
+  1. *Granular Per-Syscall Testing Framework Fully Operational*:
+     - 55 standalone Linux ARM64 ELF executables compiled into `tests/bin/syscalls/`.
+     - Strict 3-Way Mandate enforced on all tests: Case A (Happy Path), Case B (Boundary/Edge Cases), Case C (Error & Errno Translation).
+     - Freestanding ABI isolation: Zero libc dependencies, pure direct `svc #0` assembly invocations.
+  2. *Defects Uncovered & Resolved in Kernel Translation Layer*:
+     - **`handle_getrandom`**: Added strict flag validation against unknown flag bits returning `-LINUX_EINVAL` (`flags & ~(1U | 2U | 4U)`), and handled zero-length buffer requests returning 0.
+     - **`handle_read` & `handle_write`**: Implemented NULL buffer validation when `count > 0`, safely returning `-LINUX_EFAULT`.
+     - **`handle_newfstatat`**: Added NULL pathname validation returning `-LINUX_EFAULT`.
+     - **`test_sys_222_mmap`**: Fixed raw syscall negative return code assertion vs libc wrapper `MAP_FAILED`.
+  3. *Zero Sandbox Breakouts & Pure Register Restoration*:
+     - Penetration defenses verified: All host traversal attacks strictly confined to sandboxed storage.
+     - Real Apple Silicon hardware telemetry maintained: `/proc/cpuinfo` and `/proc/meminfo` querying host `sysctl` without hardcoded synthetic data.
+  4. *Automated Test Suite Summary*:
+     ```
+     ======================================================
+                        TEST SUITE SUMMARY                 
+     ======================================================
+     Total Tests : 65
+     Passed      : 65
+     Failed      : 0
+     ALL TESTS PASSED! Translation module validated.
+     ```
+
+---
+
+## [Sprint 11 Proposal: Full Granular Coverage for Core I/O, IPC, and Socket Syscalls]
+- **Target**: Expand granular per-syscall test suite from 55 to all 134 implemented Linux system calls.
+- **Batches**:
+  - *Batch 1 (Filesystem & Path Navigation)*: `sys_017_getcwd`, `sys_023_dup`, `sys_024_dup3`, `sys_025_fcntl`, `sys_034_mkdirat`, `sys_035_unlinkat`, `sys_036_symlinkat`, `sys_037_linkat`, `sys_038_renameat`, `sys_048_faccessat`, `sys_049_chdir`, `sys_050_fchdir`, `sys_059_pipe2`, `sys_061_getdents64`, `sys_065_readv`, `sys_066_writev`, `sys_078_readlinkat`, `sys_080_fstat`, `sys_088_utimensat`, `sys_276_renameat2`.
+  - *Batch 2 (Process, Credentials, & Signals)*: `sys_096_set_tid_address`, `sys_129_kill`, `sys_130_tkill`, `sys_131_tgkill`, `sys_132_sigaltstack`, `sys_134_rt_sigaction`, `sys_135_rt_sigprocmask`, `sys_143_setregid`, `sys_144_setgid`, `sys_145_setreuid`, `sys_146_setuid`, `sys_147_setresuid`, `sys_148_getresuid`, `sys_149_setresgid`, `sys_150_getresgid`, `sys_158_getgroups`, `sys_159_setgroups`, `sys_173_getppid`, `sys_175_geteuid`, `sys_177_getegid`, `sys_178_gettid`, `sys_179_sysinfo`, `sys_260_wait4`, `sys_261_prlimit64`.
+  - *Batch 3 (Networking & Sockets)*: `sys_198_socket`, `sys_199_socketpair`, `sys_200_bind`, `sys_201_listen`, `sys_202_accept`, `sys_203_connect`, `sys_204_getsockname`, `sys_205_getpeername`, `sys_206_sendto`, `sys_207_recvfrom`, `sys_208_setsockopt`, `sys_209_getsockopt`, `sys_210_shutdown`, `sys_211_sendmsg`, `sys_212_recvmsg`.
+  - *Batch 4 (Events, Timers, & Advanced)*: `sys_020_epoll_create1`, `sys_021_epoll_ctl`, `sys_022_epoll_pwait`, `sys_029_ioctl`, `sys_072_pselect6`, `sys_073_ppoll`, `sys_098_futex`, `sys_101_nanosleep`, `sys_102_getitimer`, `sys_103_setitimer`, `sys_113_clock_gettime`, `sys_169_gettimeofday`, `sys_226_mprotect`.

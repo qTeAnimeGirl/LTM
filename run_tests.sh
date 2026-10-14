@@ -177,8 +177,18 @@ fi
 # Run Wave 2 syscall test suite as Test #10
 run_single_test "test_wave2_syscalls" "All Wave 2 syscalls verified across all 3 Mandate cases!"
 
+# Run standalone syscall test binaries (Sprint 10)
+if [ -d "$BIN_DIR/syscalls" ]; then
+    for sys_bin in "$BIN_DIR/syscalls"/test_sys_*; do
+        if [ -x "$sys_bin" ]; then
+            bin_name="syscalls/$(basename "$sys_bin")"
+            run_single_test "$bin_name" "passed!"
+        fi
+    done
+fi
+
 # Clean up any sandbox temporary files created during testing
-rm -f "$SCRIPT_DIR/ltm_io_test_file.tmp" "$SCRIPT_DIR/sandbox_test.txt" "$SCRIPT_DIR/wave1_test_file.tmp" "$SCRIPT_DIR/wave2_test_file.tmp" "$SCRIPT_DIR/wave2_copy_file.tmp"
+rm -f "$SCRIPT_DIR/ltm_io_test_file.tmp" "$SCRIPT_DIR/sandbox_test.txt" "$SCRIPT_DIR/wave1_test_file.tmp" "$SCRIPT_DIR/wave2_test_file.tmp" "$SCRIPT_DIR/wave2_copy_file.tmp" "$SCRIPT_DIR"/tmp_sys_*.tmp
 
 # Summary
 echo -e "\n${C_BOLD}${C_BLUE}======================================================${C_RESET}"
