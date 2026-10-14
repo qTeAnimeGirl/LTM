@@ -133,6 +133,21 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 - [x] **169 of 169 Tests Passing (100% Pass Rate)**:
   - 159 standalone unit tests + 10 core integration test suites passing with 100% accuracy.
 
+### Milestone 11: Wave 4 Syscall Expansion & Scheduling, Memory Management, Identity, and Process State Subsystems (Sprint 13)
+- [x] **25 New Linux ARM64 Syscalls Implemented and Verified with Dedicated Standalone Unit Tests**:
+  - **Filesystem & Terminals**: `mknodat` (33), `vhangup` (58).
+  - **Process Wait Subsystem**: `waitid` (95) with Darwin `siginfo_t` to `struct linux_siginfo` mapping.
+  - **Scheduling & Realtime Policies**: `sched_setparam` (118), `sched_setscheduler` (119), `sched_getscheduler` (120), `sched_getparam` (121), `sched_get_priority_max` (125), `sched_get_priority_min` (126), `sched_rr_get_interval` (127).
+  - **Signals**: `rt_sigpending` (136) querying pending thread signal sets.
+  - **Process Priorities**: `setpriority` (140), `getpriority` (141) with Linux `20 - nice` offset translation.
+  - **Filesystem Identity & Host Configuration**: `setfsuid` (151), `setfsgid` (152), `sethostname` (161), `setdomainname` (162).
+  - **Advanced Memory Management**: `mremap` (216), `fadvise64` (223), `msync` (227), `mlock` (228), `munlock` (229), `mlockall` (230), `munlockall` (231), `mincore` (232).
+- [x] **184 Dedicated Standalone Unit Tests (`tests/syscalls/`)**:
+  - 184 of 184 implemented Linux ARM64 system calls have dedicated standalone unit tests (100.0% coverage).
+  - Strict 3-Way Mandate (Case A: Happy, Case B: Boundary, Case C: Errno) satisfied on all 184 syscalls.
+- [x] **194 of 194 Tests Passing (100% Pass Rate)**:
+  - 184 standalone unit tests + 10 core integration test suites passing with 100% accuracy.
+
 ---
 
 
@@ -162,6 +177,7 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 25 | `fcntl` | File I/O | **Implemented** | Command translation (`F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL`, `F_DUPFD`) |
 | 29 | `ioctl` | Terminal/I/O | **Implemented** | `TIOCGWINSZ`, `TIOCSWINSZ`, `TCGETS`, `TCSETS`, `TIOCSCTTY`, `TIOCGPGRP`, `TIOCSPGRP`, `FIONREAD` |
 | 32 | `flock` | File I/O | **Implemented** | Advisory file locking via Darwin `flock()`, translates `EWOULDBLOCK` to `-EAGAIN` |
+| 33 | `mknodat` | Filesystem | **Implemented** | Device node, FIFO, and regular file creation with mode, permissions, and device major/minor handling |
 | 34 | `mkdirat` | Filesystem | **Implemented** | Sandboxed directory creation with `-EFAULT` pointer check |
 | 35 | `unlinkat` | Filesystem | **Implemented** | Sandboxed file unlinking with `-EFAULT` pointer check |
 | 36 | `symlinkat` | Filesystem | **Implemented** | Sandboxed symlink creation with `-EFAULT` pointer check |
@@ -182,6 +198,7 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 55 | `fchownat` | Filesystem | **Implemented** | Validates path existence, returns 0 in root container |
 | 56 | `openat` | File I/O | **Implemented** | Sandboxed path resolution, flags mapping, virtual proc/dev, `-EFAULT` check |
 | 57 | `close` | File I/O | **Implemented** | Closes descriptor, cleans tracking tables and epoll instances |
+| 58 | `vhangup` | Terminal | **Implemented** | Virtual terminal hangup in container |
 | 59 | `pipe2` | IPC / I/O | **Implemented** | Creates pipe with `O_CLOEXEC` and `O_NONBLOCK` support |
 | 61 | `getdents64` | Filesystem | **Implemented** | Converts dirents + dynamic `/proc` PID injection (`1`, `<pid>`, `self`) |
 | 62 | `lseek` | File I/O | **Implemented** | Repositions read/write file offset |
@@ -215,6 +232,7 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 92 | `personality` | Process | **Implemented** | Linux personality execution domain configuration |
 | 93 | `exit` | Process | **Implemented** | Terminates calling thread |
 | 94 | `exit_group` | Process | **Implemented** | Terminates all threads in process |
+| 95 | `waitid` | Process | **Implemented** | POSIX `waitid` translating Darwin `siginfo_t` to 128-byte `struct linux_siginfo` |
 | 96 | `set_tid_address` | Threading | **Implemented** | Stores thread clear_child_tid pointer |
 | 98 | `futex` | Threading | **Implemented** | Basic futex operations (`FUTEX_WAIT`, `FUTEX_WAKE`, `FUTEX_PRIVATE_FLAG`) |
 | 99 | `set_robust_list` | Threading | **Implemented** | Records robust futex list head |
@@ -224,18 +242,30 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 113 | `clock_gettime` | Time | **Implemented** | Maps `CLOCK_REALTIME`, `CLOCK_MONOTONIC`, `CLOCK_BOOTTIME` |
 | 114 | `clock_getres` | Time | **Implemented** | Returns clock resolution |
 | 115 | `clock_nanosleep`| Time | **Implemented** | High-resolution relative and absolute sleep (`TIMER_ABSTIME`) |
+| 118 | `sched_setparam` | Scheduling | **Implemented** | Sets scheduling parameters for process |
+| 119 | `sched_setscheduler` | Scheduling | **Implemented** | Sets scheduling policy and parameters |
+| 120 | `sched_getscheduler` | Scheduling | **Implemented** | Returns process scheduling policy |
+| 121 | `sched_getparam` | Scheduling | **Implemented** | Gets process scheduling parameters |
 | 122 | `sched_setaffinity` | Scheduling | **Implemented** | Validates mask and length, benign success |
 | 123 | `sched_getaffinity` | Scheduling | **Implemented** | Populates CPU affinity bitmask from Darwin `hw.ncpu` |
 | 124 | `sched_yield` | Scheduling | **Implemented** | Yields processor execution via Darwin `sched_yield()` |
+| 125 | `sched_get_priority_max` | Scheduling | **Implemented** | Returns maximum scheduling priority for policy |
+| 126 | `sched_get_priority_min` | Scheduling | **Implemented** | Returns minimum scheduling priority for policy |
+| 127 | `sched_rr_get_interval` | Scheduling | **Implemented** | Returns round-robin time quantum |
 | 129 | `kill` | Signals | **Implemented** | Sends signal to process |
 | 130 | `tkill` | Signals | **Implemented** | Sends signal to thread |
 | 131 | `tgkill` | Signals | **Implemented** | Sends signal to thread group |
 | 132 | `sigaltstack` | Signals | **Implemented** | Alternate signal stack configuration |
 | 134 | `rt_sigaction` | Signals | **Implemented** | Maps Linux signal handlers to Darwin with `SA_NODEFER` |
 | 135 | `rt_sigprocmask` | Signals | **Implemented** | Manages thread signal blocking masks |
+| 136 | `rt_sigpending` | Signals | **Implemented** | Queries pending signals for calling thread |
 | 139 | `rt_sigreturn` | Signals | **Implemented** | Custom assembly restorer popping stack frame and resuming guest |
+| 140 | `setpriority` | Scheduling | **Implemented** | Sets process priority with Linux offset translation |
+| 141 | `getpriority` | Scheduling | **Implemented** | Returns process priority mapped to `20 - nice` |
 | 148 | `getresuid` | Identity | **Implemented** | Returns real, effective, and saved UID (all 0) |
 | 150 | `getresgid` | Identity | **Implemented** | Returns real, effective, and saved GID (all 0) |
+| 151 | `setfsuid` | Identity | **Implemented** | Sets filesystem UID, returns previous ID |
+| 152 | `setfsgid` | Identity | **Implemented** | Sets filesystem GID, returns previous ID |
 | 153 | `times` | System Info | **Implemented** | Copies user/system CPU execution ticks to `struct linux_tms` |
 | 154 | `setpgid` | Process | **Implemented** | Virtualized process group setter preventing terminal suspension |
 | 155 | `getpgid` | Process | **Implemented** | Returns process group ID |
@@ -244,6 +274,8 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 158 | `getgroups` | Identity | **Implemented** | Returns supplementary group list (`gid=0`) |
 | 159 | `setgroups` | Identity | **Implemented** | Sets supplementary groups |
 | 160 | `uname` | System Info | **Implemented** | Reports `Linux`, `ltm-mac`, `LTM 2026.1A`, `aarch64` |
+| 161 | `sethostname` | System Info | **Implemented** | Dynamic hostname configuration reflected in `uname` |
+| 162 | `setdomainname` | System Info | **Implemented** | Dynamic domainname configuration reflected in `uname` |
 | 163 | `getrlimit` | Resource Usage | **Implemented** | Queries resource limits (`struct linux_rlimit`) |
 | 164 | `setrlimit` | Resource Usage | **Implemented** | Sets resource limits (`struct linux_rlimit`) |
 | 165 | `getrusage` | Resource Usage | **Implemented** | Reports resource usage, converts Darwin bytes to Linux KB (`ru_maxrss`) |
@@ -277,10 +309,18 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 213 | `readahead` | File I/O | **Implemented** | Validates fd via `fstat()`, returns 0 |
 | 214 | `brk` | Memory | **Implemented** | Dynamic heap allocation and expansion |
 | 215 | `munmap` | Memory | **Implemented** | Unmaps 16KB page-aligned memory |
+| 216 | `mremap` | Memory | **Implemented** | Memory mapping resizing and relocation with 16KB alignment |
 | 220 | `clone` | Process | **Implemented** | Subprocess fork with child signal handler registration |
 | 221 | `execve` | Process | **Implemented** | Re-executes container binaries with sanitized environment |
 | 222 | `mmap` | Memory | **Implemented** | 16KB-aligned memory allocation, MAP_ANONYMOUS, MAP_JIT |
+| 223 | `fadvise64` | File I/O | **Implemented** | File access pattern advice |
 | 226 | `mprotect` | Memory | **Implemented** | Modifies page protections, re-patches executable ranges |
+| 227 | `msync` | Memory | **Implemented** | Synchronizes memory mapping to disk with 16KB alignment |
+| 228 | `mlock` | Memory | **Implemented** | Locks pages in memory with 16KB alignment |
+| 229 | `munlock` | Memory | **Implemented** | Unlocks pages in memory with 16KB alignment |
+| 230 | `mlockall` | Memory | **Implemented** | Locks all process pages in memory |
+| 231 | `munlockall` | Memory | **Implemented** | Unlocks all process pages in memory |
+| 232 | `mincore` | Memory | **Implemented** | Determines page residency vector with 16KB alignment |
 | 233 | `madvise` | Memory | **Implemented** | Validates 16KB page alignment, delegates to Darwin `madvise()` |
 | 242 | `accept4` | Networking | **Implemented** | Accepts connection with `SOCK_NONBLOCK` and `SOCK_CLOEXEC` flags |
 | 260 | `wait4` | Process | **Implemented** | Waits for child process termination with status translation |

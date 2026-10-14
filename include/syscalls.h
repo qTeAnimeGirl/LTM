@@ -139,6 +139,28 @@ struct linux_rlimit {
     uint64_t rlim_max;
 };
 
+/* Linux 128-byte siginfo */
+struct linux_siginfo {
+    int32_t si_signo;
+    int32_t si_errno;
+    int32_t si_code;
+    int32_t __pad0;
+    union {
+        struct {
+            int32_t _pid;
+            uint32_t _uid;
+            int32_t _status;
+            int32_t __pad1;
+        } _sigchld;
+        uint8_t _pad[112];
+    } _sifields;
+};
+
+/* Linux sched_param */
+struct linux_sched_param {
+    int32_t sched_priority;
+};
+
 /* Linux winsize */
 struct linux_winsize {
     uint16_t ws_row;
@@ -396,6 +418,33 @@ int64_t handle_getrlimit(int resource, struct linux_rlimit *rlim);
 int64_t handle_setrlimit(int resource, const struct linux_rlimit *rlim);
 int64_t handle_prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5);
 int64_t handle_getcpu(unsigned *cpu, unsigned *node, void *tcache);
+
+/* Wave 4 Syscalls */
+int64_t handle_mknodat(int dirfd, const char *pathname, mode_t mode, dev_t dev);
+int64_t handle_vhangup(void);
+int64_t handle_waitid(int which, id_t id, struct linux_siginfo *infop, int options, void *ru);
+int64_t handle_sched_setparam(pid_t pid, const struct linux_sched_param *param);
+int64_t handle_sched_getparam(pid_t pid, struct linux_sched_param *param);
+int64_t handle_sched_setscheduler(pid_t pid, int policy, const struct linux_sched_param *param);
+int64_t handle_sched_getscheduler(pid_t pid);
+int64_t handle_sched_get_priority_max(int policy);
+int64_t handle_sched_get_priority_min(int policy);
+int64_t handle_sched_rr_get_interval(pid_t pid, struct linux_timespec *tp);
+int64_t handle_rt_sigpending(void *set, size_t sigsetsize);
+int64_t handle_setpriority(int which, int who, int prio);
+int64_t handle_getpriority(int which, int who);
+int64_t handle_setfsuid(uid_t fsuid);
+int64_t handle_setfsgid(gid_t fsgid);
+int64_t handle_sethostname(const char *name, size_t len);
+int64_t handle_setdomainname(const char *name, size_t len);
+int64_t handle_mremap(unsigned long old_address, unsigned long old_size, unsigned long new_size, unsigned long flags, unsigned long new_address);
+int64_t handle_fadvise64(int fd, off_t offset, off_t len, int advice);
+int64_t handle_msync(unsigned long start, size_t len, int flags);
+int64_t handle_mlock(unsigned long addr, size_t len);
+int64_t handle_munlock(unsigned long addr, size_t len);
+int64_t handle_mlockall(int flags);
+int64_t handle_munlockall(void);
+int64_t handle_mincore(unsigned long start, size_t len, unsigned char *vec);
 
 #endif /* SYSCALLS_H */
 

@@ -43,6 +43,7 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_dup             23
 #define SYS_dup3            24
 #define SYS_flock           32
+#define SYS_mknodat         33
 #define SYS_mkdirat         34
 #define SYS_unlinkat        35
 #define SYS_symlinkat       36
@@ -63,6 +64,7 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_fchown          55
 #define SYS_openat          56
 #define SYS_close           57
+#define SYS_vhangup         58
 #define SYS_pipe2           59
 #define SYS_getdents64      61
 #define SYS_lseek           62
@@ -89,20 +91,35 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_personality     92
 #define SYS_exit            93
 #define SYS_exit_group      94
+#define SYS_waitid          95
 #define SYS_clock_getres    114
 #define SYS_clock_nanosleep 115
+#define SYS_sched_setparam  118
+#define SYS_sched_setscheduler 119
+#define SYS_sched_getscheduler 120
+#define SYS_sched_getparam  121
 #define SYS_sched_setaffinity 122
 #define SYS_sched_getaffinity 123
 #define SYS_sched_yield     124
+#define SYS_sched_get_priority_max 125
+#define SYS_sched_get_priority_min 126
+#define SYS_sched_rr_get_interval 127
 #define SYS_kill            129
 #define SYS_tkill           130
 #define SYS_tgkill          131
+#define SYS_rt_sigpending   136
+#define SYS_setpriority     140
+#define SYS_getpriority     141
+#define SYS_setfsuid        151
+#define SYS_setfsgid        152
 #define SYS_times           153
 #define SYS_setpgid         154
 #define SYS_getpgid         155
 #define SYS_getsid          156
 #define SYS_setsid          157
 #define SYS_uname           160
+#define SYS_sethostname     161
+#define SYS_setdomainname   162
 #define SYS_getrlimit       163
 #define SYS_setrlimit       164
 #define SYS_getrusage       165
@@ -125,7 +142,15 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_readahead       213
 #define SYS_brk             214
 #define SYS_munmap          215
+#define SYS_mremap          216
 #define SYS_mmap            222
+#define SYS_fadvise64       223
+#define SYS_msync           227
+#define SYS_mlock           228
+#define SYS_munlock         229
+#define SYS_mlockall        230
+#define SYS_munlockall      231
+#define SYS_mincore         232
 #define SYS_madvise         233
 #define SYS_accept4         242
 #define SYS_syncfs          267
@@ -559,6 +584,28 @@ struct linux_rusage {
 struct linux_rlimit {
     uint64_t rlim_cur;
     uint64_t rlim_max;
+};
+
+/* Linux 128-byte siginfo */
+struct linux_siginfo {
+    int32_t si_signo;
+    int32_t si_errno;
+    int32_t si_code;
+    int32_t __pad0;
+    union {
+        struct {
+            int32_t _pid;
+            uint32_t _uid;
+            int32_t _status;
+            int32_t __pad1;
+        } _sigchld;
+        uint8_t _pad[112];
+    } _sifields;
+};
+
+/* Linux sched_param */
+struct linux_sched_param {
+    int32_t sched_priority;
 };
 
 /* Linux Auxiliary Vector Types */
@@ -1353,6 +1400,107 @@ static inline int sys_prctl(int option, unsigned long arg2, unsigned long arg3, 
 
 static inline int sys_getcpu(unsigned *cpu, unsigned *node, void *tcache) {
     return (int)sys_syscall3(SYS_getcpu, (long)cpu, (long)node, (long)tcache);
+}
+
+/* Wave 4 System Call Wrappers */
+static inline int sys_mknodat(int dirfd, const char *pathname, int mode, unsigned long dev) {
+    return (int)sys_syscall4(SYS_mknodat, dirfd, (long)pathname, mode, dev);
+}
+
+static inline int sys_vhangup(void) {
+    return (int)sys_syscall0(SYS_vhangup);
+}
+
+static inline int sys_waitid(int which, int id, struct linux_siginfo *infop, int options, void *ru) {
+    return (int)sys_syscall5(SYS_waitid, which, id, (long)infop, options, (long)ru);
+}
+
+static inline int sys_sched_setparam(int pid, const struct linux_sched_param *param) {
+    return (int)sys_syscall2(SYS_sched_setparam, pid, (long)param);
+}
+
+static inline int sys_sched_getparam(int pid, struct linux_sched_param *param) {
+    return (int)sys_syscall2(SYS_sched_getparam, pid, (long)param);
+}
+
+static inline int sys_sched_setscheduler(int pid, int policy, const struct linux_sched_param *param) {
+    return (int)sys_syscall3(SYS_sched_setscheduler, pid, policy, (long)param);
+}
+
+static inline int sys_sched_getscheduler(int pid) {
+    return (int)sys_syscall1(SYS_sched_getscheduler, pid);
+}
+
+static inline int sys_sched_get_priority_max(int policy) {
+    return (int)sys_syscall1(SYS_sched_get_priority_max, policy);
+}
+
+static inline int sys_sched_get_priority_min(int policy) {
+    return (int)sys_syscall1(SYS_sched_get_priority_min, policy);
+}
+
+static inline int sys_sched_rr_get_interval(int pid, struct linux_timespec *tp) {
+    return (int)sys_syscall2(SYS_sched_rr_get_interval, pid, (long)tp);
+}
+
+static inline int sys_rt_sigpending(void *set, size_t sigsetsize) {
+    return (int)sys_syscall2(SYS_rt_sigpending, (long)set, sigsetsize);
+}
+
+static inline int sys_setpriority(int which, int who, int prio) {
+    return (int)sys_syscall3(SYS_setpriority, which, who, prio);
+}
+
+static inline int sys_getpriority(int which, int who) {
+    return (int)sys_syscall2(SYS_getpriority, which, who);
+}
+
+static inline int sys_setfsuid(int fsuid) {
+    return (int)sys_syscall1(SYS_setfsuid, fsuid);
+}
+
+static inline int sys_setfsgid(int fsgid) {
+    return (int)sys_syscall1(SYS_setfsgid, fsgid);
+}
+
+static inline int sys_sethostname(const char *name, size_t len) {
+    return (int)sys_syscall2(SYS_sethostname, (long)name, len);
+}
+
+static inline int sys_setdomainname(const char *name, size_t len) {
+    return (int)sys_syscall2(SYS_setdomainname, (long)name, len);
+}
+
+static inline void *sys_mremap(void *old_address, size_t old_size, size_t new_size, int flags, void *new_address) {
+    return (void *)sys_syscall5(SYS_mremap, (long)old_address, old_size, new_size, flags, (long)new_address);
+}
+
+static inline int sys_fadvise64(int fd, off_t offset, off_t len, int advice) {
+    return (int)sys_syscall4(SYS_fadvise64, fd, offset, len, advice);
+}
+
+static inline int sys_msync(void *start, size_t len, int flags) {
+    return (int)sys_syscall3(SYS_msync, (long)start, len, flags);
+}
+
+static inline int sys_mlock(const void *addr, size_t len) {
+    return (int)sys_syscall2(SYS_mlock, (long)addr, len);
+}
+
+static inline int sys_munlock(const void *addr, size_t len) {
+    return (int)sys_syscall2(SYS_munlock, (long)addr, len);
+}
+
+static inline int sys_mlockall(int flags) {
+    return (int)sys_syscall1(SYS_mlockall, flags);
+}
+
+static inline int sys_munlockall(void) {
+    return (int)sys_syscall0(SYS_munlockall);
+}
+
+static inline int sys_mincore(void *start, size_t len, unsigned char *vec) {
+    return (int)sys_syscall3(SYS_mincore, (long)start, len, (long)vec);
 }
 
 /* String / memory utilities */

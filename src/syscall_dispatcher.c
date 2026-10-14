@@ -1115,6 +1115,83 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
             ret = handle_getcpu((unsigned *)a0, (unsigned *)a1, (void *)a2);
             break;
 
+        /* Wave 4 Syscalls */
+        case LINUX_SYS_mknodat:
+            ret = handle_mknodat((int)a0, (const char *)a1, (mode_t)a2, (dev_t)a3);
+            break;
+        case LINUX_SYS_vhangup:
+            ret = handle_vhangup();
+            break;
+        case LINUX_SYS_waitid:
+            ret = handle_waitid((int)a0, (id_t)a1, (struct linux_siginfo *)a2, (int)a3, (void *)a4);
+            break;
+        case LINUX_SYS_sched_setparam:
+            ret = handle_sched_setparam((pid_t)a0, (const struct linux_sched_param *)a1);
+            break;
+        case LINUX_SYS_sched_getparam:
+            ret = handle_sched_getparam((pid_t)a0, (struct linux_sched_param *)a1);
+            break;
+        case LINUX_SYS_sched_setscheduler:
+            ret = handle_sched_setscheduler((pid_t)a0, (int)a1, (const struct linux_sched_param *)a2);
+            break;
+        case LINUX_SYS_sched_getscheduler:
+            ret = handle_sched_getscheduler((pid_t)a0);
+            break;
+        case LINUX_SYS_sched_get_priority_max:
+            ret = handle_sched_get_priority_max((int)a0);
+            break;
+        case LINUX_SYS_sched_get_priority_min:
+            ret = handle_sched_get_priority_min((int)a0);
+            break;
+        case LINUX_SYS_sched_rr_get_interval:
+            ret = handle_sched_rr_get_interval((pid_t)a0, (struct linux_timespec *)a1);
+            break;
+        case LINUX_SYS_rt_sigpending:
+            ret = handle_rt_sigpending((void *)a0, (size_t)a1);
+            break;
+        case LINUX_SYS_setpriority:
+            ret = handle_setpriority((int)a0, (int)a1, (int)a2);
+            break;
+        case LINUX_SYS_getpriority:
+            ret = handle_getpriority((int)a0, (int)a1);
+            break;
+        case LINUX_SYS_setfsuid:
+            ret = handle_setfsuid((uid_t)a0);
+            break;
+        case LINUX_SYS_setfsgid:
+            ret = handle_setfsgid((gid_t)a0);
+            break;
+        case LINUX_SYS_sethostname:
+            ret = handle_sethostname((const char *)a0, (size_t)a1);
+            break;
+        case LINUX_SYS_setdomainname:
+            ret = handle_setdomainname((const char *)a0, (size_t)a1);
+            break;
+        case LINUX_SYS_mremap:
+            ret = handle_mremap((unsigned long)a0, (unsigned long)a1, (unsigned long)a2, (unsigned long)a3, (unsigned long)a4);
+            break;
+        case LINUX_SYS_fadvise64:
+            ret = handle_fadvise64((int)a0, (off_t)a1, (off_t)a2, (int)a3);
+            break;
+        case LINUX_SYS_msync:
+            ret = handle_msync((unsigned long)a0, (size_t)a1, (int)a2);
+            break;
+        case LINUX_SYS_mlock:
+            ret = handle_mlock((unsigned long)a0, (size_t)a1);
+            break;
+        case LINUX_SYS_munlock:
+            ret = handle_munlock((unsigned long)a0, (size_t)a1);
+            break;
+        case LINUX_SYS_mlockall:
+            ret = handle_mlockall((int)a0);
+            break;
+        case LINUX_SYS_munlockall:
+            ret = handle_munlockall();
+            break;
+        case LINUX_SYS_mincore:
+            ret = handle_mincore((unsigned long)a0, (size_t)a1, (unsigned char *)a2);
+            break;
+
         default:
             ltm_log_debug("Unhandled Linux syscall: %llu (%s)", (unsigned long long)num, linux_syscall_name((int)num));
             ret = -LINUX_ENOSYS;

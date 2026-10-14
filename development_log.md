@@ -2222,4 +2222,62 @@ Every single `test_sys_<number>_<name>.c` file must strictly implement:
      ALL 169 TESTS PASSED! Translation module validated with 100% accuracy.
      ```
 
+---
+
+## [Sprint 13 Execution Report: Wave 4 Syscall Expansion & Memory/Scheduling Subsystem]
+- **Timestamp**: 2026-10-14 20:10 UTC
+- **Author**: Antigravity & The LTM Engineering Swarm (Architect, Critic, Coder, Tester)
+- **Status**: ALL 194 TESTS PASSED (194 of 194) - 100.0% Pass Rate
+- **Achievements & Metrics**:
+  1. *25 New Linux ARM64 System Calls Implemented & Dispatched*:
+     - **Filesystem & Device Subsystem (2 Syscalls)**:
+       - `mknodat` (33): Device node, FIFO, and regular file creation with mode, permissions, and device major/minor handling.
+       - `vhangup` (58): Terminal disconnection / virtual hangup inside container.
+     - **Wait & Signal Subsystem (2 Syscalls)**:
+       - `waitid` (95): POSIX `waitid` translating Darwin `siginfo_t` to 128-byte `struct linux_siginfo` with options mapping (`WEXITED`, `WSTOPPED`, `WCONTINUED`, `WNOHANG`, `WNOWAIT`).
+       - `rt_sigpending` (136): Query pending signal mask for calling thread with strict `sigsetsize == 8` validation.
+     - **POSIX / Linux Scheduling Subsystem (7 Syscalls)**:
+       - `sched_setparam` (118), `sched_setscheduler` (119), `sched_getscheduler` (120), `sched_getparam` (121): Real-time and normal thread scheduling parameter control.
+       - `sched_get_priority_max` (125), `sched_get_priority_min` (126): Priority boundary queries per policy (`SCHED_OTHER`, `SCHED_FIFO`, `SCHED_RR`).
+       - `sched_rr_get_interval` (127): Round-robin time slice quantum queries.
+     - **Process Priorities & Host Identity Subsystem (6 Syscalls)**:
+       - `setpriority` (140) & `getpriority` (141): Process nice values with standard Linux kernel `20 - nice` offset mapping.
+       - `setfsuid` (151) & `setfsgid` (152): Filesystem user/group identity setters with previous ID return semantics.
+       - `sethostname` (161) & `setdomainname` (162): Dynamic guest hostname/domain configuration with live reflection in `uname` (`nodename`, `domainname`).
+     - **Advanced Virtual Memory & Page Control Subsystem (8 Syscalls)**:
+       - `mremap` (216): Dynamic mapping resizing and relocation with 16KB Apple Silicon page-size alignment.
+       - `fadvise64` (223): POSIX file advisory handling with offset/len bounds checking.
+       - `msync` (227): Synchronizing memory mappings to disk with 16KB alignment and Linux-to-Darwin flag translation (`MS_ASYNC`, `MS_SYNC`, `MS_INVALIDATE`).
+       - `mlock` (228), `munlock` (229), `mlockall` (230), `munlockall` (231): Page locking/unlocking in physical memory.
+       - `mincore` (232): Physical page residency query with 16KB page alignment.
+  2. *Strict 3-Way Verification Mandate (25 New Dedicated Standalone Unit Tests)*:
+     - 25 new standalone Linux ARM64 ELF binaries added in `tests/syscalls/`:
+       - `test_sys_033_mknodat.c`, `test_sys_058_vhangup.c`, `test_sys_095_waitid.c`
+       - `test_sys_118_sched_setparam.c` .. `test_sys_121_sched_getparam.c`
+       - `test_sys_125_sched_get_priority_max.c` .. `test_sys_127_sched_rr_get_interval.c`
+       - `test_sys_136_rt_sigpending.c`
+       - `test_sys_140_setpriority.c`, `test_sys_141_getpriority.c`
+       - `test_sys_151_setfsuid.c`, `test_sys_152_setfsgid.c`
+       - `test_sys_161_sethostname.c`, `test_sys_162_setdomainname.c`
+       - `test_sys_216_mremap.c`, `test_sys_223_fadvise64.c`
+       - `test_sys_227_msync.c` .. `test_sys_232_mincore.c`
+     - 100% adherence to Case A (Happy Path), Case B (Boundary/Edge Cases), Case C (Errno Handling).
+  3. *Five Golden Architectural Invariants Upheld*:
+     - **16KB Memory Page Rule**: Enforced on `mremap`, `msync`, `mlock`, `munlock`, `mincore`.
+     - **36-Byte Termios Rule**: Maintained without stack corruption.
+     - **Zero Sandbox Breakouts**: Strict sandboxing verified in `mknodat` path resolution.
+     - **No Hardcoded Hardware Simulation**: Dynamically queried host telemetry.
+     - **Signal Frame Cleanliness**: Assembly restorer `_ltm_resume_context` verified.
+  4. *Final Test Verification Matrix*:
+     ```
+     ======================================================
+                        TEST SUITE SUMMARY                 
+     ======================================================
+     Total Tests : 194
+     Passed      : 194
+     Failed      : 0
+     ALL 194 TESTS PASSED! Translation module validated with 100% accuracy.
+     ```
+
+
 

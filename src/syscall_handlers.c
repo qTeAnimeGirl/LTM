@@ -1389,16 +1389,19 @@ int64_t handle_gettid(void) {
     return getpid();
 }
 
+static char g_hostname[65] = "ltm-mac";
+static char g_domainname[65] = "(none)";
+
 int64_t handle_uname(struct linux_utsname *buf) {
     if (!buf) return -LINUX_EFAULT;
     memset(buf, 0, sizeof(*buf));
 
     strncpy(buf->sysname, "Linux", sizeof(buf->sysname) - 1);
-    strncpy(buf->nodename, "ltm-mac", sizeof(buf->nodename) - 1);
+    strncpy(buf->nodename, g_hostname, sizeof(buf->nodename) - 1);
     strncpy(buf->release, LTM_KERNEL_VERSION_NAME, sizeof(buf->release) - 1);
     strncpy(buf->version, "#1 SMP PREEMPT_DYNAMIC Wed Oct 14 00:00:00 UTC 2026", sizeof(buf->version) - 1);
     strncpy(buf->machine, "aarch64", sizeof(buf->machine) - 1);
-    strncpy(buf->domainname, "(none)", sizeof(buf->domainname) - 1);
+    strncpy(buf->domainname, g_domainname, sizeof(buf->domainname) - 1);
 
     return 0;
 }
@@ -3841,6 +3844,253 @@ int64_t handle_getcpu(unsigned *cpu, unsigned *node, void *tcache) {
     (void)tcache;
     if (cpu) *cpu = 0;
     if (node) *node = 0;
+    return 0;
+}
+
+/* Wave 4 System Call Handlers */
+
+int64_t handle_mknodat(int dirfd, const char *pathname, mode_t mode, dev_t dev) {
+    if (!pathname) return -LINUX_EFAULT;
+    char host_path[1024];
+    int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), 0);
+    if (res < 0) return res;
+
+    int ret;
+    if (S_ISFIFO(mode)) {
+        ret = mkfifo(host_path, mode & 0777);
+    } else if (S_ISREG(mode) || (mode & S_IFMT) == 0) {
+        int fd = open(host_path, O_CREAT | O_EXCL | O_WRONLY, mode & 0777);
+        if (fd < 0) return darwin_to_linux_errno(errno);
+        close(fd);
+        return 0;
+    } else {
+        ret = mknod(host_path, mode, dev);
+    }
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_vhangup(void) {
+    return 0;
+}
+
+int64_t handle_waitid(int which, id_t id, struct linux_siginfo *infop, int options, void *ru) {
+    (void)ru;
+    if (which < 0 || which > 2) return -LINUX_EINVAL;
+    if (options == 0) return -LINUX_EINVAL;
+
+    idtype_t idtype = (idtype_t)which;
+    siginfo_t dinfo;
+    memset(&dinfo, 0, sizeof(dinfo));
+
+    int doptions = 0;
+    if (options & 1 /* WNOHANG */) doptions |= WNOHANG;
+    if (options & 2 /* WSTOPPED */) doptions |= WUNTRACED;
+    if (options & 4 /* WEXITED */) doptions |= WEXITED;
+    if (options & 8 /* WCONTINUED */) doptions |= WCONTINUED;
+    if (options & 0x01000000 /* WNOWAIT */) doptions |= WNOWAIT;
+
+    int ret = waitid(idtype, id, &dinfo, doptions);
+    if (ret != 0) return darwin_to_linux_errno(errno);
+
+    if (infop) {
+        memset(infop, 0, sizeof(*infop));
+        infop->si_signo = dinfo.si_signo;
+        infop->si_code = dinfo.si_code;
+        infop->_sifields._sigchld._pid = dinfo.si_pid;
+        infop->_sifields._sigchld._uid = dinfo.si_uid;
+        infop->_sifields._sigchld._status = dinfo.si_status;
+    }
+    return 0;
+}
+
+int64_t handle_sched_setparam(pid_t pid, const struct linux_sched_param *param) {
+    if (pid < 0) return -LINUX_EINVAL;
+    if (!param) return -LINUX_EFAULT;
+    if (pid > 0 && kill(pid, 0) != 0 && errno == ESRCH) return -LINUX_ESRCH;
+    return 0;
+}
+
+int64_t handle_sched_getparam(pid_t pid, struct linux_sched_param *param) {
+    if (pid < 0) return -LINUX_EINVAL;
+    if (!param) return -LINUX_EFAULT;
+    if (pid > 0 && kill(pid, 0) != 0 && errno == ESRCH) return -LINUX_ESRCH;
+    param->sched_priority = 0;
+    return 0;
+}
+
+int64_t handle_sched_setscheduler(pid_t pid, int policy, const struct linux_sched_param *param) {
+    if (pid < 0 || policy < 0 || policy > 6) return -LINUX_EINVAL;
+    if (!param) return -LINUX_EFAULT;
+    if (pid > 0 && kill(pid, 0) != 0 && errno == ESRCH) return -LINUX_ESRCH;
+    return 0;
+}
+
+int64_t handle_sched_getscheduler(pid_t pid) {
+    if (pid < 0) return -LINUX_EINVAL;
+    if (pid > 0 && kill(pid, 0) != 0 && errno == ESRCH) return -LINUX_ESRCH;
+    return 0; /* SCHED_OTHER */
+}
+
+int64_t handle_sched_get_priority_max(int policy) {
+    if (policy < 0 || policy > 6) return -LINUX_EINVAL;
+    if (policy == 1 /* SCHED_FIFO */ || policy == 2 /* SCHED_RR */) return 99;
+    return 0;
+}
+
+int64_t handle_sched_get_priority_min(int policy) {
+    if (policy < 0 || policy > 6) return -LINUX_EINVAL;
+    if (policy == 1 /* SCHED_FIFO */ || policy == 2 /* SCHED_RR */) return 1;
+    return 0;
+}
+
+int64_t handle_sched_rr_get_interval(pid_t pid, struct linux_timespec *tp) {
+    if (pid < 0) return -LINUX_EINVAL;
+    if (!tp) return -LINUX_EFAULT;
+    if (pid > 0 && kill(pid, 0) != 0 && errno == ESRCH) return -LINUX_ESRCH;
+    tp->tv_sec = 0;
+    tp->tv_nsec = 100000000; /* 100ms standard timeslice */
+    return 0;
+}
+
+int64_t handle_rt_sigpending(void *set, size_t sigsetsize) {
+    if (sigsetsize != 8) return -LINUX_EINVAL;
+    if (!set) return -LINUX_EFAULT;
+
+    sigset_t dset;
+    if (sigpending(&dset) != 0) return darwin_to_linux_errno(errno);
+
+    uint64_t lset = 0;
+    for (int i = 1; i <= 32; i++) {
+        if (sigismember(&dset, i)) {
+            lset |= (1ULL << (i - 1));
+        }
+    }
+    *(uint64_t *)set = lset;
+    return 0;
+}
+
+int64_t handle_setpriority(int which, int who, int prio) {
+    if (which < 0 || which > 2) return -LINUX_EINVAL;
+    if (setpriority(which, (id_t)who, prio) != 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_getpriority(int which, int who) {
+    if (which < 0 || which > 2) return -LINUX_EINVAL;
+    errno = 0;
+    int r = getpriority(which, (id_t)who);
+    if (r == -1 && errno != 0) return darwin_to_linux_errno(errno);
+    return 20 - r; /* Linux returns 20 - nice value */
+}
+
+int64_t handle_setfsuid(uid_t fsuid) {
+    (void)fsuid;
+    return 0;
+}
+
+int64_t handle_setfsgid(gid_t fsgid) {
+    (void)fsgid;
+    return 0;
+}
+
+int64_t handle_sethostname(const char *name, size_t len) {
+    if (!name) return -LINUX_EFAULT;
+    if (len > 64) return -LINUX_EINVAL;
+    memset(g_hostname, 0, sizeof(g_hostname));
+    memcpy(g_hostname, name, len);
+    g_hostname[len] = '\0';
+    return 0;
+}
+
+int64_t handle_setdomainname(const char *name, size_t len) {
+    if (!name) return -LINUX_EFAULT;
+    if (len > 64) return -LINUX_EINVAL;
+    memset(g_domainname, 0, sizeof(g_domainname));
+    memcpy(g_domainname, name, len);
+    g_domainname[len] = '\0';
+    return 0;
+}
+
+int64_t handle_mremap(unsigned long old_address, unsigned long old_size, unsigned long new_size, unsigned long flags, unsigned long new_address) {
+    (void)flags; (void)new_address;
+    if ((old_address & 0x3FFF) != 0) return -LINUX_EINVAL;
+    if (old_size == 0 || new_size == 0) return -LINUX_EINVAL;
+
+    size_t aligned_old = (old_size + 0x3FFF) & ~0x3FFFULL;
+    size_t aligned_new = (new_size + 0x3FFF) & ~0x3FFFULL;
+
+    if (aligned_new == aligned_old) return old_address;
+
+    if (aligned_new < aligned_old) {
+        /* Shrinking */
+        munmap((void *)(old_address + aligned_new), aligned_old - aligned_new);
+        return old_address;
+    }
+
+    /* Growing */
+    void *new_addr = mmap(NULL, aligned_new, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (new_addr == MAP_FAILED) return darwin_to_linux_errno(errno);
+    memcpy(new_addr, (const void *)old_address, old_size);
+    munmap((void *)old_address, aligned_old);
+    return (int64_t)(uintptr_t)new_addr;
+}
+
+int64_t handle_fadvise64(int fd, off_t offset, off_t len, int advice) {
+    (void)offset; (void)len;
+    if (fd < 0) return -LINUX_EBADF;
+    if (fcntl(fd, F_GETFD) < 0) return -LINUX_EBADF;
+    if (advice < 0 || advice > 5) return -LINUX_EINVAL;
+    return 0;
+}
+
+int64_t handle_msync(unsigned long start, size_t len, int flags) {
+    if ((start & 0x3FFF) != 0) return -LINUX_EINVAL;
+    if (len == 0) return 0;
+
+    int dflags = 0;
+    if (flags & 1) dflags |= MS_ASYNC;
+    if (flags & 2) dflags |= MS_INVALIDATE;
+    if (flags & 4) dflags |= MS_SYNC;
+
+    size_t aligned_len = (len + 0x3FFF) & ~0x3FFFULL;
+    int r = msync((void *)start, aligned_len, dflags);
+    if (r != 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_mlock(unsigned long addr, size_t len) {
+    if ((addr & 0x3FFF) != 0) return -LINUX_EINVAL;
+    if (len == 0) return 0;
+    size_t aligned_len = (len + 0x3FFF) & ~0x3FFFULL;
+    if (mlock((const void *)addr, aligned_len) != 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_munlock(unsigned long addr, size_t len) {
+    if ((addr & 0x3FFF) != 0) return -LINUX_EINVAL;
+    if (len == 0) return 0;
+    size_t aligned_len = (len + 0x3FFF) & ~0x3FFFULL;
+    if (munlock((const void *)addr, aligned_len) != 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_mlockall(int flags) {
+    if (flags <= 0 || (flags & ~3)) return -LINUX_EINVAL;
+    return 0;
+}
+
+int64_t handle_munlockall(void) {
+    return 0;
+}
+
+int64_t handle_mincore(unsigned long start, size_t len, unsigned char *vec) {
+    if ((start & 0x3FFF) != 0) return -LINUX_EINVAL;
+    if (!vec) return -LINUX_EFAULT;
+    if (len == 0) return 0;
+
+    size_t aligned_len = (len + 0x3FFF) & ~0x3FFFULL;
+    if (mincore((const void *)start, aligned_len, (char *)vec) != 0) return darwin_to_linux_errno(errno);
     return 0;
 }
 
