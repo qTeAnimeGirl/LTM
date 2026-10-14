@@ -223,6 +223,47 @@ struct linux_rusage {
     long   ru_nivcsw;
 };
 
+/* Linux statx timestamp */
+struct linux_statx_timestamp {
+    int64_t  tv_sec;
+    uint32_t tv_nsec;
+    int32_t  __statx_pad1;
+};
+
+/* Linux statx (256 bytes) */
+struct linux_statx {
+    uint32_t stx_mask;
+    uint32_t stx_blksize;
+    uint64_t stx_attributes;
+    uint32_t stx_nlink;
+    uint32_t stx_uid;
+    uint32_t stx_gid;
+    uint16_t stx_mode;
+    uint16_t __statx_pad1[1];
+    uint64_t stx_ino;
+    uint64_t stx_size;
+    uint64_t stx_blocks;
+    uint64_t stx_attributes_mask;
+    struct linux_statx_timestamp stx_atime;
+    struct linux_statx_timestamp stx_btime;
+    struct linux_statx_timestamp stx_ctime;
+    struct linux_statx_timestamp stx_mtime;
+    uint32_t stx_rdev_major;
+    uint32_t stx_rdev_minor;
+    uint32_t stx_dev_major;
+    uint32_t stx_dev_minor;
+    uint64_t stx_mnt_id;
+    uint64_t __statx_pad2;
+    uint64_t __statx_pad3[12];
+};
+
+/* Linux sembuf */
+struct linux_sembuf {
+    uint16_t sem_num;
+    int16_t  sem_op;
+    int16_t  sem_flg;
+};
+
 /* Syscall Dispatcher Registration & Entry */
 int syscall_dispatcher_init(void);
 int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
@@ -445,6 +486,33 @@ int64_t handle_munlock(unsigned long addr, size_t len);
 int64_t handle_mlockall(int flags);
 int64_t handle_munlockall(void);
 int64_t handle_mincore(unsigned long start, size_t len, unsigned char *vec);
+
+/* Wave 5 Syscalls */
+int64_t handle_inotify_init1(int flags);
+int64_t handle_inotify_add_watch(int fd, const char *pathname, uint32_t mask);
+int64_t handle_inotify_rm_watch(int fd, int wd);
+int64_t handle_ioprio_set(int which, int who, int ioprio);
+int64_t handle_ioprio_get(int which, int who);
+int64_t handle_timer_create(int clockid, void *sevp, int *timerid);
+int64_t handle_timer_gettime(int timerid, struct linux_itimerspec *curr_value);
+int64_t handle_timer_getoverrun(int timerid);
+int64_t handle_timer_settime(int timerid, int flags, const struct linux_itimerspec *new_value, struct linux_itimerspec *old_value);
+int64_t handle_timer_delete(int timerid);
+int64_t handle_rt_sigsuspend(const uint64_t *unewset, size_t sigsetsize);
+int64_t handle_rt_sigtimedwait(const uint64_t *uthese, struct linux_siginfo *uinfo, const struct linux_timespec *uts, size_t sigsetsize);
+int64_t handle_rt_sigqueueinfo(pid_t tgid, int sig, struct linux_siginfo *uinfo);
+int64_t handle_msgget(key_t key, int msgflg);
+int64_t handle_msgctl(int msqid, int cmd, void *buf);
+int64_t handle_msgrcv(int msqid, void *msgp, size_t msgsz, long msgtyp, int msgflg);
+int64_t handle_msgsnd(int msqid, const void *msgp, size_t msgsz, int msgflg);
+int64_t handle_semget(key_t key, int nsems, int semflg);
+int64_t handle_semctl(int semid, int semnum, int cmd, unsigned long arg);
+int64_t handle_semop(int semid, void *sops, size_t nsops);
+int64_t handle_execveat(int dirfd, const char *pathname, char *const argv[], char *const envp[], int flags);
+int64_t handle_preadv2(int fd, const struct linux_iovec *iov, int iovcnt, off_t offset, int flags);
+int64_t handle_pwritev2(int fd, const struct linux_iovec *iov, int iovcnt, off_t offset, int flags);
+int64_t handle_statx(int dirfd, const char *pathname, int flags, unsigned int mask, struct linux_statx *statxbuf);
+int64_t handle_pidfd_open(pid_t pid, unsigned int flags);
 
 #endif /* SYSCALLS_H */
 

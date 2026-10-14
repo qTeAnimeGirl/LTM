@@ -12,6 +12,10 @@
 #include <sys/file.h>
 #include <dispatch/dispatch.h>
 #include <sys/xattr.h>
+#include <sys/ipc.h>
+#include <sys/msg.h>
+#include <sys/sem.h>
+#include <sys/shm.h>
 
 /* Futex bucket structure */
 typedef struct {
@@ -4093,5 +4097,574 @@ int64_t handle_mincore(unsigned long start, size_t len, unsigned char *vec) {
     if (mincore((const void *)start, aligned_len, (char *)vec) != 0) return darwin_to_linux_errno(errno);
     return 0;
 }
+
+/* ========================================================================= */
+/*                         WAVE 5 SYSCALL HANDLERS                          */
+/* ========================================================================= */
+
+/* Inotify Subsystem */
+#define MAX_INOTIFY_INSTANCES 32
+#define MAX_INOTIFY_WATCHES 64
+
+struct ltm_inotify_watch {
+    int wd;
+    uint32_t mask;
+    char path[PATH_MAX];
+};
+
+struct ltm_inotify_instance {
+    bool active;
+    int read_fd;
+    int write_fd;
+    int flags;
+    int next_wd;
+    struct ltm_inotify_watch watches[MAX_INOTIFY_WATCHES];
+    int watch_count;
+};
+
+static struct ltm_inotify_instance g_inotifys[MAX_INOTIFY_INSTANCES];
+static pthread_mutex_t g_inotify_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+int64_t handle_inotify_init1(int flags) {
+    if (flags & ~(0x800 | 0x80000)) { /* IN_NONBLOCK | IN_CLOEXEC */
+        return -LINUX_EINVAL;
+    }
+
+    pthread_mutex_lock(&g_inotify_mutex);
+    int slot = -1;
+    for (int i = 0; i < MAX_INOTIFY_INSTANCES; i++) {
+        if (!g_inotifys[i].active) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == -1) {
+        pthread_mutex_unlock(&g_inotify_mutex);
+        return -LINUX_EMFILE;
+    }
+
+    int p[2];
+    if (pipe(p) != 0) {
+        pthread_mutex_unlock(&g_inotify_mutex);
+        return darwin_to_linux_errno(errno);
+    }
+
+    if (flags & 0x800) { /* IN_NONBLOCK */
+        fcntl(p[0], F_SETFL, fcntl(p[0], F_GETFL) | O_NONBLOCK);
+        fcntl(p[1], F_SETFL, fcntl(p[1], F_GETFL) | O_NONBLOCK);
+    }
+    if (flags & 0x80000) { /* IN_CLOEXEC */
+        fcntl(p[0], F_SETFD, FD_CLOEXEC);
+        fcntl(p[1], F_SETFD, FD_CLOEXEC);
+    }
+
+    g_inotifys[slot].active = true;
+    g_inotifys[slot].read_fd = p[0];
+    g_inotifys[slot].write_fd = p[1];
+    g_inotifys[slot].flags = flags;
+    g_inotifys[slot].next_wd = 1;
+    g_inotifys[slot].watch_count = 0;
+
+    pthread_mutex_unlock(&g_inotify_mutex);
+    return p[0];
+}
+
+int64_t handle_inotify_add_watch(int fd, const char *pathname, uint32_t mask) {
+    if (fd < 0) return -LINUX_EBADF;
+    if (!pathname) return -LINUX_EFAULT;
+    if (mask == 0) return -LINUX_EINVAL;
+
+    pthread_mutex_lock(&g_inotify_mutex);
+    struct ltm_inotify_instance *inst = NULL;
+    for (int i = 0; i < MAX_INOTIFY_INSTANCES; i++) {
+        if (g_inotifys[i].active && g_inotifys[i].read_fd == fd) {
+            inst = &g_inotifys[i];
+            break;
+        }
+    }
+    if (!inst) {
+        pthread_mutex_unlock(&g_inotify_mutex);
+        return -LINUX_EBADF;
+    }
+
+    char host_path[PATH_MAX];
+    int r = sandbox_resolve_path(LINUX_AT_FDCWD, pathname, host_path, sizeof(host_path), 0);
+    if (r < 0) {
+        pthread_mutex_unlock(&g_inotify_mutex);
+        return r;
+    }
+
+    struct stat st;
+    if (stat(host_path, &st) != 0) {
+        pthread_mutex_unlock(&g_inotify_mutex);
+        return darwin_to_linux_errno(errno);
+    }
+
+    /* Check if already watched */
+    for (int i = 0; i < inst->watch_count; i++) {
+        if (strcmp(inst->watches[i].path, host_path) == 0) {
+            inst->watches[i].mask = mask;
+            int existing_wd = inst->watches[i].wd;
+            pthread_mutex_unlock(&g_inotify_mutex);
+            return existing_wd;
+        }
+    }
+
+    if (inst->watch_count >= MAX_INOTIFY_WATCHES) {
+        pthread_mutex_unlock(&g_inotify_mutex);
+        return -LINUX_ENOSPC;
+    }
+
+    int wd = inst->next_wd++;
+    int idx = inst->watch_count++;
+    inst->watches[idx].wd = wd;
+    inst->watches[idx].mask = mask;
+    strncpy(inst->watches[idx].path, host_path, sizeof(inst->watches[idx].path) - 1);
+    inst->watches[idx].path[sizeof(inst->watches[idx].path) - 1] = '\0';
+
+    pthread_mutex_unlock(&g_inotify_mutex);
+    return wd;
+}
+
+int64_t handle_inotify_rm_watch(int fd, int wd) {
+    if (fd < 0) return -LINUX_EBADF;
+    if (wd < 1) return -LINUX_EINVAL;
+
+    pthread_mutex_lock(&g_inotify_mutex);
+    struct ltm_inotify_instance *inst = NULL;
+    for (int i = 0; i < MAX_INOTIFY_INSTANCES; i++) {
+        if (g_inotifys[i].active && g_inotifys[i].read_fd == fd) {
+            inst = &g_inotifys[i];
+            break;
+        }
+    }
+    if (!inst) {
+        pthread_mutex_unlock(&g_inotify_mutex);
+        return -LINUX_EBADF;
+    }
+
+    int found = -1;
+    for (int i = 0; i < inst->watch_count; i++) {
+        if (inst->watches[i].wd == wd) {
+            found = i;
+            break;
+        }
+    }
+    if (found == -1) {
+        pthread_mutex_unlock(&g_inotify_mutex);
+        return -LINUX_EINVAL;
+    }
+
+    for (int i = found; i < inst->watch_count - 1; i++) {
+        inst->watches[i] = inst->watches[i + 1];
+    }
+    inst->watch_count--;
+
+    pthread_mutex_unlock(&g_inotify_mutex);
+    return 0;
+}
+
+/* POSIX I/O Priority */
+int64_t handle_ioprio_set(int which, int who, int ioprio) {
+    if (which < 1 || which > 3) return -LINUX_EINVAL;
+    if (who < 0) return -LINUX_ESRCH;
+    if (who > 0) {
+        if (kill(who, 0) == -1 && errno == ESRCH) return -LINUX_ESRCH;
+    }
+
+    int pclass = ioprio >> 13;
+    int pdata = ioprio & 0x1fff;
+    if (pclass > 3 || pdata > 7) return -LINUX_EINVAL;
+
+    return 0;
+}
+
+int64_t handle_ioprio_get(int which, int who) {
+    if (which < 1 || which > 3) return -LINUX_EINVAL;
+    if (who < 0) return -LINUX_ESRCH;
+    if (who > 0) {
+        if (kill(who, 0) == -1 && errno == ESRCH) return -LINUX_ESRCH;
+    }
+
+    /* Return default IOPRIO_CLASS_BE (2) with priority 4 */
+    return (2 << 13) | 4;
+}
+
+/* POSIX Timers */
+#define MAX_POSIX_TIMERS 32
+struct ltm_posix_timer {
+    bool active;
+    int clockid;
+    struct linux_timespec interval;
+    struct linux_timespec value;
+    int overrun;
+};
+
+static struct ltm_posix_timer g_posix_timers[MAX_POSIX_TIMERS];
+static pthread_mutex_t g_timer_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+int64_t handle_timer_create(int clockid, void *sevp, int *timerid) {
+    (void)sevp;
+    if (clockid != 0 && clockid != 1 && clockid != 7) { /* REALTIME, MONOTONIC, BOOTTIME */
+        return -LINUX_EINVAL;
+    }
+    if (!timerid) return -LINUX_EFAULT;
+
+    pthread_mutex_lock(&g_timer_mutex);
+    int slot = -1;
+    for (int i = 0; i < MAX_POSIX_TIMERS; i++) {
+        if (!g_posix_timers[i].active) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == -1) {
+        pthread_mutex_unlock(&g_timer_mutex);
+        return -LINUX_EAGAIN;
+    }
+
+    g_posix_timers[slot].active = true;
+    g_posix_timers[slot].clockid = clockid;
+    memset(&g_posix_timers[slot].interval, 0, sizeof(struct linux_timespec));
+    memset(&g_posix_timers[slot].value, 0, sizeof(struct linux_timespec));
+    g_posix_timers[slot].overrun = 0;
+
+    *timerid = slot;
+    pthread_mutex_unlock(&g_timer_mutex);
+    return 0;
+}
+
+int64_t handle_timer_settime(int timerid, int flags, const struct linux_itimerspec *new_value, struct linux_itimerspec *old_value) {
+    (void)flags;
+    int idx = timerid;
+    if (idx < 0 || idx >= MAX_POSIX_TIMERS) return -LINUX_EINVAL;
+    if (!new_value) return -LINUX_EFAULT;
+
+    if (new_value->it_value.tv_nsec < 0 || new_value->it_value.tv_nsec >= 1000000000 ||
+        new_value->it_interval.tv_nsec < 0 || new_value->it_interval.tv_nsec >= 1000000000) {
+        return -LINUX_EINVAL;
+    }
+
+    pthread_mutex_lock(&g_timer_mutex);
+    if (!g_posix_timers[idx].active) {
+        pthread_mutex_unlock(&g_timer_mutex);
+        return -LINUX_EINVAL;
+    }
+
+    if (old_value) {
+        old_value->it_interval = g_posix_timers[idx].interval;
+        old_value->it_value = g_posix_timers[idx].value;
+    }
+
+    g_posix_timers[idx].interval = new_value->it_interval;
+    g_posix_timers[idx].value = new_value->it_value;
+
+    pthread_mutex_unlock(&g_timer_mutex);
+    return 0;
+}
+
+int64_t handle_timer_gettime(int timerid, struct linux_itimerspec *curr_value) {
+    int idx = timerid;
+    if (idx < 0 || idx >= MAX_POSIX_TIMERS) return -LINUX_EINVAL;
+    if (!curr_value) return -LINUX_EFAULT;
+
+    pthread_mutex_lock(&g_timer_mutex);
+    if (!g_posix_timers[idx].active) {
+        pthread_mutex_unlock(&g_timer_mutex);
+        return -LINUX_EINVAL;
+    }
+
+    curr_value->it_interval = g_posix_timers[idx].interval;
+    curr_value->it_value = g_posix_timers[idx].value;
+
+    pthread_mutex_unlock(&g_timer_mutex);
+    return 0;
+}
+
+int64_t handle_timer_getoverrun(int timerid) {
+    int idx = timerid;
+    if (idx < 0 || idx >= MAX_POSIX_TIMERS) return -LINUX_EINVAL;
+
+    pthread_mutex_lock(&g_timer_mutex);
+    if (!g_posix_timers[idx].active) {
+        pthread_mutex_unlock(&g_timer_mutex);
+        return -LINUX_EINVAL;
+    }
+
+    int ov = g_posix_timers[idx].overrun;
+    pthread_mutex_unlock(&g_timer_mutex);
+    return ov;
+}
+
+int64_t handle_timer_delete(int timerid) {
+    int idx = timerid;
+    if (idx < 0 || idx >= MAX_POSIX_TIMERS) return -LINUX_EINVAL;
+
+    pthread_mutex_lock(&g_timer_mutex);
+    if (!g_posix_timers[idx].active) {
+        pthread_mutex_unlock(&g_timer_mutex);
+        return -LINUX_EINVAL;
+    }
+
+    g_posix_timers[idx].active = false;
+    pthread_mutex_unlock(&g_timer_mutex);
+    return 0;
+}
+
+/* Real-Time Signals */
+int64_t handle_rt_sigsuspend(const uint64_t *unewset, size_t sigsetsize) {
+    if (sigsetsize != 8) return -LINUX_EINVAL;
+    if (!unewset) return -LINUX_EFAULT;
+
+    sigset_t dset;
+    sigemptyset(&dset);
+    uint64_t mask = *unewset;
+    for (int s = 1; s <= 31; s++) {
+        if (mask & (1ULL << (s - 1))) {
+            sigaddset(&dset, s);
+        }
+    }
+    sigsuspend(&dset);
+    return -LINUX_EINTR;
+}
+
+int64_t handle_rt_sigtimedwait(const uint64_t *uthese, struct linux_siginfo *uinfo, const struct linux_timespec *uts, size_t sigsetsize) {
+    if (sigsetsize != 8) return -LINUX_EINVAL;
+    if (!uthese) return -LINUX_EFAULT;
+    if (uts) {
+        if (uts->tv_nsec < 0 || uts->tv_nsec >= 1000000000 || uts->tv_sec < 0) {
+            return -LINUX_EINVAL;
+        }
+    }
+
+    sigset_t dset;
+    sigemptyset(&dset);
+    uint64_t mask = *uthese;
+    for (int s = 1; s <= 31; s++) {
+        if (mask & (1ULL << (s - 1))) {
+            sigaddset(&dset, s);
+        }
+    }
+
+    sigset_t pending;
+    sigemptyset(&pending);
+    sigpending(&pending);
+
+    for (int s = 1; s <= 31; s++) {
+        if (sigismember(&pending, s) && sigismember(&dset, s)) {
+            if (uinfo) {
+                memset(uinfo, 0, sizeof(*uinfo));
+                uinfo->si_signo = s;
+                uinfo->si_code = 0; /* SI_USER */
+            }
+            return s;
+        }
+    }
+
+    return -LINUX_EAGAIN;
+}
+
+int64_t handle_rt_sigqueueinfo(pid_t tgid, int sig, struct linux_siginfo *uinfo) {
+    if (sig < 0 || sig >= LINUX_NSIG) return -LINUX_EINVAL;
+    if (!uinfo) return -LINUX_EFAULT;
+    if (tgid <= 0) {
+        if (tgid < 0) return -LINUX_EINVAL;
+    }
+    if (tgid > 0) {
+        if (kill(tgid, 0) == -1 && errno == ESRCH) return -LINUX_ESRCH;
+    }
+
+    if (sig == 0) return 0;
+    if (kill(tgid, sig) != 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+/* System V IPC */
+int64_t handle_msgget(key_t key, int msgflg) {
+    int r = msgget(key, msgflg);
+    if (r == -1) return darwin_to_linux_errno(errno);
+    return r;
+}
+
+int64_t handle_msgctl(int msqid, int cmd, void *buf) {
+    int dcmd = cmd;
+    if (cmd == 0) dcmd = IPC_RMID;
+    else if (cmd == 1) dcmd = IPC_SET;
+    else if (cmd == 2) dcmd = IPC_STAT;
+    int r = msgctl(msqid, dcmd, (struct msqid_ds *)buf);
+    if (r == -1) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_msgrcv(int msqid, void *msgp, size_t msgsz, long msgtyp, int msgflg) {
+    if (!msgp) return -LINUX_EFAULT;
+    ssize_t r = msgrcv(msqid, msgp, msgsz, msgtyp, msgflg);
+    if (r == -1) return darwin_to_linux_errno(errno);
+    return r;
+}
+
+int64_t handle_msgsnd(int msqid, const void *msgp, size_t msgsz, int msgflg) {
+    if (!msgp) return -LINUX_EFAULT;
+    int r = msgsnd(msqid, msgp, msgsz, msgflg);
+    if (r == -1) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_semget(key_t key, int nsems, int semflg) {
+    if (nsems < 0) return -LINUX_EINVAL;
+    int r = semget(key, nsems, semflg);
+    if (r == -1) return darwin_to_linux_errno(errno);
+    return r;
+}
+
+int64_t handle_semctl(int semid, int semnum, int cmd, unsigned long arg) {
+    int dcmd = cmd;
+    if (cmd == 0) dcmd = IPC_RMID;
+    int r = semctl(semid, semnum, dcmd, (void *)arg);
+    if (r == -1) return darwin_to_linux_errno(errno);
+    return r;
+}
+
+int64_t handle_semop(int semid, void *sops, size_t nsops) {
+    if (!sops) return -LINUX_EFAULT;
+    if (nsops == 0) return -LINUX_EINVAL;
+    int r = semop(semid, (struct sembuf *)sops, nsops);
+    if (r == -1) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+/* Vector I/O & Filesystem */
+int64_t handle_preadv2(int fd, const struct linux_iovec *iov, int iovcnt, off_t offset, int flags) {
+    if (flags & ~(0x01 | 0x02 | 0x04 | 0x08 | 0x10)) return -LINUX_EINVAL;
+    if (offset < -1) return -LINUX_EINVAL;
+    if (iovcnt < 0 || iovcnt > 1024) return -LINUX_EINVAL;
+    if (iovcnt > 0 && !iov) return -LINUX_EFAULT;
+    if (fd < 0) return -LINUX_EBADF;
+
+    if (offset == -1) {
+        return handle_readv(fd, iov, iovcnt);
+    }
+
+    ssize_t total = 0;
+    off_t cur_off = offset;
+    for (int i = 0; i < iovcnt; i++) {
+        if (!iov[i].iov_base && iov[i].iov_len > 0) return -LINUX_EFAULT;
+        if (iov[i].iov_len == 0) continue;
+        ssize_t n = pread(fd, (void *)iov[i].iov_base, iov[i].iov_len, cur_off);
+        if (n < 0) {
+            if (total > 0) return total;
+            return darwin_to_linux_errno(errno);
+        }
+        total += n;
+        cur_off += n;
+        if ((size_t)n < iov[i].iov_len) break;
+    }
+    return total;
+}
+
+int64_t handle_pwritev2(int fd, const struct linux_iovec *iov, int iovcnt, off_t offset, int flags) {
+    if (flags & ~(0x01 | 0x02 | 0x04 | 0x08 | 0x10)) return -LINUX_EINVAL;
+    if (offset < -1) return -LINUX_EINVAL;
+    if (iovcnt < 0 || iovcnt > 1024) return -LINUX_EINVAL;
+    if (iovcnt > 0 && !iov) return -LINUX_EFAULT;
+    if (fd < 0) return -LINUX_EBADF;
+
+    if (offset == -1) {
+        return handle_writev(fd, iov, iovcnt);
+    }
+
+    ssize_t total = 0;
+    off_t cur_off = offset;
+    for (int i = 0; i < iovcnt; i++) {
+        if (!iov[i].iov_base && iov[i].iov_len > 0) return -LINUX_EFAULT;
+        if (iov[i].iov_len == 0) continue;
+        ssize_t n = pwrite(fd, (const void *)iov[i].iov_base, iov[i].iov_len, cur_off);
+        if (n < 0) {
+            if (total > 0) return total;
+            return darwin_to_linux_errno(errno);
+        }
+        total += n;
+        cur_off += n;
+        if ((size_t)n < iov[i].iov_len) break;
+    }
+    return total;
+}
+
+int64_t handle_statx(int dirfd, const char *pathname, int flags, unsigned int mask, struct linux_statx *statxbuf) {
+    if (flags & ~(0x100 | 0x800 | 0x1000 | 0x6000)) return -LINUX_EINVAL;
+    if (!statxbuf) return -LINUX_EFAULT;
+    if (!pathname) return -LINUX_EFAULT;
+
+    struct stat st;
+    if (pathname[0] == '\0') {
+        if (!(flags & 0x1000)) return -LINUX_ENOENT; /* AT_EMPTY_PATH */
+        if (dirfd < 0) return -LINUX_EBADF;
+        if (fstat(dirfd, &st) != 0) return darwin_to_linux_errno(errno);
+    } else {
+        char host_path[PATH_MAX];
+        int r = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), (flags & 0x100) ? AT_SYMLINK_NOFOLLOW : 0);
+        if (r < 0) return r;
+
+        if (flags & 0x100) { /* AT_SYMLINK_NOFOLLOW */
+            if (lstat(host_path, &st) != 0) return darwin_to_linux_errno(errno);
+        } else {
+            if (stat(host_path, &st) != 0) return darwin_to_linux_errno(errno);
+        }
+    }
+
+    memset(statxbuf, 0, sizeof(*statxbuf));
+    statxbuf->stx_mask = mask & 0x0fff;
+    statxbuf->stx_blksize = st.st_blksize;
+    statxbuf->stx_nlink = st.st_nlink;
+    statxbuf->stx_uid = 0; /* root container */
+    statxbuf->stx_gid = 0;
+    statxbuf->stx_mode = st.st_mode;
+    statxbuf->stx_ino = st.st_ino;
+    statxbuf->stx_size = st.st_size;
+    statxbuf->stx_blocks = st.st_blocks;
+
+    statxbuf->stx_atime.tv_sec = st.st_atime;
+    statxbuf->stx_atime.tv_nsec = st.st_atimespec.tv_nsec;
+    statxbuf->stx_btime.tv_sec = st.st_birthtime;
+    statxbuf->stx_btime.tv_nsec = st.st_birthtimespec.tv_nsec;
+    statxbuf->stx_ctime.tv_sec = st.st_ctime;
+    statxbuf->stx_ctime.tv_nsec = st.st_ctimespec.tv_nsec;
+    statxbuf->stx_mtime.tv_sec = st.st_mtime;
+    statxbuf->stx_mtime.tv_nsec = st.st_mtimespec.tv_nsec;
+
+    statxbuf->stx_dev_major = major(st.st_dev);
+    statxbuf->stx_dev_minor = minor(st.st_dev);
+
+    return 0;
+}
+
+int64_t handle_execveat(int dirfd, const char *pathname, char *const argv[], char *const envp[], int flags) {
+    (void)dirfd;
+    if (!pathname) return -LINUX_EFAULT;
+    if (flags & ~(0x100 | 0x1000)) return -LINUX_EINVAL;
+    return handle_execve(pathname, argv, envp);
+}
+
+/* Process File Descriptors */
+int64_t handle_pidfd_open(pid_t pid, unsigned int flags) {
+    if (flags & ~0x800) return -LINUX_EINVAL; /* PIDFD_NONBLOCK */
+    if (pid <= 0) return -LINUX_EINVAL;
+
+    if (kill(pid, 0) == -1 && errno == ESRCH) {
+        return -LINUX_ESRCH;
+    }
+
+    int p[2];
+    if (pipe(p) != 0) return darwin_to_linux_errno(errno);
+
+    if (flags & 0x800) {
+        fcntl(p[0], F_SETFL, fcntl(p[0], F_GETFL) | O_NONBLOCK);
+    }
+    fcntl(p[0], F_SETFD, FD_CLOEXEC);
+    fcntl(p[1], F_SETFD, FD_CLOEXEC);
+
+    return p[0];
+}
+
 
 

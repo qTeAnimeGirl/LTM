@@ -2279,5 +2279,72 @@ Every single `test_sys_<number>_<name>.c` file must strictly implement:
      ALL 194 TESTS PASSED! Translation module validated with 100% accuracy.
      ```
 
+---
 
-
+## [Sprint 14 Execution Report: Wave 5 Syscall Expansion & Inotify, POSIX Timers, SysV IPC, Advanced I/O, and Modern Process Descriptors]
+- **Timestamp**: 2026-10-14 20:25 UTC
+- **Author**: Antigravity & The LTM Engineering Swarm (Lead Architect, Critic, Coder, Tester)
+- **Status**: ALL 219 TESTS PASSED (219 of 219) - 100.0% Pass Rate
+- **Achievements & Metrics**:
+  1. *25 New Linux ARM64 System Calls Implemented & Dispatched*:
+     - **Inotify & Filesystem Events Subsystem (3 Syscalls)**:
+       - `inotify_init1` (26): Managed inotify instance table with non-blocking pipe bridge (`IN_CLOEXEC`, `IN_NONBLOCK`).
+       - `inotify_add_watch` (27): Watches sandboxed directory/file paths, deduplicating watch descriptors.
+       - `inotify_rm_watch` (28): Removes active watch descriptor from inotify instance.
+     - **I/O Priority Subsystem (2 Syscalls)**:
+       - `ioprio_set` (30): Validates target class/data and returns 0.
+       - `ioprio_get` (31): Returns best-effort default I/O priority for target process (`IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, 4)`).
+     - **POSIX Per-Process Timers Subsystem (5 Syscalls)**:
+       - `timer_create` (107): POSIX per-process timer creation using libdispatch timer source with 32-bit `timer_t` ABI compatibility.
+       - `timer_gettime` (108): Queries remaining time and interval on active POSIX timer.
+       - `timer_getoverrun` (109): Returns POSIX timer expiration overrun counter.
+       - `timer_settime` (110): Arms, updates, or disarms POSIX timer with relative or absolute timestamps.
+       - `timer_delete` (111): Disarms and deletes POSIX timer, freeing resources.
+     - **Real-Time Signals Subsystem (3 Syscalls)**:
+       - `rt_sigsuspend` (133): Temporarily replaces signal mask and suspends thread execution until signal delivery.
+       - `rt_sigtimedwait` (137): Synchronously waits for pending signals in mask with nanosecond timeout.
+       - `rt_sigqueueinfo` (138): Queues signal with `siginfo_t` payload to destination process.
+     - **System V IPC Subsystem (7 Syscalls)**:
+       - `msgget` (186): System V message queue allocation and key lookup via Darwin `msgget()`.
+       - `msgctl` (187): System V message queue control operations (`IPC_RMID`, `IPC_STAT`, `IPC_SET`).
+       - `msgrcv` (188): Receives message from System V message queue via Darwin `msgrcv()`.
+       - `msgsnd` (189): Sends message to System V message queue via Darwin `msgsnd()`.
+       - `semget` (190): System V semaphore set creation and key lookup via Darwin `semget()`.
+       - `semctl` (191): System V semaphore set control operations (`IPC_RMID`, `GETVAL`, `SETVAL`, `GETALL`, `SETALL`).
+       - `semop` (193): Performs atomic array of semaphore operations via Darwin `semop()`.
+     - **Advanced & Vectored File I/O Subsystem (4 Syscalls)**:
+       - `execveat` (281): Executes binary relative to directory descriptor / path with flags support (`AT_EMPTY_PATH`).
+       - `preadv2` (286): Vectored positional read with flags (`RWF_HIPRI`, `RWF_DSYNC`, `RWF_SYNC`, `RWF_NOWAIT`, `RWF_APPEND`).
+       - `pwritev2` (287): Vectored positional write with flags support.
+       - `statx` (291): 256-byte extended file status structure with nanosecond timestamps, birthtime, and attributes.
+     - **Process File Descriptors Subsystem (1 Syscall)**:
+       - `pidfd_open` (434): Allocates process file descriptor for tracking and signal delivery.
+  2. *Strict 3-Way Verification Mandate (25 New Dedicated Standalone Unit Tests)*:
+     - 25 new standalone Linux ARM64 ELF binaries added in `tests/syscalls/`:
+       - `test_sys_026_inotify_init1.c`, `test_sys_027_inotify_add_watch.c`, `test_sys_028_inotify_rm_watch.c`
+       - `test_sys_030_ioprio_set.c`, `test_sys_031_ioprio_get.c`
+       - `test_sys_107_timer_create.c` .. `test_sys_111_timer_delete.c`
+       - `test_sys_133_rt_sigsuspend.c`, `test_sys_137_rt_sigtimedwait.c`, `test_sys_138_rt_sigqueueinfo.c`
+       - `test_sys_186_msgget.c` .. `test_sys_189_msgsnd.c`
+       - `test_sys_190_semget.c` .. `test_sys_193_semop.c`
+       - `test_sys_281_execveat.c`
+       - `test_sys_286_preadv2.c`, `test_sys_287_pwritev2.c`
+       - `test_sys_291_statx.c`
+       - `test_sys_434_pidfd_open.c`
+     - 100% adherence to Case A (Happy Path), Case B (Boundary/Edge Cases), Case C (Errno Handling).
+  3. *Five Golden Architectural Invariants Upheld*:
+     - **16KB Memory Page Rule**: Enforced across all memory maps and buffers.
+     - **36-Byte Termios Rule**: Maintained without stack corruption.
+     - **Zero Sandbox Breakouts**: Strict sandboxing verified on `execveat`, `statx`, and `inotify` path resolution.
+     - **No Hardcoded Hardware Simulation**: Dynamically queried host telemetry.
+     - **Signal Frame Cleanliness**: Assembly restorer `_ltm_resume_context` verified on `rt_sigsuspend` signal returns.
+  4. *Final Test Verification Matrix*:
+     ```
+     ======================================================
+                        TEST SUITE SUMMARY                 
+     ======================================================
+     Total Tests : 219
+     Passed      : 219
+     Failed      : 0
+     ALL 219 TESTS PASSED! Translation module validated with 100% accuracy.
+     ```

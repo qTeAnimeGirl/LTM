@@ -1192,6 +1192,83 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
             ret = handle_mincore((unsigned long)a0, (size_t)a1, (unsigned char *)a2);
             break;
 
+        /* Wave 5 Syscalls */
+        case LINUX_SYS_inotify_init1:
+            ret = handle_inotify_init1((int)a0);
+            break;
+        case LINUX_SYS_inotify_add_watch:
+            ret = handle_inotify_add_watch((int)a0, (const char *)a1, (uint32_t)a2);
+            break;
+        case LINUX_SYS_inotify_rm_watch:
+            ret = handle_inotify_rm_watch((int)a0, (int)a1);
+            break;
+        case LINUX_SYS_ioprio_set:
+            ret = handle_ioprio_set((int)a0, (int)a1, (int)a2);
+            break;
+        case LINUX_SYS_ioprio_get:
+            ret = handle_ioprio_get((int)a0, (int)a1);
+            break;
+        case LINUX_SYS_timer_create:
+            ret = handle_timer_create((int)a0, (void *)a1, (int *)a2);
+            break;
+        case LINUX_SYS_timer_gettime:
+            ret = handle_timer_gettime((int)a0, (struct linux_itimerspec *)a1);
+            break;
+        case LINUX_SYS_timer_getoverrun:
+            ret = handle_timer_getoverrun((int)a0);
+            break;
+        case LINUX_SYS_timer_settime:
+            ret = handle_timer_settime((int)a0, (int)a1, (const struct linux_itimerspec *)a2, (struct linux_itimerspec *)a3);
+            break;
+        case LINUX_SYS_timer_delete:
+            ret = handle_timer_delete((int)a0);
+            break;
+        case LINUX_SYS_rt_sigsuspend:
+            ret = handle_rt_sigsuspend((const uint64_t *)a0, (size_t)a1);
+            break;
+        case LINUX_SYS_rt_sigtimedwait:
+            ret = handle_rt_sigtimedwait((const uint64_t *)a0, (struct linux_siginfo *)a1, (const struct linux_timespec *)a2, (size_t)a3);
+            break;
+        case LINUX_SYS_rt_sigqueueinfo:
+            ret = handle_rt_sigqueueinfo((pid_t)a0, (int)a1, (struct linux_siginfo *)a2);
+            break;
+        case LINUX_SYS_msgget:
+            ret = handle_msgget((key_t)a0, (int)a1);
+            break;
+        case LINUX_SYS_msgctl:
+            ret = handle_msgctl((int)a0, (int)a1, (void *)a2);
+            break;
+        case LINUX_SYS_msgrcv:
+            ret = handle_msgrcv((int)a0, (void *)a1, (size_t)a2, (long)a3, (int)a4);
+            break;
+        case LINUX_SYS_msgsnd:
+            ret = handle_msgsnd((int)a0, (const void *)a1, (size_t)a2, (int)a3);
+            break;
+        case LINUX_SYS_semget:
+            ret = handle_semget((key_t)a0, (int)a1, (int)a2);
+            break;
+        case LINUX_SYS_semctl:
+            ret = handle_semctl((int)a0, (int)a1, (int)a2, (unsigned long)a3);
+            break;
+        case LINUX_SYS_semop:
+            ret = handle_semop((int)a0, (void *)a1, (size_t)a2);
+            break;
+        case LINUX_SYS_execveat:
+            ret = handle_execveat((int)a0, (const char *)a1, (char *const *)a2, (char *const *)a3, (int)a4);
+            break;
+        case LINUX_SYS_preadv2:
+            ret = handle_preadv2((int)a0, (const struct linux_iovec *)a1, (int)a2, (off_t)a3, (int)a4);
+            break;
+        case LINUX_SYS_pwritev2:
+            ret = handle_pwritev2((int)a0, (const struct linux_iovec *)a1, (int)a2, (off_t)a3, (int)a4);
+            break;
+        case LINUX_SYS_statx:
+            ret = handle_statx((int)a0, (const char *)a1, (int)a2, (unsigned int)a3, (struct linux_statx *)a4);
+            break;
+        case LINUX_SYS_pidfd_open:
+            ret = handle_pidfd_open((pid_t)a0, (unsigned int)a1);
+            break;
+
         default:
             ltm_log_debug("Unhandled Linux syscall: %llu (%s)", (unsigned long long)num, linux_syscall_name((int)num));
             ret = -LINUX_ENOSYS;

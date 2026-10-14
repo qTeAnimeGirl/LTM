@@ -214,6 +214,33 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_prlimit64       261
 #define SYS_rseq            293
 
+/* Wave 5 Syscalls */
+#define SYS_inotify_init1       26
+#define SYS_inotify_add_watch   27
+#define SYS_inotify_rm_watch    28
+#define SYS_ioprio_set          30
+#define SYS_ioprio_get          31
+#define SYS_timer_create        107
+#define SYS_timer_gettime       108
+#define SYS_timer_getoverrun    109
+#define SYS_timer_settime       110
+#define SYS_timer_delete        111
+#define SYS_rt_sigsuspend       133
+#define SYS_rt_sigtimedwait     137
+#define SYS_rt_sigqueueinfo     138
+#define SYS_msgget              186
+#define SYS_msgctl              187
+#define SYS_msgrcv              188
+#define SYS_msgsnd              189
+#define SYS_semget              190
+#define SYS_semctl              191
+#define SYS_semop               193
+#define SYS_execveat            281
+#define SYS_preadv2             286
+#define SYS_pwritev2            287
+#define SYS_statx               291
+#define SYS_pidfd_open          434
+
 /* File open flags */
 #define AT_FDCWD        (-100)
 #define O_RDONLY        00000000
@@ -301,6 +328,96 @@ typedef enum { false = 0, true = 1 } bool;
 #define PR_CAPBSET_READ     23
 #define PR_SET_NO_NEW_PRIVS 38
 #define PR_GET_NO_NEW_PRIVS 39
+
+/* Inotify flags & events */
+#define IN_CLOEXEC          02000000
+#define IN_NONBLOCK         00004000
+#define IN_ACCESS           0x00000001
+#define IN_MODIFY           0x00000002
+#define IN_ATTRIB           0x00000004
+#define IN_CLOSE_WRITE      0x00000008
+#define IN_CLOSE_NOWRITE    0x00000010
+#define IN_OPEN             0x00000020
+#define IN_MOVED_FROM       0x00000040
+#define IN_MOVED_TO         0x00000080
+#define IN_CREATE           0x00000100
+#define IN_DELETE           0x00000200
+#define IN_DELETE_SELF      0x00000400
+#define IN_MOVE_SELF        0x00000800
+#define IN_ALL_EVENTS       0x00000fff
+
+/* I/O Priority classes & who */
+#define IOPRIO_WHO_PROCESS  1
+#define IOPRIO_WHO_PGRP     2
+#define IOPRIO_WHO_USER     3
+#define IOPRIO_CLASS_NONE   0
+#define IOPRIO_CLASS_RT     1
+#define IOPRIO_CLASS_BE     2
+#define IOPRIO_CLASS_IDLE   3
+
+/* Statx constants */
+#define STATX_TYPE          0x0001U
+#define STATX_MODE          0x0002U
+#define STATX_NLINK         0x0004U
+#define STATX_UID           0x0008U
+#define STATX_GID           0x0010U
+#define STATX_ATIME         0x0020U
+#define STATX_MTIME         0x0040U
+#define STATX_CTIME         0x0080U
+#define STATX_INO           0x0100U
+#define STATX_SIZE          0x0200U
+#define STATX_BLOCKS        0x0400U
+#define STATX_BASIC_STATS   0x07ffU
+#define STATX_BTIME         0x0800U
+#define STATX_ALL           0x0fffU
+
+struct statx_timestamp {
+    int64_t  tv_sec;
+    uint32_t tv_nsec;
+    int32_t  __statx_pad1;
+};
+
+struct statx {
+    uint32_t stx_mask;
+    uint32_t stx_blksize;
+    uint64_t stx_attributes;
+    uint32_t stx_nlink;
+    uint32_t stx_uid;
+    uint32_t stx_gid;
+    uint16_t stx_mode;
+    uint16_t __statx_pad1[1];
+    uint64_t stx_ino;
+    uint64_t stx_size;
+    uint64_t stx_blocks;
+    uint64_t stx_attributes_mask;
+    struct statx_timestamp stx_atime;
+    struct statx_timestamp stx_btime;
+    struct statx_timestamp stx_ctime;
+    struct statx_timestamp stx_mtime;
+    uint32_t stx_rdev_major;
+    uint32_t stx_rdev_minor;
+    uint32_t stx_dev_major;
+    uint32_t stx_dev_minor;
+    uint64_t stx_mnt_id;
+    uint64_t __statx_pad2;
+    uint64_t __statx_pad3[12];
+};
+
+struct sembuf {
+    uint16_t sem_num;
+    int16_t  sem_op;
+    int16_t  sem_flg;
+};
+
+#define IPC_CREAT           01000
+#define IPC_EXCL            02000
+#define IPC_NOWAIT          04000
+#define IPC_RMID            0
+#define IPC_SET             1
+#define IPC_STAT            2
+
+#define PIDFD_NONBLOCK      00004000
+
 
 #define ENOTSOCK        88
 #define EDESTADDRREQ    89
@@ -409,6 +526,11 @@ struct linux_open_how {
 #define W_OK 2
 #define R_OK 4
 #endif
+
+#define timespec linux_timespec
+#define itimerspec linux_itimerspec
+#define iovec linux_iovec
+#define itimerval linux_itimerval
 
 /* Timespec & Itimerspec */
 struct linux_timespec {
@@ -1282,6 +1404,10 @@ static inline long sys_clone(unsigned long flags, void *child_stack, void *paren
     return sys_syscall5(SYS_clone, flags, (long)child_stack, (long)parent_tid, (long)tls, (long)child_tid);
 }
 
+static inline int sys_fork(void) {
+    return (int)sys_clone(17 /* SIGCHLD */, NULL, NULL, NULL, NULL);
+}
+
 static inline int sys_execve(const char *filename, char *const argv[], char *const envp[]) {
     return (int)sys_syscall3(SYS_execve, (long)filename, (long)argv, (long)envp);
 }
@@ -1502,6 +1628,108 @@ static inline int sys_munlockall(void) {
 static inline int sys_mincore(void *start, size_t len, unsigned char *vec) {
     return (int)sys_syscall3(SYS_mincore, (long)start, len, (long)vec);
 }
+
+/* Wave 5 Syscall Wrappers */
+static inline int sys_inotify_init1(int flags) {
+    return (int)sys_syscall1(SYS_inotify_init1, flags);
+}
+
+static inline int sys_inotify_add_watch(int fd, const char *pathname, uint32_t mask) {
+    return (int)sys_syscall3(SYS_inotify_add_watch, fd, (long)pathname, mask);
+}
+
+static inline int sys_inotify_rm_watch(int fd, int wd) {
+    return (int)sys_syscall2(SYS_inotify_rm_watch, fd, wd);
+}
+
+static inline int sys_ioprio_set(int which, int who, int ioprio) {
+    return (int)sys_syscall3(SYS_ioprio_set, which, who, ioprio);
+}
+
+static inline int sys_ioprio_get(int which, int who) {
+    return (int)sys_syscall2(SYS_ioprio_get, which, who);
+}
+
+static inline int sys_timer_create(int clockid, void *sevp, int *timerid) {
+    return (int)sys_syscall3(SYS_timer_create, clockid, (long)sevp, (long)timerid);
+}
+
+static inline int sys_timer_gettime(int timerid, struct itimerspec *curr_value) {
+    return (int)sys_syscall2(SYS_timer_gettime, timerid, (long)curr_value);
+}
+
+static inline int sys_timer_getoverrun(int timerid) {
+    return (int)sys_syscall1(SYS_timer_getoverrun, timerid);
+}
+
+static inline int sys_timer_settime(int timerid, int flags, const struct itimerspec *new_value, struct itimerspec *old_value) {
+    return (int)sys_syscall4(SYS_timer_settime, timerid, flags, (long)new_value, (long)old_value);
+}
+
+static inline int sys_timer_delete(int timerid) {
+    return (int)sys_syscall1(SYS_timer_delete, timerid);
+}
+
+static inline int sys_rt_sigsuspend(const uint64_t *unewset, size_t sigsetsize) {
+    return (int)sys_syscall2(SYS_rt_sigsuspend, (long)unewset, sigsetsize);
+}
+
+static inline int sys_rt_sigtimedwait(const uint64_t *uthese, void *uinfo, const struct timespec *uts, size_t sigsetsize) {
+    return (int)sys_syscall4(SYS_rt_sigtimedwait, (long)uthese, (long)uinfo, (long)uts, sigsetsize);
+}
+
+static inline int sys_rt_sigqueueinfo(int tgid, int sig, void *uinfo) {
+    return (int)sys_syscall3(SYS_rt_sigqueueinfo, tgid, sig, (long)uinfo);
+}
+
+static inline int sys_msgget(int key, int msgflg) {
+    return (int)sys_syscall2(SYS_msgget, key, msgflg);
+}
+
+static inline int sys_msgctl(int msqid, int cmd, void *buf) {
+    return (int)sys_syscall3(SYS_msgctl, msqid, cmd, (long)buf);
+}
+
+static inline ssize_t sys_msgrcv(int msqid, void *msgp, size_t msgsz, long msgtyp, int msgflg) {
+    return sys_syscall5(SYS_msgrcv, msqid, (long)msgp, msgsz, msgtyp, msgflg);
+}
+
+static inline int sys_msgsnd(int msqid, const void *msgp, size_t msgsz, int msgflg) {
+    return (int)sys_syscall4(SYS_msgsnd, msqid, (long)msgp, msgsz, msgflg);
+}
+
+static inline int sys_semget(int key, int nsems, int semflg) {
+    return (int)sys_syscall3(SYS_semget, key, nsems, semflg);
+}
+
+static inline int sys_semctl(int semid, int semnum, int cmd, unsigned long arg) {
+    return (int)sys_syscall4(SYS_semctl, semid, semnum, cmd, arg);
+}
+
+static inline int sys_semop(int semid, struct sembuf *sops, size_t nsops) {
+    return (int)sys_syscall3(SYS_semop, semid, (long)sops, nsops);
+}
+
+static inline int sys_execveat(int dirfd, const char *pathname, char *const argv[], char *const envp[], int flags) {
+    return (int)sys_syscall5(SYS_execveat, dirfd, (long)pathname, (long)argv, (long)envp, flags);
+}
+
+static inline ssize_t sys_preadv2(int fd, const struct iovec *iov, int iovcnt, off_t offset, int flags) {
+    return sys_syscall5(SYS_preadv2, fd, (long)iov, iovcnt, offset, flags);
+}
+
+static inline ssize_t sys_pwritev2(int fd, const struct iovec *iov, int iovcnt, off_t offset, int flags) {
+    return sys_syscall5(SYS_pwritev2, fd, (long)iov, iovcnt, offset, flags);
+}
+
+static inline int sys_statx(int dirfd, const char *pathname, int flags, unsigned int mask, struct statx *statxbuf) {
+    return (int)sys_syscall5(SYS_statx, dirfd, (long)pathname, flags, mask, (long)statxbuf);
+}
+
+static inline int sys_pidfd_open(int pid, unsigned int flags) {
+    return (int)sys_syscall2(SYS_pidfd_open, pid, flags);
+}
+
 
 /* String / memory utilities */
 static inline size_t ltm_strlen(const char *s) {

@@ -148,6 +148,21 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 - [x] **194 of 194 Tests Passing (100% Pass Rate)**:
   - 184 standalone unit tests + 10 core integration test suites passing with 100% accuracy.
 
+### Milestone 12: Wave 5 Syscall Expansion & Inotify, POSIX Timers, SysV IPC, Advanced I/O, and Modern Process Descriptors (Sprint 14)
+- [x] **25 New Linux ARM64 Syscalls Implemented and Verified with Dedicated Standalone Unit Tests**:
+  - **Inotify & Filesystem Events**: `inotify_init1` (26), `inotify_add_watch` (27), `inotify_rm_watch` (28).
+  - **I/O Priority**: `ioprio_set` (30), `ioprio_get` (31).
+  - **POSIX Per-Process Timers**: `timer_create` (107), `timer_gettime` (108), `timer_getoverrun` (109), `timer_settime` (110), `timer_delete` (111).
+  - **Real-Time Signals**: `rt_sigsuspend` (133), `rt_sigtimedwait` (137), `rt_sigqueueinfo` (138).
+  - **System V IPC (Messages & Semaphores)**: `msgget` (186), `msgctl` (187), `msgrcv` (188), `msgsnd` (189), `semget` (190), `semctl` (191), `semop` (193).
+  - **Advanced & Vectored File I/O**: `execveat` (281), `preadv2` (286), `pwritev2` (287), `statx` (291).
+  - **Process File Descriptors**: `pidfd_open` (434).
+- [x] **209 Dedicated Standalone Unit Tests (`tests/syscalls/`)**:
+  - 209 of 209 implemented Linux ARM64 system calls have dedicated standalone unit tests (100.0% 1-to-1 coverage).
+  - Strict 3-Way Mandate (Case A: Happy, Case B: Boundary, Case C: Errno) satisfied on all 209 syscalls.
+- [x] **219 of 219 Tests Passing (100% Pass Rate)**:
+  - 209 standalone unit tests + 10 core integration test suites passing with 100% accuracy.
+
 ---
 
 
@@ -175,7 +190,12 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 23 | `dup` | File I/O | **Implemented** | Duplicates fd and inherits ICMP tracking state |
 | 24 | `dup3` | File I/O | **Implemented** | `dup2` with `O_CLOEXEC` flag support |
 | 25 | `fcntl` | File I/O | **Implemented** | Command translation (`F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL`, `F_DUPFD`) |
+| 26 | `inotify_init1` | Filesystem/Events | **Implemented** | Managed inotify instance table with non-blocking pipe bridge (`IN_CLOEXEC`, `IN_NONBLOCK`) |
+| 27 | `inotify_add_watch` | Filesystem/Events | **Implemented** | Adds or updates watch descriptor for sandboxed filesystem path |
+| 28 | `inotify_rm_watch` | Filesystem/Events | **Implemented** | Removes active watch descriptor from inotify instance |
 | 29 | `ioctl` | Terminal/I/O | **Implemented** | `TIOCGWINSZ`, `TIOCSWINSZ`, `TCGETS`, `TCSETS`, `TIOCSCTTY`, `TIOCGPGRP`, `TIOCSPGRP`, `FIONREAD` |
+| 30 | `ioprio_set` | I/O Priority | **Implemented** | Validates target class/data and returns 0 |
+| 31 | `ioprio_get` | I/O Priority | **Implemented** | Returns best-effort default I/O priority for target process |
 | 32 | `flock` | File I/O | **Implemented** | Advisory file locking via Darwin `flock()`, translates `EWOULDBLOCK` to `-EAGAIN` |
 | 33 | `mknodat` | Filesystem | **Implemented** | Device node, FIFO, and regular file creation with mode, permissions, and device major/minor handling |
 | 34 | `mkdirat` | Filesystem | **Implemented** | Sandboxed directory creation with `-EFAULT` pointer check |
@@ -239,6 +259,11 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 101 | `nanosleep` | Time | **Implemented** | High-resolution thread sleep |
 | 103 | `setitimer` | Timers | **Implemented** | Sets interval timers (`ITIMER_REAL`, `ITIMER_VIRTUAL`) |
 | 104 | `getitimer` | Timers | **Implemented** | Reads remaining timer duration |
+| 107 | `timer_create` | Timers | **Implemented** | Creates POSIX per-process timer using libdispatch timer source |
+| 108 | `timer_gettime` | Timers | **Implemented** | Queries remaining time and interval on active POSIX timer |
+| 109 | `timer_getoverrun` | Timers | **Implemented** | Returns POSIX timer expiration overrun count |
+| 110 | `timer_settime` | Timers | **Implemented** | Arms, updates, or disarms POSIX timer with relative or absolute timestamps |
+| 111 | `timer_delete` | Timers | **Implemented** | Disarms and deletes POSIX per-process timer |
 | 113 | `clock_gettime` | Time | **Implemented** | Maps `CLOCK_REALTIME`, `CLOCK_MONOTONIC`, `CLOCK_BOOTTIME` |
 | 114 | `clock_getres` | Time | **Implemented** | Returns clock resolution |
 | 115 | `clock_nanosleep`| Time | **Implemented** | High-resolution relative and absolute sleep (`TIMER_ABSTIME`) |
@@ -256,9 +281,12 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 130 | `tkill` | Signals | **Implemented** | Sends signal to thread |
 | 131 | `tgkill` | Signals | **Implemented** | Sends signal to thread group |
 | 132 | `sigaltstack` | Signals | **Implemented** | Alternate signal stack configuration |
+| 133 | `rt_sigsuspend` | Signals | **Implemented** | Temporarily replaces signal mask and suspends thread execution until signal |
 | 134 | `rt_sigaction` | Signals | **Implemented** | Maps Linux signal handlers to Darwin with `SA_NODEFER` |
 | 135 | `rt_sigprocmask` | Signals | **Implemented** | Manages thread signal blocking masks |
 | 136 | `rt_sigpending` | Signals | **Implemented** | Queries pending signals for calling thread |
+| 137 | `rt_sigtimedwait` | Signals | **Implemented** | Synchronously waits for pending signals in mask with nanosecond timeout |
+| 138 | `rt_sigqueueinfo` | Signals | **Implemented** | Queues signal with `siginfo_t` data to destination process/thread |
 | 139 | `rt_sigreturn` | Signals | **Implemented** | Custom assembly restorer popping stack frame and resuming guest |
 | 140 | `setpriority` | Scheduling | **Implemented** | Sets process priority with Linux offset translation |
 | 141 | `getpriority` | Scheduling | **Implemented** | Returns process priority mapped to `20 - nice` |
@@ -291,6 +319,13 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 177 | `getegid` | Identity | **Implemented** | Returns `0` (`root`) |
 | 178 | `gettid` | Identity | **Implemented** | Returns thread ID |
 | 179 | `sysinfo` | System Info | **Implemented** | Returns uptime, total/free RAM, and process counts |
+| 186 | `msgget` | SysV IPC | **Implemented** | System V message queue allocation and key lookup via Darwin `msgget()` |
+| 187 | `msgctl` | SysV IPC | **Implemented** | System V message queue control operations (`IPC_RMID`, `IPC_STAT`, `IPC_SET`) |
+| 188 | `msgrcv` | SysV IPC | **Implemented** | Receives message from System V message queue via Darwin `msgrcv()` |
+| 189 | `msgsnd` | SysV IPC | **Implemented** | Sends message to System V message queue via Darwin `msgsnd()` |
+| 190 | `semget` | SysV IPC | **Implemented** | System V semaphore set creation and key lookup via Darwin `semget()` |
+| 191 | `semctl` | SysV IPC | **Implemented** | System V semaphore set control operations (`IPC_RMID`, `GETVAL`, `SETVAL`, `GETALL`, `SETALL`) |
+| 193 | `semop` | SysV IPC | **Implemented** | Performs atomic array of semaphore operations via Darwin `semop()` |
 | 198 | `socket` | Networking | **Implemented** | Creates socket with ICMP protocol tracking |
 | 199 | `socketpair` | Networking | **Implemented** | Creates connected socket pair |
 | 200 | `bind` | Networking | **Implemented** | Binds socket to local address with sockaddr conversion |
@@ -329,7 +364,12 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 276 | `renameat2` | Filesystem | **Implemented** | Atomic file rename with exchange/no-replace support |
 | 278 | `getrandom` | Security | **Implemented** | Cryptographic random entropy via Darwin `arc4random_buf()` |
 | 279 | `memfd_create` | Memory | **Implemented** | Anonymous descriptor via temporary file with immediate `unlink()` |
+| 281 | `execveat` | Process | **Implemented** | Executes binary relative to directory descriptor / path with flags support |
 | 285 | `copy_file_range`| File I/O | **Implemented** | High-performance 64KB chunked userland buffer transfer |
+| 286 | `preadv2` | File I/O | **Implemented** | Vectored positional read with flags (`RWF_HIPRI`, `RWF_DSYNC`, `RWF_SYNC`, `RWF_NOWAIT`, `RWF_APPEND`) |
+| 287 | `pwritev2` | File I/O | **Implemented** | Vectored positional write with flags support |
+| 291 | `statx` | Filesystem | **Implemented** | 256-byte extended file status structure with nanosecond timestamps, birthtime, and attributes |
+| 434 | `pidfd_open` | Process | **Implemented** | Allocates process file descriptor for tracking and signal delivery |
 | 436 | `close_range` | File I/O | **Implemented** | Range descriptor closure with `CLOSE_RANGE_CLOEXEC` support |
 | 437 | `openat2` | File I/O | **Implemented** | Modern openat with `RESOLVE_BENEATH` and `RESOLVE_NO_SYMLINKS` |
 | 439 | `faccessat2` | Filesystem | **Implemented** | Extended access checks with `AT_EACCESS` and `AT_SYMLINK_NOFOLLOW` |
@@ -349,7 +389,7 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | **`whoami` & `id`** | `aarch64` | Dynamic / Musl | **100% Working** | Correctly outputs `root` and `uid=0(root) gid=0(root) groups=0(root)` |
 | **`uname`** | `aarch64` | Dynamic / Musl | **100% Working** | Outputs `Linux ltm-mac LTM 2026.1A ... aarch64 Linux` |
 | **Standard Coreutils** | `aarch64` | Dynamic / Musl | **100% Working** | `ls`, `cat`, `mkdir`, `rm`, `cp`, `mv`, `head`, `tail`, `grep`, `sleep`, `stat` |
-| **Automated Test Suite** | `aarch64` | Static / Freestanding | **100% Working** | **9 of 9 test suites pass cleanly** (100% pass rate) |
+| **Automated Test Suite** | `aarch64` | Static / Freestanding | **100% Working** | **219 of 219 tests pass cleanly** (100% pass rate) |
 
 ---
 
