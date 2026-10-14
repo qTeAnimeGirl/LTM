@@ -253,6 +253,24 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case LINUX_SYS_getegid:
             ret = handle_getegid();
             break;
+        case LINUX_SYS_getresuid:
+            ret = handle_getresuid((uid_t *)a0, (uid_t *)a1, (uid_t *)a2);
+            break;
+        case LINUX_SYS_getresgid:
+            ret = handle_getresgid((gid_t *)a0, (gid_t *)a1, (gid_t *)a2);
+            break;
+        case LINUX_SYS_getgroups:
+            ret = handle_getgroups((int)a0, (gid_t *)a1);
+            break;
+        case LINUX_SYS_setgroups:
+            ret = handle_setgroups((size_t)a0, (const gid_t *)a1);
+            break;
+        case LINUX_SYS_capget:
+            ret = handle_capget((void *)a0, (void *)a1);
+            break;
+        case LINUX_SYS_capset:
+            ret = handle_capset((void *)a0, (const void *)a1);
+            break;
         case LINUX_SYS_gettid:
             ret = handle_gettid();
             break;

@@ -125,8 +125,8 @@ int sandbox_virtual_stat(const char *path, struct stat *st) {
     if (!path || !st) return -LINUX_EINVAL;
     memset(st, 0, sizeof(*st));
 
-    st->st_uid = 1000;
-    st->st_gid = 1000;
+    st->st_uid = 0;
+    st->st_gid = 0;
     st->st_nlink = 1;
     st->st_blksize = 4096;
 
@@ -401,8 +401,9 @@ static int open_proc_self_status(void) {
         "Tgid:\t%d\n"
         "Pid:\t%d\n"
         "PPid:\t%d\n"
-        "Uid:\t1000\t1000\t1000\t1000\n"
-        "Gid:\t1000\t1000\t1000\t1000\n"
+        "Uid:\t0\t0\t0\t0\n"
+        "Gid:\t0\t0\t0\t0\n"
+        "Groups:\t0\n"
         "FDSize:\t256\n"
         "Threads:\t1\n",
         g_ltm.binary_path, getpid(), getpid(), getppid());

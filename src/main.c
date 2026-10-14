@@ -98,6 +98,52 @@ static int run_install_rootfs(const char *target_dir) {
     return 0;
 }
 
+static char **build_guest_env(char **host_envp) {
+    int count = 0;
+    bool has_root_user = false;
+    while (host_envp && host_envp[count]) {
+        if (strcmp(host_envp[count], "USER=root") == 0) {
+            has_root_user = true;
+        }
+        count++;
+    }
+
+    char **guest_env = malloc((count + 16) * sizeof(char *));
+    if (!guest_env) return host_envp;
+
+    int n = 0;
+    if (!has_root_user) {
+        guest_env[n++] = strdup("USER=root");
+        guest_env[n++] = strdup("LOGNAME=root");
+        guest_env[n++] = strdup("HOME=/root");
+        guest_env[n++] = strdup("SHELL=/bin/bash");
+        guest_env[n++] = strdup("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        guest_env[n++] = strdup("OPENSSL_armcap=0");
+
+        for (int i = 0; i < count; i++) {
+            const char *e = host_envp[i];
+            if (strncmp(e, "USER=", 5) == 0 ||
+                strncmp(e, "LOGNAME=", 8) == 0 ||
+                strncmp(e, "HOME=", 5) == 0 ||
+                strncmp(e, "SHELL=", 6) == 0 ||
+                strncmp(e, "PATH=", 5) == 0 ||
+                strncmp(e, "MAIL=", 5) == 0 ||
+                strncmp(e, "PWD=", 4) == 0 ||
+                strncmp(e, "OLDPWD=", 7) == 0 ||
+                strncmp(e, "OPENSSL_armcap=", 15) == 0) {
+                continue;
+            }
+            guest_env[n++] = strdup(e);
+        }
+    } else {
+        for (int i = 0; i < count; i++) {
+            guest_env[n++] = strdup(host_envp[i]);
+        }
+    }
+    guest_env[n] = NULL;
+    return guest_env;
+}
+
 int main(int argc, char **argv, char **envp) {
     /* Prevent OpenSSL from executing unsupported ARMv8 crypto instructions during CPUID probes */
     setenv("OPENSSL_armcap", "0", 0);
@@ -207,10 +253,29 @@ int main(int argc, char **argv, char **envp) {
         }
     }
 
+    /* If running inside guest container rootfs, ensure working directory defaults to /root */
+    if (is_container_path) {
+        char cur_cwd[1024];
+        if (getcwd(cur_cwd, sizeof(cur_cwd))) {
+            size_t rootfs_len = strlen(g_ltm.host_rootfs);
+            if (strncmp(cur_cwd, g_ltm.host_rootfs, rootfs_len) != 0 ||
+                strcmp(cur_cwd, g_ltm.host_rootfs) == 0) {
+                char root_home[1024];
+                snprintf(root_home, sizeof(root_home), "%s/root", g_ltm.host_rootfs);
+                struct stat st;
+                if (stat(root_home, &st) == 0 && S_ISDIR(st.st_mode)) {
+                    chdir(root_home);
+                } else {
+                    chdir(g_ltm.host_rootfs);
+                }
+            }
+        }
+    }
+
     /* Prepare guest argc / argv / envp */
     g_ltm.guest_argc = argc - arg_idx;
     g_ltm.guest_argv = &argv[arg_idx];
-    g_ltm.guest_envp = envp;
+    g_ltm.guest_envp = build_guest_env(envp);
 
     /* Initialize syscall trap handling */
     if (syscall_dispatcher_init() != 0) {

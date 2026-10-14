@@ -97,8 +97,8 @@ static void copy_stat_to_linux(const struct stat *st, struct linux_stat *statbuf
     statbuf->st_ino = st->st_ino;
     statbuf->st_mode = st->st_mode;
     statbuf->st_nlink = st->st_nlink;
-    statbuf->st_uid = 1000;
-    statbuf->st_gid = 1000;
+    statbuf->st_uid = 0;
+    statbuf->st_gid = 0;
     statbuf->st_rdev = st->st_rdev;
     statbuf->st_size = st->st_size;
     statbuf->st_blksize = st->st_blksize > 0 ? st->st_blksize : 4096;
@@ -851,19 +851,70 @@ int64_t handle_getppid(void) {
 }
 
 int64_t handle_getuid(void) {
-    return 1000;
+    return 0;
 }
 
 int64_t handle_geteuid(void) {
-    return 1000;
+    return 0;
 }
 
 int64_t handle_getgid(void) {
-    return 1000;
+    return 0;
 }
 
 int64_t handle_getegid(void) {
-    return 1000;
+    return 0;
+}
+
+int64_t handle_getresuid(uid_t *ruid, uid_t *euid, uid_t *suid) {
+    if (ruid) *ruid = 0;
+    if (euid) *euid = 0;
+    if (suid) *suid = 0;
+    return 0;
+}
+
+int64_t handle_getresgid(gid_t *rgid, gid_t *egid, gid_t *sgid) {
+    if (rgid) *rgid = 0;
+    if (egid) *egid = 0;
+    if (sgid) *sgid = 0;
+    return 0;
+}
+
+int64_t handle_getgroups(int size, gid_t list[]) {
+    if (size < 0) return -LINUX_EINVAL;
+    if (size == 0) return 1; /* Linux root group count */
+    if (!list) return -LINUX_EFAULT;
+    list[0] = 0;
+    return 1;
+}
+
+int64_t handle_setgroups(size_t size, const gid_t *list) {
+    (void)size;
+    (void)list;
+    return 0;
+}
+
+int64_t handle_capget(void *hdr, void *data) {
+    if (hdr) {
+        uint32_t *h = (uint32_t *)hdr;
+        h[0] = 0x20080522; /* _LINUX_CAPABILITY_VERSION_3 */
+    }
+    if (data) {
+        uint32_t *d = (uint32_t *)data;
+        d[0] = 0xffffffff;
+        d[1] = 0xffffffff;
+        d[2] = 0xffffffff;
+        d[3] = 0xffffffff;
+        d[4] = 0xffffffff;
+        d[5] = 0xffffffff;
+    }
+    return 0;
+}
+
+int64_t handle_capset(void *hdr, const void *data) {
+    (void)hdr;
+    (void)data;
+    return 0;
 }
 
 int64_t handle_gettid(void) {

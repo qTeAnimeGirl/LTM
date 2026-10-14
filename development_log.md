@@ -536,3 +536,64 @@ When launching interactive GNU Bash or BusyBox `sh` (`./ltm /bin/bash` or `./ltm
   - Total Overall Time: Native 369 ms vs LTM 397 ms (**92.9% overall efficiency, only 28 ms difference across hundreds of millions of operations**)
 - **Regression Tests**:
   - Automated test harness (`./run_tests.sh`) reports **6/6 passed** (100%).
+
+---
+
+## Sprint 5: Root User Identity, Permissions, and Default Container Login
+
+**Date**: 2026-10-14
+**Author**: Engineering Swarm (Lead Architect, Core Systems Coder, Diligent Tester, Helpful Planner)
+
+### 1. Architectural Challenges & Root Causes
+1. **Unrecognized Host User ID in Container**:
+   - Previously, `handle_getuid()`, `handle_geteuid()`, `handle_getgid()`, and `handle_getegid()` returned `1000`.
+   - Alpine Linux's default container rootfs only contains the `root` account (`uid=0, gid=0`) in `/etc/passwd`.
+   - Any invocation of `whoami` failed with `whoami: unknown uid 1000`, and `id` failed with `id: can't get groups`.
+2. **Missing Group & Capability Syscalls**:
+   - `id` and `sudo` call `getgroups` (syscall 158) to query supplementary groups. Returning `-ENOSYS` (-38) broke user authentication and group resolution.
+   - Applications checking for superuser capabilities call `capget` (syscall 90). Returning `-ENOSYS` caused root utilities to assume an unprivileged container.
+3. **Host Environment Pollution**:
+   - The host macOS user environment (`USER=qteanimegirl`, `HOME=/Users/qteanimegirl`, `SHELL=/bin/zsh`, host `PATH`) was previously passed unaltered to guest binaries.
+   - Because `/Users/qteanimegirl` does not exist inside the container rootfs, shells could not locate their home directory, and Fastfetch displayed `qteanimegirl@ltm-mac` with `zsh`.
+4. **Working Directory Placement**:
+   - Invoking `./ltm /bin/bash` from the project directory previously kept the working directory outside the container rootfs, defaulting to `/` instead of `/root`.
+
+### 2. Solutions Implemented
+1. **Root Identity Syscalls in `src/syscall_handlers.c` & `src/syscall_dispatcher.c`**:
+   - Updated `handle_getuid`, `handle_geteuid`, `handle_getgid`, `handle_getegid` to return `0`.
+   - Implemented `handle_getresuid(ruid, euid, suid)` and `handle_getresgid(rgid, egid, sgid)` setting all IDs to `0`.
+   - Implemented `handle_getgroups(size, list)`: returns 1 group with GID 0 (`root`).
+   - Implemented `handle_setgroups`: returns 0.
+   - Implemented `handle_capget`: populates version (`_LINUX_CAPABILITY_VERSION_3`) and full capability bitmasks (`0xffffffff`) across effective, permitted, and inheritable sets.
+   - Implemented `handle_capset`: returns 0.
+   - Added dispatch cases for `LINUX_SYS_getresuid` (148), `LINUX_SYS_getresgid` (150), `LINUX_SYS_getgroups` (158), `LINUX_SYS_setgroups` (159), `LINUX_SYS_capget` (90), `LINUX_SYS_capset` (91).
+2. **Virtual Stat & Procfs Ownership**:
+   - Updated `copy_stat_to_linux` in `src/syscall_handlers.c` to report `st_uid = 0; statbuf->st_gid = 0;`.
+   - Updated `sandbox_virtual_stat` in `src/sandbox.c` to report `st_uid = 0; st->st_gid = 0;`.
+   - Updated `open_proc_self_status` in `src/sandbox.c` to report `Uid: 0 0 0 0`, `Gid: 0 0 0 0`, `Groups: 0`.
+3. **ELF Stack Auxv Initialization in `src/elf_loader.c`**:
+   - Set `LINUX_AT_UID`, `LINUX_AT_EUID`, `LINUX_AT_GID`, and `LINUX_AT_EGID` to `0` in `auxv`.
+4. **Environment Sanitization & Container CWD in `src/main.c`**:
+   - Implemented `build_guest_env(host_envp)`: filters out host user variables (`USER`, `LOGNAME`, `HOME`, `SHELL`, `PATH`, `MAIL`, `PWD`, `OLDPWD`) and cleanly supplies standard container root defaults:
+     - `USER=root`
+     - `LOGNAME=root`
+     - `HOME=/root`
+     - `SHELL=/bin/bash`
+     - `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`
+     - `OPENSSL_armcap=0`
+     - Preserves terminal and locale configuration (`TERM`, `COLORTERM`, `LANG`, etc.).
+   - Updated container launch: if running a container path (e.g. `/bin/bash`, `/bin/sh`, `/usr/bin/fastfetch`), initial working directory defaults to `${rootfs}/root`.
+
+### 3. Verification & Results
+- **Whoami**: `./ltm /bin/busybox whoami` outputs `root` with exit code 0.
+- **ID**: `./ltm /bin/busybox id` outputs `uid=0(root) gid=0(root) groups=0(root)`.
+- **Bash Session**: `./ltm /bin/bash -c "id; whoami; pwd; echo HOME=\$HOME; echo USER=\$USER"` outputs:
+  ```
+  uid=0(root) gid=0(root) groups=0(root)
+  root
+  /root
+  HOME=/root
+  USER=root
+  ```
+- **Fastfetch**: `./ltm /usr/bin/fastfetch` renders `root@ltm-mac` with `Shell: bash 5.2.26`.
+- **Automated Regression Suite**: `./run_tests.sh` passes 6/6 tests (100% pass rate).
