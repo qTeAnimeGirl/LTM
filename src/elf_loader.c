@@ -1,19 +1,19 @@
 #include "elf_loader.h"
 #include "patcher.h"
+#include "sandbox.h"
 
-int elf_load_binary(const char *filepath, ltm_runtime_t *rt) {
-    if (!filepath || !rt) return -1;
-
-    int fd = open(filepath, O_RDONLY);
-    if (fd < 0) {
-        ltm_log_error("Failed to open binary '%s': %s", filepath, strerror(errno));
+static int elf_load_image(int fd, const char *filepath, uintptr_t pref_base,
+                          uintptr_t *out_base, uintptr_t *out_entry,
+                          uintptr_t *out_ph_addr, uint16_t *out_ph_num, uint16_t *out_ph_ent,
+                          uintptr_t *out_max_vaddr, char *out_interp, size_t interp_buf_sz) {
+    if (lseek(fd, 0, SEEK_SET) < 0) {
+        ltm_log_error("Failed to rewind '%s'", filepath);
         return -1;
     }
 
     Elf64_Ehdr ehdr;
     if (read(fd, &ehdr, sizeof(ehdr)) != sizeof(ehdr)) {
         ltm_log_error("Failed to read ELF header from '%s'", filepath);
-        close(fd);
         return -1;
     }
 
@@ -23,39 +23,33 @@ int elf_load_binary(const char *filepath, ltm_runtime_t *rt) {
         ehdr.e_ident[EI_MAG2] != ELFMAG2 ||
         ehdr.e_ident[EI_MAG3] != ELFMAG3) {
         ltm_log_error("Not an ELF binary: '%s'", filepath);
-        close(fd);
         return -1;
     }
 
     /* Validate architecture and endianness */
     if (ehdr.e_ident[EI_CLASS] != ELFCLASS64) {
         ltm_log_error("Not a 64-bit ELF binary: class %d", ehdr.e_ident[EI_CLASS]);
-        close(fd);
         return -1;
     }
 
     if (ehdr.e_ident[EI_DATA] != ELFDATA2LSB) {
         ltm_log_error("Not a little-endian ELF binary");
-        close(fd);
         return -1;
     }
 
     if (ehdr.e_machine != EM_AARCH64) {
         ltm_log_error("Not an ARM64 (AArch64) ELF binary (machine %d)", ehdr.e_machine);
-        close(fd);
         return -1;
     }
 
     if (ehdr.e_type != ET_EXEC && ehdr.e_type != ET_DYN) {
         ltm_log_error("Unsupported ELF type: %d (expected ET_EXEC or ET_DYN)", ehdr.e_type);
-        close(fd);
         return -1;
     }
 
     /* Read program headers */
     if (ehdr.e_phnum == 0 || ehdr.e_phentsize != sizeof(Elf64_Phdr)) {
         ltm_log_error("Invalid program header count or entry size (%d * %d)", ehdr.e_phnum, ehdr.e_phentsize);
-        close(fd);
         return -1;
     }
 
@@ -63,7 +57,6 @@ int elf_load_binary(const char *filepath, ltm_runtime_t *rt) {
     Elf64_Phdr *phdrs = malloc(ph_table_bytes);
     if (!phdrs) {
         ltm_log_error("Out of memory allocating program headers");
-        close(fd);
         return -1;
     }
 
@@ -71,8 +64,27 @@ int elf_load_binary(const char *filepath, ltm_runtime_t *rt) {
         (size_t)read(fd, phdrs, ph_table_bytes) != ph_table_bytes) {
         ltm_log_error("Failed to read program headers");
         free(phdrs);
-        close(fd);
         return -1;
+    }
+
+    /* Check for PT_INTERP */
+    if (out_interp && interp_buf_sz > 0) {
+        out_interp[0] = '\0';
+        for (int i = 0; i < ehdr.e_phnum; i++) {
+            if (phdrs[i].p_type == PT_INTERP) {
+                if (lseek(fd, phdrs[i].p_offset, SEEK_SET) >= 0) {
+                    size_t isz = phdrs[i].p_filesz < interp_buf_sz - 1 ? phdrs[i].p_filesz : interp_buf_sz - 1;
+                    ssize_t r = read(fd, out_interp, isz);
+                    if (r > 0) {
+                        out_interp[r] = '\0';
+                        while (r > 0 && (out_interp[r - 1] == '\0' || out_interp[r - 1] == '\n')) {
+                            out_interp[--r] = '\0';
+                        }
+                    }
+                }
+                break;
+            }
+        }
     }
 
     /* Find virtual address bounds across all PT_LOAD segments */
@@ -93,9 +105,8 @@ int elf_load_binary(const char *filepath, ltm_runtime_t *rt) {
     }
 
     if (load_segments == 0) {
-        ltm_log_error("No PT_LOAD segments found in ELF");
+        ltm_log_error("No PT_LOAD segments found in ELF '%s'", filepath);
         free(phdrs);
-        close(fd);
         return -1;
     }
 
@@ -105,77 +116,66 @@ int elf_load_binary(const char *filepath, ltm_runtime_t *rt) {
 
     uintptr_t load_base = 0;
     if (ehdr.e_type == ET_DYN) {
-        /* Position-independent executable: reserve 64-bit address space (>= 4GB) */
-        void *reserved = mmap((void *)0x400000000ULL, total_span, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
+        void *reserved = mmap((void *)pref_base, total_span, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
         if (reserved == MAP_FAILED) {
             reserved = mmap(NULL, total_span, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
         }
         if (reserved == MAP_FAILED) {
-            ltm_log_error("Failed to reserve memory for ET_DYN ELF: %s", strerror(errno));
+            ltm_log_error("Failed to reserve memory for ET_DYN ELF '%s': %s", filepath, strerror(errno));
             free(phdrs);
-            close(fd);
             return -1;
         }
         load_base = (uintptr_t)reserved - min_page;
-        rt->elf_base = load_base;
-        rt->elf_entry = load_base + ehdr.e_entry;
     } else {
-        /* ET_EXEC */
         if (min_vaddr < 0x100000000ULL) {
-            ltm_log_error("ELF binary is static non-PIE linked below 4GB (0x%llx). macOS Apple Silicon enforces a 4GB PAGEZERO (VM_MIN_ADDRESS=0x100000000). Please compile with -pie / -static-pie or --image-base=0x400000000.", (unsigned long long)min_vaddr);
+            ltm_log_error("ELF binary '%s' is static non-PIE linked below 4GB (0x%llx). macOS Apple Silicon enforces a 4GB PAGEZERO.",
+                          filepath, (unsigned long long)min_vaddr);
             free(phdrs);
-            close(fd);
             return -1;
         }
         load_base = 0;
-        rt->elf_base = min_vaddr;
-        rt->elf_entry = ehdr.e_entry;
     }
 
-    ltm_log_debug("Loading ELF: base=0x%lx, entry=0x%lx, span=0x%zx",
-                  (unsigned long)rt->elf_base, (unsigned long)rt->elf_entry, total_span);
+    ltm_log_debug("Loading '%s': base=0x%lx, entry=0x%lx, span=0x%zx",
+                  filepath, (unsigned long)load_base, (unsigned long)(load_base + ehdr.e_entry), total_span);
 
     /* Allocate the contiguous span with RW */
     void *span_ptr = mmap((void *)(load_base + min_page), total_span,
                           PROT_READ | PROT_WRITE,
                           MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0);
     if (span_ptr == MAP_FAILED) {
-        ltm_log_error("Failed to map contiguous segment memory: %s", strerror(errno));
+        ltm_log_error("Failed to map segment memory for '%s': %s", filepath, strerror(errno));
         free(phdrs);
-        close(fd);
         return -1;
     }
     memset(span_ptr, 0, total_span);
 
-    /* Load each PT_LOAD segment data into memory and patch svc #0 instructions */
+    /* Load each PT_LOAD segment data into memory and patch svc #0 / TLS instructions */
     for (int i = 0; i < ehdr.e_phnum; i++) {
         if (phdrs[i].p_type != PT_LOAD) continue;
 
         uintptr_t seg_start = load_base + phdrs[i].p_vaddr;
         if (phdrs[i].p_filesz > 0) {
             if (lseek(fd, phdrs[i].p_offset, SEEK_SET) < 0) {
-                ltm_log_error("lseek failed for segment %d", i);
+                ltm_log_error("lseek failed for segment %d of '%s'", i, filepath);
                 free(phdrs);
-                close(fd);
                 return -1;
             }
             ssize_t read_bytes = read(fd, (void *)seg_start, phdrs[i].p_filesz);
             if (read_bytes < 0 || (size_t)read_bytes != phdrs[i].p_filesz) {
-                ltm_log_error("read failed for segment %d", i);
+                ltm_log_error("read failed for segment %d of '%s'", i, filepath);
                 free(phdrs);
-                close(fd);
                 return -1;
             }
         }
 
-        /* If executable segment, patch svc #0 to brk #0 now while writable */
         if (phdrs[i].p_flags & PF_X) {
             size_t patched = patcher_scan_and_patch((void *)seg_start, phdrs[i].p_filesz);
-            ltm_log_debug("Segment %d (RX): patched %zu svc #0 instructions", i, patched);
+            ltm_log_debug("Segment %d (RX) of '%s': patched %zu instructions", i, filepath, patched);
         }
     }
 
-    /* Apply dynamic relocations if present (e.g. PIE binaries) */
+    /* Apply dynamic relocations if present */
     for (int i = 0; i < ehdr.e_phnum; i++) {
         if (phdrs[i].p_type == PT_DYNAMIC) {
             Elf64_Dyn *dyn = (Elf64_Dyn *)(load_base + phdrs[i].p_vaddr);
@@ -206,19 +206,18 @@ int elf_load_binary(const char *filepath, ltm_runtime_t *rt) {
                         applied++;
                     }
                 }
-                ltm_log_debug("Applied %zu dynamic relocations (R_AARCH64_RELATIVE)", applied);
+                ltm_log_debug("Applied %zu dynamic relocations to '%s'", applied, filepath);
             }
             break;
         }
     }
 
-    /* Compute combined protections per 16KB hardware page */
+    /* Apply page protections per 16KB hardware page */
     size_t num_pages = total_span / PAGE_SIZE_16K;
     int *page_prots = calloc(num_pages, sizeof(int));
     if (!page_prots) {
         ltm_log_error("calloc page_prots failed");
         free(phdrs);
-        close(fd);
         return -1;
     }
 
@@ -241,11 +240,10 @@ int elf_load_binary(const char *filepath, ltm_runtime_t *rt) {
         }
     }
 
-    /* Apply permissions via mprotect in contiguous ranges */
     size_t range_start_idx = 0;
     while (range_start_idx < num_pages) {
         int prot = page_prots[range_start_idx];
-        if (prot == 0) prot = PROT_READ | PROT_WRITE; /* default unmapped padding in span */
+        if (prot == 0) prot = PROT_READ | PROT_WRITE;
 
         size_t range_end_idx = range_start_idx + 1;
         while (range_end_idx < num_pages) {
@@ -272,26 +270,93 @@ int elf_load_binary(const char *filepath, ltm_runtime_t *rt) {
     free(page_prots);
 
     /* Locate program headers for auxv */
-    rt->elf_ph_addr = 0;
+    uintptr_t ph_addr = 0;
     for (int i = 0; i < ehdr.e_phnum; i++) {
         if (phdrs[i].p_type == PT_PHDR) {
-            rt->elf_ph_addr = load_base + phdrs[i].p_vaddr;
+            ph_addr = load_base + phdrs[i].p_vaddr;
             break;
         }
     }
-    if (rt->elf_ph_addr == 0) {
-        /* Default: in first PT_LOAD segment */
-        rt->elf_ph_addr = load_base + min_vaddr + ehdr.e_phoff;
+    if (ph_addr == 0) {
+        ph_addr = load_base + min_vaddr + ehdr.e_phoff;
     }
-    rt->elf_ph_num = ehdr.e_phnum;
-    rt->elf_ph_ent = ehdr.e_phentsize;
 
-    /* Initial brk heap start */
-    rt->brk_start = PAGE_ROUND_UP(load_base + max_vaddr);
-    rt->brk_current = rt->brk_start;
+    if (out_base) *out_base = load_base;
+    if (out_entry) *out_entry = load_base + ehdr.e_entry;
+    if (out_ph_addr) *out_ph_addr = ph_addr;
+    if (out_ph_num) *out_ph_num = ehdr.e_phnum;
+    if (out_ph_ent) *out_ph_ent = ehdr.e_phentsize;
+    if (out_max_vaddr) *out_max_vaddr = load_base + max_vaddr;
 
     free(phdrs);
+    return 0;
+}
+
+int elf_load_binary(const char *filepath, ltm_runtime_t *rt) {
+    if (!filepath || !rt) return -1;
+
+    int fd = open(filepath, O_RDONLY);
+    if (fd < 0) {
+        ltm_log_error("Failed to open binary '%s': %s", filepath, strerror(errno));
+        return -1;
+    }
+
+    char interp_path[1024] = {0};
+    uintptr_t main_base = 0, main_entry = 0, main_ph_addr = 0, main_max_vaddr = 0;
+    uint16_t main_ph_num = 0, main_ph_ent = 0;
+
+    int ret = elf_load_image(fd, filepath, 0x400000000ULL,
+                             &main_base, &main_entry,
+                             &main_ph_addr, &main_ph_num, &main_ph_ent,
+                             &main_max_vaddr, interp_path, sizeof(interp_path));
     close(fd);
+    if (ret != 0) return -1;
+
+    rt->elf_base = main_base;
+    rt->main_entry = main_entry;
+    rt->elf_ph_addr = main_ph_addr;
+    rt->elf_ph_num = main_ph_num;
+    rt->elf_ph_ent = main_ph_ent;
+    rt->brk_start = PAGE_ROUND_UP(main_max_vaddr);
+    rt->brk_current = rt->brk_start;
+
+    if (interp_path[0] != '\0') {
+        ltm_log_debug("Binary requested dynamic interpreter: %s", interp_path);
+        char host_interp[1024];
+        int sres = sandbox_resolve_path(LINUX_AT_FDCWD, interp_path, host_interp, sizeof(host_interp), 0);
+        if (sres < 0) {
+            ltm_log_error("Cannot resolve PT_INTERP path '%s' in rootfs: error %d", interp_path, sres);
+            return -1;
+        }
+
+        int ifd = open(host_interp, O_RDONLY);
+        if (ifd < 0) {
+            ltm_log_error("Cannot open interpreter '%s' (%s): %s", interp_path, host_interp, strerror(errno));
+            return -1;
+        }
+
+        uintptr_t interp_base = 0, interp_entry = 0, interp_ph_addr = 0, interp_max_vaddr = 0;
+        uint16_t interp_ph_num = 0, interp_ph_ent = 0;
+
+        ret = elf_load_image(ifd, host_interp, 0x500000000ULL,
+                             &interp_base, &interp_entry,
+                             &interp_ph_addr, &interp_ph_num, &interp_ph_ent,
+                             &interp_max_vaddr, NULL, 0);
+        close(ifd);
+        if (ret != 0) {
+            ltm_log_error("Failed to load dynamic interpreter '%s'", host_interp);
+            return -1;
+        }
+
+        rt->interp_base = interp_base;
+        rt->elf_entry = interp_entry;
+        ltm_log_debug("Loaded dynamic interpreter at 0x%lx, entry=0x%lx",
+                      (unsigned long)interp_base, (unsigned long)interp_entry);
+    } else {
+        rt->interp_base = 0;
+        rt->elf_entry = main_entry;
+    }
+
     return 0;
 }
 
@@ -359,9 +424,9 @@ int elf_setup_stack(ltm_runtime_t *rt) {
         { LINUX_AT_PHENT,    rt->elf_ph_ent },
         { LINUX_AT_PHNUM,    rt->elf_ph_num },
         { LINUX_AT_PAGESZ,   PAGE_SIZE_16K },
-        { LINUX_AT_BASE,     rt->elf_base },
+        { LINUX_AT_BASE,     rt->interp_base },
         { LINUX_AT_FLAGS,    0 },
-        { LINUX_AT_ENTRY,    rt->elf_entry },
+        { LINUX_AT_ENTRY,    rt->main_entry ? rt->main_entry : rt->elf_entry },
         { LINUX_AT_NOTELF,   0 },
         { LINUX_AT_UID,      1000 },
         { LINUX_AT_EUID,     1000 },

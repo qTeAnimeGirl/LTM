@@ -15,8 +15,21 @@ size_t patcher_scan_and_patch(void *addr, size_t size) {
     size_t num_instrs = size / 4;
 
     for (size_t i = 0; i < num_instrs; i++) {
-        if (code[i] == ARM64_SVC_0) {
+        uint32_t insn = code[i];
+        if (insn == ARM64_SVC_0) {
             code[i] = ARM64_BRK_0;
+            count++;
+        } else if ((insn & ~0x1fU) == 0xd53bd040U) {
+            /* mrs Xt, TPIDR_EL0 -> brk #(0x100 | rt) */
+            uint32_t rt = insn & 0x1fU;
+            uint32_t imm = 0x100U | rt;
+            code[i] = 0xd4200000U | (imm << 5);
+            count++;
+        } else if ((insn & ~0x1fU) == 0xd51bd040U) {
+            /* msr TPIDR_EL0, Xt -> brk #(0x200 | rt) */
+            uint32_t rt = insn & 0x1fU;
+            uint32_t imm = 0x200U | rt;
+            code[i] = 0xd4200000U | (imm << 5);
             count++;
         }
     }

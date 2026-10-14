@@ -105,7 +105,7 @@ struct linux_winsize {
 /* Syscall Dispatcher Registration & Entry */
 int syscall_dispatcher_init(void);
 int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
-                         uint64_t a3, uint64_t a4, uint64_t a5);
+                         uint64_t a3, uint64_t a4, uint64_t a5, void *state);
 
 /* Individual Syscall Handlers */
 int64_t handle_read(int fd, void *buf, size_t count);
@@ -153,10 +153,50 @@ int64_t handle_exit_group(int status);
 int64_t handle_set_tid_address(int *tidptr);
 int64_t handle_futex(uint32_t *uaddr, int op, uint32_t val,
                      const struct linux_timespec *timeout, uint32_t *uaddr2, uint32_t val3);
-int64_t handle_clone(uint64_t flags, void *stack, int *ptid, void *tls, int *ctid);
+int64_t handle_clone(uint64_t flags, void *stack, int *ptid, void *tls, int *ctid, void *state);
 
 int64_t handle_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz);
 int64_t handle_prlimit64(int pid, int resource, const struct linux_rlimit64 *new_limit, struct linux_rlimit64 *old_limit);
 int64_t handle_getrandom(void *buf, size_t buflen, unsigned int flags);
+int64_t handle_wait4(pid_t pid, int *status, int options, void *rusage);
+int64_t handle_pipe2(int pipefd[2], int flags);
+int64_t handle_execve(const char *pathname, char *const argv[], char *const envp[]);
+int64_t handle_getcwd(char *buf, size_t size);
+int64_t handle_chdir(const char *path);
+int64_t handle_fchdir(int fd);
+int64_t handle_setpgid(pid_t pid, pid_t pgid);
+int64_t handle_getpgid(pid_t pid);
+
+/* Extended Filesystem Operations */
+int64_t handle_unlinkat(int dirfd, const char *pathname, int flags);
+int64_t handle_mkdirat(int dirfd, const char *pathname, mode_t mode);
+int64_t handle_faccessat(int dirfd, const char *pathname, int mode, int flags);
+int64_t handle_renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath);
+int64_t handle_renameat2(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, unsigned int flags);
+int64_t handle_symlinkat(const char *target, int newdirfd, const char *linkpath);
+int64_t handle_linkat(int olddirfd, const char *oldpath, int newdirfd, const char *linkpath, int flags);
+int64_t handle_fchmodat(int dirfd, const char *pathname, mode_t mode, int flags);
+int64_t handle_fchmod(int fd, mode_t mode);
+int64_t handle_fchownat(int dirfd, const char *pathname, uid_t owner, gid_t group, int flags);
+int64_t handle_fchown(int fd, uid_t owner, gid_t group);
+int64_t handle_utimensat(int dirfd, const char *pathname, const struct linux_timespec times[2], int flags);
+
+/* Scheduler & Affinity */
+int64_t handle_sched_getaffinity(pid_t pid, size_t cpusetsize, unsigned long *mask);
+int64_t handle_sched_setaffinity(pid_t pid, size_t cpusetsize, const unsigned long *mask);
+
+/* Networking & Sockets */
+int64_t handle_socket(int domain, int type, int protocol);
+int64_t handle_connect(int fd, const void *addr, socklen_t len);
+int64_t handle_bind(int fd, const void *addr, socklen_t len);
+int64_t handle_listen(int fd, int backlog);
+int64_t handle_accept(int fd, void *addr, socklen_t *len);
+int64_t handle_getsockname(int fd, void *addr, socklen_t *len);
+int64_t handle_getpeername(int fd, void *addr, socklen_t *len);
+int64_t handle_sendto(int fd, const void *buf, size_t len, int flags, const void *dest_addr, socklen_t addrlen);
+int64_t handle_recvfrom(int fd, void *buf, size_t len, int flags, void *src_addr, socklen_t *addrlen);
+int64_t handle_setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen);
+int64_t handle_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen);
+int64_t handle_shutdown(int fd, int how);
 
 #endif /* SYSCALLS_H */

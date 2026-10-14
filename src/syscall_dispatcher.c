@@ -9,6 +9,33 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
     ucontext_t *uc = (ucontext_t *)ctx;
     arm_thread_state64_t *state = &uc->uc_mcontext->__ss;
 
+    uint32_t insn = *(uint32_t *)state->__pc;
+
+    /* Check if it's our virtualized TLS trap */
+    if ((insn & 0xffe0001fU) == 0xd4200000U) {
+        uint32_t imm = (insn >> 5) & 0xffffU;
+        uint32_t type = imm >> 8;
+        uint32_t reg = imm & 0x1fU;
+
+        if (type == 1) {
+            /* Virtualized TLS read: mrs Xt, TPIDR_EL0 */
+            if (reg < 31) {
+                state->__x[reg] = g_ltm.guest_tls;
+            }
+            state->__pc += 4;
+            return;
+        } else if (type == 2) {
+            /* Virtualized TLS write: msr TPIDR_EL0, Xt */
+            if (reg < 31) {
+                g_ltm.guest_tls = state->__x[reg];
+            } else {
+                g_ltm.guest_tls = 0; /* xzr */
+            }
+            state->__pc += 4;
+            return;
+        }
+    }
+
     uint64_t num = state->__x[8];
     uint64_t a0 = state->__x[0];
     uint64_t a1 = state->__x[1];
@@ -17,7 +44,7 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
     uint64_t a4 = state->__x[4];
     uint64_t a5 = state->__x[5];
 
-    int64_t ret = syscall_dispatch(num, a0, a1, a2, a3, a4, a5);
+    int64_t ret = syscall_dispatch(num, a0, a1, a2, a3, a4, a5, state);
 
     /* Set guest return value in x0 */
     state->__x[0] = (uint64_t)ret;
@@ -30,9 +57,12 @@ static void ltm_crash_handler(int sig, siginfo_t *si, void *ctx) {
     ucontext_t *uc = (ucontext_t *)ctx;
     arm_thread_state64_t *state = &uc->uc_mcontext->__ss;
 
-    fprintf(stderr, "\n[LTM:CRASH] Fatal signal %d (%s) at address %p\n",
+    uint64_t cur_tpidr = 0;
+    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(cur_tpidr));
+
+    fprintf(stderr, "\n[LTM:CRASH] Fatal signal %d (%s) at address %p (tpidr_el0=0x%llx)\n",
             sig, sig == SIGSEGV ? "SIGSEGV" : (sig == SIGBUS ? "SIGBUS" : "UNKNOWN"),
-            si->si_addr);
+            si->si_addr, cur_tpidr);
     fprintf(stderr, "  pc  = 0x%016llx\n", (unsigned long long)state->__pc);
     fprintf(stderr, "  sp  = 0x%016llx\n", (unsigned long long)state->__sp);
     fprintf(stderr, "  lr  = 0x%016llx\n", (unsigned long long)state->__lr);
@@ -44,6 +74,11 @@ static void ltm_crash_handler(int sig, siginfo_t *si, void *ctx) {
 }
 
 int syscall_dispatcher_init(void) {
+    /* Unblock all signals so inherited masks across execve cannot block SIGTRAP */
+    sigset_t empty_mask;
+    sigemptyset(&empty_mask);
+    sigprocmask(SIG_SETMASK, &empty_mask, NULL);
+
     /* Allocate alternate stack for safe signal handling */
     g_alt_stack = mmap(NULL, ALT_STACK_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (g_alt_stack == MAP_FAILED) {
@@ -91,7 +126,12 @@ int syscall_dispatcher_init(void) {
 }
 
 int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
-                         uint64_t a3, uint64_t a4, uint64_t a5) {
+                         uint64_t a3, uint64_t a4, uint64_t a5, void *state) {
+    ltm_trace("sys_%llu(0x%llx, 0x%llx, 0x%llx, 0x%llx, 0x%llx, 0x%llx)",
+              (unsigned long long)num, (unsigned long long)a0, (unsigned long long)a1,
+              (unsigned long long)a2, (unsigned long long)a3, (unsigned long long)a4,
+              (unsigned long long)a5);
+
     int64_t ret = -LINUX_ENOSYS;
 
     switch (num) {
@@ -211,7 +251,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
                                (const struct linux_timespec *)a3, (uint32_t *)a4, (uint32_t)a5);
             break;
         case LINUX_SYS_clone:
-            ret = handle_clone(a0, (void *)a1, (int *)a2, (void *)a3, (int *)a4);
+            ret = handle_clone(a0, (void *)a1, (int *)a2, (void *)a3, (int *)a4, state);
             break;
         case LINUX_SYS_readlinkat:
             ret = handle_readlinkat((int)a0, (const char *)a1, (char *)a2, (size_t)a3);
@@ -229,6 +269,116 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
             break;
         case LINUX_SYS_sigaltstack:
             ret = handle_sigaltstack((const void *)a0, (void *)a1);
+            break;
+        case LINUX_SYS_getcwd:
+            ret = handle_getcwd((char *)a0, (size_t)a1);
+            break;
+        case LINUX_SYS_chdir:
+            ret = handle_chdir((const char *)a0);
+            break;
+        case LINUX_SYS_fchdir:
+            ret = handle_fchdir((int)a0);
+            break;
+        case LINUX_SYS_pipe2:
+            ret = handle_pipe2((int *)a0, (int)a1);
+            break;
+        case LINUX_SYS_wait4:
+            ret = handle_wait4((pid_t)a0, (int *)a1, (int)a2, (void *)a3);
+            break;
+        case LINUX_SYS_execve:
+            ret = handle_execve((const char *)a0, (char *const *)a1, (char *const *)a2);
+            break;
+        case LINUX_SYS_setpgid:
+            ret = handle_setpgid((pid_t)a0, (pid_t)a1);
+            break;
+        case LINUX_SYS_getpgid:
+            ret = handle_getpgid((pid_t)a0);
+            break;
+        case LINUX_SYS_setuid:
+        case LINUX_SYS_setgid:
+        case LINUX_SYS_setreuid:
+        case LINUX_SYS_setregid:
+        case LINUX_SYS_setresuid:
+        case LINUX_SYS_setresgid:
+            ret = 0; /* Benign no-op inside container */
+            break;
+        case LINUX_SYS_unlinkat:
+            ret = handle_unlinkat((int)a0, (const char *)a1, (int)a2);
+            break;
+        case LINUX_SYS_mkdirat:
+            ret = handle_mkdirat((int)a0, (const char *)a1, (mode_t)a2);
+            break;
+        case LINUX_SYS_faccessat:
+            ret = handle_faccessat((int)a0, (const char *)a1, (int)a2, (int)a3);
+            break;
+        case LINUX_SYS_renameat:
+            ret = handle_renameat((int)a0, (const char *)a1, (int)a2, (const char *)a3);
+            break;
+        case LINUX_SYS_renameat2:
+            ret = handle_renameat2((int)a0, (const char *)a1, (int)a2, (const char *)a3, (unsigned int)a4);
+            break;
+        case LINUX_SYS_symlinkat:
+            ret = handle_symlinkat((const char *)a0, (int)a1, (const char *)a2);
+            break;
+        case LINUX_SYS_linkat:
+            ret = handle_linkat((int)a0, (const char *)a1, (int)a2, (const char *)a3, (int)a4);
+            break;
+        case LINUX_SYS_fchmodat:
+            ret = handle_fchmodat((int)a0, (const char *)a1, (mode_t)a2, (int)a3);
+            break;
+        case LINUX_SYS_fchmod:
+            ret = handle_fchmod((int)a0, (mode_t)a1);
+            break;
+        case LINUX_SYS_fchownat:
+            ret = handle_fchownat((int)a0, (const char *)a1, (uid_t)a2, (gid_t)a3, (int)a4);
+            break;
+        case LINUX_SYS_fchown:
+            ret = handle_fchown((int)a0, (uid_t)a1, (gid_t)a2);
+            break;
+        case LINUX_SYS_utimensat:
+            ret = handle_utimensat((int)a0, (const char *)a1, (const struct linux_timespec *)a2, (int)a3);
+            break;
+        case LINUX_SYS_sched_getaffinity:
+            ret = handle_sched_getaffinity((pid_t)a0, (size_t)a1, (unsigned long *)a2);
+            break;
+        case LINUX_SYS_sched_setaffinity:
+            ret = handle_sched_setaffinity((pid_t)a0, (size_t)a1, (const unsigned long *)a2);
+            break;
+        case LINUX_SYS_socket:
+            ret = handle_socket((int)a0, (int)a1, (int)a2);
+            break;
+        case LINUX_SYS_connect:
+            ret = handle_connect((int)a0, (const void *)a1, (socklen_t)a2);
+            break;
+        case LINUX_SYS_bind:
+            ret = handle_bind((int)a0, (const void *)a1, (socklen_t)a2);
+            break;
+        case LINUX_SYS_listen:
+            ret = handle_listen((int)a0, (int)a1);
+            break;
+        case LINUX_SYS_accept:
+            ret = handle_accept((int)a0, (void *)a1, (socklen_t *)a2);
+            break;
+        case LINUX_SYS_getsockname:
+            ret = handle_getsockname((int)a0, (void *)a1, (socklen_t *)a2);
+            break;
+        case LINUX_SYS_getpeername:
+            ret = handle_getpeername((int)a0, (void *)a1, (socklen_t *)a2);
+            break;
+        case LINUX_SYS_sendto:
+            ret = handle_sendto((int)a0, (const void *)a1, (size_t)a2, (int)a3, (const void *)a4, (socklen_t)a5);
+            break;
+        case LINUX_SYS_recvfrom:
+            ret = handle_recvfrom((int)a0, (void *)a1, (size_t)a2, (int)a3, (void *)a4, (socklen_t *)a5);
+            break;
+        case LINUX_SYS_setsockopt:
+            ret = handle_setsockopt((int)a0, (int)a1, (int)a2, (const void *)a3, (socklen_t)a4);
+            break;
+        case LINUX_SYS_getsockopt:
+            ret = handle_getsockopt((int)a0, (int)a1, (int)a2, (void *)a3, (socklen_t *)a4);
+            break;
+        case LINUX_SYS_shutdown:
+            ret = handle_shutdown((int)a0, (int)a1);
             break;
         case LINUX_SYS_rseq:
             ret = -LINUX_ENOSYS;

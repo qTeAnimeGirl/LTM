@@ -72,22 +72,21 @@ int main(int argc, char **argv, char **envp) {
     }
 
     const char *binary_arg = argv[arg_idx];
-    char chroot_cand[1024];
 
-    /* If binary is an absolute path within chroot (e.g. /bin/busybox) */
-    if (binary_arg[0] == '/' && g_ltm.host_rootfs[0] != '\0') {
-        snprintf(chroot_cand, sizeof(chroot_cand), "%s%s", g_ltm.host_rootfs, binary_arg);
-        if (access(chroot_cand, F_OK) == 0) {
-            strncpy(g_ltm.binary_path, chroot_cand, sizeof(g_ltm.binary_path) - 1);
-            g_ltm.binary_path[sizeof(g_ltm.binary_path) - 1] = '\0';
-        } else if (!realpath(binary_arg, g_ltm.binary_path)) {
-            strncpy(g_ltm.binary_path, binary_arg, sizeof(g_ltm.binary_path) - 1);
-            g_ltm.binary_path[sizeof(g_ltm.binary_path) - 1] = '\0';
-        }
+    /* If binary_arg is a relative host path or within host_root/host_rootfs, resolve directly */
+    if (binary_arg[0] != '/' && access(binary_arg, F_OK) == 0 && realpath(binary_arg, g_ltm.binary_path)) {
+        /* Local relative host path (e.g. ./tests/bin/test_hello) */
+    } else if ((strncmp(binary_arg, g_ltm.host_root, strlen(g_ltm.host_root)) == 0 ||
+                strncmp(binary_arg, g_ltm.host_rootfs, strlen(g_ltm.host_rootfs)) == 0) &&
+               access(binary_arg, F_OK) == 0 && realpath(binary_arg, g_ltm.binary_path)) {
+        /* Already full path within host project or rootfs */
     } else {
-        if (!realpath(binary_arg, g_ltm.binary_path)) {
-            strncpy(g_ltm.binary_path, binary_arg, sizeof(g_ltm.binary_path) - 1);
-            g_ltm.binary_path[sizeof(g_ltm.binary_path) - 1] = '\0';
+        /* Guest container path (e.g. /bin/sh, /usr/bin/fastfetch) */
+        if (sandbox_resolve_path(LINUX_AT_FDCWD, binary_arg, g_ltm.binary_path, sizeof(g_ltm.binary_path), 0) < 0) {
+            if (!realpath(binary_arg, g_ltm.binary_path)) {
+                strncpy(g_ltm.binary_path, binary_arg, sizeof(g_ltm.binary_path) - 1);
+                g_ltm.binary_path[sizeof(g_ltm.binary_path) - 1] = '\0';
+            }
         }
     }
 

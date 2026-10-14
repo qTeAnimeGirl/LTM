@@ -40,4 +40,42 @@ _ltm_jump_to_entry:
     mov x29, #0
     mov x30, #0
 
+    // Reset Linux Thread-Local Storage pointer to 0
+    msr tpidr_el0, xzr
+
     br x16
+
+.global _ltm_resume_context
+_ltm_resume_context:
+    // x0 = pointer to arm_thread_state64_t
+    mov x16, x0
+
+    // Load guest sp
+    ldr x1, [x16, #248]
+    mov sp, x1
+
+    // Load guest pc
+    ldr x17, [x16, #256]
+
+    // Load fp (x29) and lr (x30)
+    ldp x29, x30, [x16, #232]
+
+    // Load registers in pairs
+    ldp x2, x3, [x16, #16]
+    ldp x4, x5, [x16, #32]
+    ldp x6, x7, [x16, #48]
+    ldp x8, x9, [x16, #64]
+    ldp x10, x11, [x16, #80]
+    ldp x12, x13, [x16, #96]
+    ldp x14, x15, [x16, #112]
+    ldp x18, x19, [x16, #144]
+    ldp x20, x21, [x16, #160]
+    ldp x22, x23, [x16, #176]
+    ldp x24, x25, [x16, #192]
+    ldp x26, x27, [x16, #208]
+    ldr x28, [x16, #224]
+
+    // Load x0 and x1 last
+    ldp x0, x1, [x16, #0]
+
+    br x17

@@ -1,7 +1,13 @@
 #include "syscalls.h"
 #include "sandbox.h"
 #include "patcher.h"
+#include "elf_loader.h"
 #include <termios.h>
+#include <mach-o/dyld.h>
+#include <sys/wait.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <sys/un.h>
 
 /* Futex bucket structure */
 typedef struct {
@@ -168,6 +174,21 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
             return 0;
         }
         return darwin_to_linux_errno(errno);
+    }
+
+    /* TIOCGPGRP: Linux 0x540f */
+    if (request == 0x540f) {
+        pid_t pgrp = tcgetpgrp(fd);
+        if (pgrp < 0) return darwin_to_linux_errno(errno);
+        if (arg) *(pid_t *)arg = pgrp;
+        return 0;
+    }
+
+    /* TIOCSPGRP: Linux 0x5410 */
+    if (request == 0x5410) {
+        if (!arg) return -LINUX_EINVAL;
+        if (tcsetpgrp(fd, *(pid_t *)arg) != 0) return darwin_to_linux_errno(errno);
+        return 0;
     }
 
     return -LINUX_ENOTTY;
@@ -389,7 +410,23 @@ int64_t handle_mmap(void *addr, size_t length, int prot, int flags, int fd, off_
     }
 
     if (prot & PROT_EXEC) {
-        patcher_patch_executable_range(res, aligned_len);
+        size_t patch_len = aligned_len;
+        if (fd >= 0) {
+            struct stat st;
+            if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
+                if ((off_t)offset < st.st_size) {
+                    size_t avail = (size_t)(st.st_size - offset);
+                    if (patch_len > avail) {
+                        patch_len = avail;
+                    }
+                } else {
+                    patch_len = 0;
+                }
+            }
+        }
+        if (patch_len > 0) {
+            patcher_patch_executable_range(res, patch_len);
+        }
     }
 
     return (int64_t)(uintptr_t)res;
@@ -608,16 +645,44 @@ int64_t handle_futex(uint32_t *uaddr, int op, uint32_t val,
     return -LINUX_ENOSYS;
 }
 
-int64_t handle_clone(uint64_t flags, void *stack, int *ptid, void *tls, int *ctid) {
-    (void)flags;
-    (void)stack;
-    (void)ptid;
-    (void)tls;
-    (void)ctid;
+int64_t handle_clone(uint64_t flags, void *stack, int *ptid, void *tls, int *ctid, void *state_ptr) {
+    arm_thread_state64_t *state = (arm_thread_state64_t *)state_ptr;
 
-    /* If thread creation or fork is requested, fork() for now */
     pid_t pid = fork();
     if (pid < 0) return darwin_to_linux_errno(errno);
+
+    if (pid == 0) {
+        /* Child process: re-init signal dispatcher and resume execution directly */
+        syscall_dispatcher_init();
+
+        if (state) {
+            state->__x[0] = 0;
+            state->__pc += 4;
+            if (stack) {
+                state->__sp = (uintptr_t)stack;
+            }
+        }
+        if ((flags & LINUX_CLONE_SETTLS) && tls) {
+            g_ltm.guest_tls = (uintptr_t)tls;
+        }
+        if ((flags & LINUX_CLONE_CHILD_SETTID) && ctid) {
+            *ctid = getpid();
+        }
+        if (flags & LINUX_CLONE_CHILD_CLEARTID) {
+            g_ltm.child_tid_ptr = ctid;
+        }
+
+        if (state) {
+            ltm_resume_context(state);
+        }
+        exit(0);
+    }
+
+    /* Parent process */
+    if ((flags & LINUX_CLONE_PARENT_SETTID) && ptid) {
+        *ptid = pid;
+    }
+
     return pid;
 }
 
@@ -629,7 +694,7 @@ int64_t handle_readlinkat(int dirfd, const char *pathname, char *buf, size_t buf
     }
 
     char host_path[1024];
-    int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), 0);
+    int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), AT_SYMLINK_NOFOLLOW);
     if (res < 0) return res;
 
     ssize_t ret = readlink(host_path, buf, bufsiz);
@@ -658,3 +723,413 @@ int64_t handle_getrandom(void *buf, size_t buflen, unsigned int flags) {
     arc4random_buf(buf, buflen);
     return buflen;
 }
+
+int64_t handle_wait4(pid_t pid, int *status, int options, void *rusage) {
+    int dstatus = 0;
+    pid_t ret = wait4(pid, &dstatus, options, (struct rusage *)rusage);
+    if (ret < 0) {
+        return darwin_to_linux_errno(errno);
+    }
+    if (status) {
+        *status = dstatus;
+    }
+    return ret;
+}
+
+int64_t handle_pipe2(int pipefd[2], int flags) {
+    if (!pipefd) return -LINUX_EFAULT;
+    int fds[2];
+    if (pipe(fds) != 0) {
+        return darwin_to_linux_errno(errno);
+    }
+    if (flags & LINUX_O_CLOEXEC) {
+        fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+        fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+    }
+    if (flags & LINUX_O_NONBLOCK) {
+        int fl0 = fcntl(fds[0], F_GETFL, 0);
+        int fl1 = fcntl(fds[1], F_GETFL, 0);
+        fcntl(fds[0], F_SETFL, fl0 | O_NONBLOCK);
+        fcntl(fds[1], F_SETFL, fl1 | O_NONBLOCK);
+    }
+    pipefd[0] = fds[0];
+    pipefd[1] = fds[1];
+    return 0;
+}
+
+int64_t handle_getcwd(char *buf, size_t size) {
+    if (!buf || size == 0) return -LINUX_EINVAL;
+    char host_cwd[1024];
+    if (!getcwd(host_cwd, sizeof(host_cwd))) {
+        return darwin_to_linux_errno(errno);
+    }
+    size_t root_len = strlen(g_ltm.host_rootfs);
+    const char *guest_cwd = "/";
+    if (strncmp(host_cwd, g_ltm.host_rootfs, root_len) == 0) {
+        guest_cwd = host_cwd + root_len;
+        if (guest_cwd[0] == '\0') {
+            guest_cwd = "/";
+        }
+    }
+    size_t len = strlen(guest_cwd) + 1;
+    if (len > size) return -LINUX_ERANGE;
+    memcpy(buf, guest_cwd, len);
+    return len;
+}
+
+int64_t handle_chdir(const char *path) {
+    if (!path) return -LINUX_EINVAL;
+    char host_path[1024];
+    int res = sandbox_resolve_path(LINUX_AT_FDCWD, path, host_path, sizeof(host_path), 0);
+    if (res < 0) return res;
+    if (chdir(host_path) != 0) {
+        return darwin_to_linux_errno(errno);
+    }
+    return 0;
+}
+
+int64_t handle_fchdir(int fd) {
+    if (fchdir(fd) != 0) {
+        return darwin_to_linux_errno(errno);
+    }
+    return 0;
+}
+
+int64_t handle_setpgid(pid_t pid, pid_t pgid) {
+    if (setpgid(pid, pgid) != 0) {
+        return darwin_to_linux_errno(errno);
+    }
+    return 0;
+}
+
+int64_t handle_getpgid(pid_t pid) {
+    pid_t ret = getpgid(pid);
+    if (ret < 0) {
+        return darwin_to_linux_errno(errno);
+    }
+    return ret;
+}
+
+int64_t handle_execve(const char *pathname, char *const argv[], char *const envp[]) {
+    if (!pathname) return -LINUX_EINVAL;
+
+    char host_path[1024];
+    int res = sandbox_resolve_path(LINUX_AT_FDCWD, pathname, host_path, sizeof(host_path), 0);
+    if (res < 0) return res;
+    if (res == 1) return -LINUX_EACCES;
+
+    if (access(host_path, X_OK) != 0) {
+        return darwin_to_linux_errno(errno);
+    }
+
+    char ltm_path[1024];
+    uint32_t path_size = sizeof(ltm_path);
+    if (_NSGetExecutablePath(ltm_path, &path_size) != 0) {
+        return -LINUX_ENOENT;
+    }
+
+    int guest_argc = 0;
+    while (argv && argv[guest_argc]) {
+        guest_argc++;
+    }
+
+    int max_args = guest_argc + 8;
+    char **new_argv = malloc(max_args * sizeof(char *));
+    if (!new_argv) return -LINUX_ENOMEM;
+
+    int n = 0;
+    new_argv[n++] = ltm_path;
+    new_argv[n++] = "-r";
+    new_argv[n++] = g_ltm.host_rootfs;
+    if (g_ltm.trace_syscalls) {
+        new_argv[n++] = "-s";
+    }
+    new_argv[n++] = (char *)pathname;
+
+    for (int i = 0; i < guest_argc; i++) {
+        ltm_log_info("execve guest argv[%d] = '%s'", i, argv[i] ? argv[i] : "(null)");
+    }
+
+    for (int i = 1; i < guest_argc; i++) {
+        new_argv[n++] = argv[i];
+    }
+    new_argv[n] = NULL;
+
+    for (int i = 0; i < n; i++) {
+        ltm_log_info("execve target new_argv[%d] = '%s'", i, new_argv[i] ? new_argv[i] : "(null)");
+    }
+
+    ltm_trace("execve re-executing ltm: %s -r %s %s ...", ltm_path, g_ltm.host_rootfs, host_path);
+    execve(ltm_path, new_argv, envp);
+
+    int err = errno;
+    free(new_argv);
+    return darwin_to_linux_errno(err);
+}
+
+int64_t handle_unlinkat(int dirfd, const char *pathname, int flags) {
+    if (!pathname) return -LINUX_EINVAL;
+    char host_path[1024];
+    int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), AT_SYMLINK_NOFOLLOW);
+    if (res < 0) return res;
+    if (res == 1) return -LINUX_EPERM;
+
+    int dflags = 0;
+    if (flags & LINUX_AT_REMOVEDIR) {
+        dflags |= AT_REMOVEDIR;
+    }
+    int ret = unlinkat(AT_FDCWD, host_path, dflags);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_mkdirat(int dirfd, const char *pathname, mode_t mode) {
+    if (!pathname) return -LINUX_EINVAL;
+    char host_path[1024];
+    int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), 0);
+    if (res < 0) return res;
+    if (res == 1) return -LINUX_EEXIST;
+
+    int ret = mkdir(host_path, mode);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_faccessat(int dirfd, const char *pathname, int mode, int flags) {
+    (void)flags;
+    if (!pathname) return -LINUX_EINVAL;
+    char host_path[1024];
+    int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), 0);
+    if (res < 0) return res;
+    if (res == 1) return 0;
+
+    int ret = access(host_path, mode & (R_OK | W_OK | X_OK));
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath) {
+    if (!oldpath || !newpath) return -LINUX_EINVAL;
+    char old_host[1024], new_host[1024];
+    int r1 = sandbox_resolve_path(olddirfd, oldpath, old_host, sizeof(old_host), 0);
+    if (r1 < 0) return r1;
+    if (r1 == 1) return -LINUX_EPERM;
+    int r2 = sandbox_resolve_path(newdirfd, newpath, new_host, sizeof(new_host), 0);
+    if (r2 < 0) return r2;
+    if (r2 == 1) return -LINUX_EPERM;
+
+    int ret = rename(old_host, new_host);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_renameat2(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, unsigned int flags) {
+    (void)flags;
+    return handle_renameat(olddirfd, oldpath, newdirfd, newpath);
+}
+
+int64_t handle_symlinkat(const char *target, int newdirfd, const char *linkpath) {
+    if (!target || !linkpath) return -LINUX_EINVAL;
+    char link_host[1024];
+    int res = sandbox_resolve_path(newdirfd, linkpath, link_host, sizeof(link_host), 0);
+    if (res < 0) return res;
+    if (res == 1) return -LINUX_EPERM;
+
+    int ret = symlink(target, link_host);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_linkat(int olddirfd, const char *oldpath, int newdirfd, const char *linkpath, int flags) {
+    (void)flags;
+    if (!oldpath || !linkpath) return -LINUX_EINVAL;
+    char old_host[1024], link_host[1024];
+    int r1 = sandbox_resolve_path(olddirfd, oldpath, old_host, sizeof(old_host), 0);
+    if (r1 < 0) return r1;
+    if (r1 == 1) return -LINUX_EPERM;
+    int r2 = sandbox_resolve_path(newdirfd, linkpath, link_host, sizeof(link_host), 0);
+    if (r2 < 0) return r2;
+    if (r2 == 1) return -LINUX_EPERM;
+
+    int ret = link(old_host, link_host);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_fchmodat(int dirfd, const char *pathname, mode_t mode, int flags) {
+    (void)flags;
+    if (!pathname) return -LINUX_EINVAL;
+    char host_path[1024];
+    int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), 0);
+    if (res < 0) return res;
+    if (res == 1) return 0;
+
+    int ret = chmod(host_path, mode);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_fchmod(int fd, mode_t mode) {
+    int ret = fchmod(fd, mode);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_fchownat(int dirfd, const char *pathname, uid_t owner, gid_t group, int flags) {
+    (void)dirfd; (void)pathname; (void)owner; (void)group; (void)flags;
+    return 0;
+}
+
+int64_t handle_fchown(int fd, uid_t owner, gid_t group) {
+    (void)fd; (void)owner; (void)group;
+    return 0;
+}
+
+int64_t handle_utimensat(int dirfd, const char *pathname, const struct linux_timespec times[2], int flags) {
+    char host_path[1024];
+    const char *target = pathname;
+    if (pathname && pathname[0] != '\0') {
+        int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), 0);
+        if (res < 0) return res;
+        if (res == 1) return 0; /* virtual path */
+        target = host_path;
+        dirfd = AT_FDCWD;
+    } else {
+        target = NULL;
+    }
+
+    struct timespec dtimes[2];
+    struct timespec *ptimes = NULL;
+    if (times) {
+        for (int i = 0; i < 2; i++) {
+            dtimes[i].tv_sec = times[i].tv_sec;
+            if (times[i].tv_nsec == 1073741823L) { /* Linux UTIME_NOW (0x3fffffff) */
+                dtimes[i].tv_nsec = UTIME_NOW;     /* Darwin UTIME_NOW (-1) */
+            } else if (times[i].tv_nsec == 1073741822L) { /* Linux UTIME_OMIT (0x3ffffffe) */
+                dtimes[i].tv_nsec = UTIME_OMIT;   /* Darwin UTIME_OMIT (-2) */
+            } else {
+                dtimes[i].tv_nsec = times[i].tv_nsec;
+            }
+        }
+        ptimes = dtimes;
+    }
+
+    int dflags = 0;
+    if (flags & LINUX_AT_SYMLINK_NOFOLLOW) {
+        dflags |= AT_SYMLINK_NOFOLLOW;
+    }
+
+    int ret = utimensat(dirfd, target, ptimes, dflags);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_sched_getaffinity(pid_t pid, size_t cpusetsize, unsigned long *mask) {
+    (void)pid;
+    if (!mask || cpusetsize < sizeof(unsigned long)) return -LINUX_EINVAL;
+    int ncpu = 8;
+    size_t size = sizeof(ncpu);
+    sysctlbyname("hw.ncpu", &ncpu, &size, NULL, 0);
+
+    memset(mask, 0, cpusetsize);
+    for (int i = 0; i < ncpu && i < (int)(cpusetsize * 8); i++) {
+        mask[i / 64] |= (1ULL << (i % 64));
+    }
+    return sizeof(unsigned long);
+}
+
+int64_t handle_sched_setaffinity(pid_t pid, size_t cpusetsize, const unsigned long *mask) {
+    (void)pid; (void)cpusetsize; (void)mask;
+    return 0;
+}
+
+int64_t handle_socket(int domain, int type, int protocol) {
+    int ddomain = domain;
+    if (domain == 1) ddomain = AF_UNIX;
+    else if (domain == 2) ddomain = AF_INET;
+    else if (domain == 10) ddomain = AF_INET6;
+    else if (domain == 16) {
+        return -LINUX_EAFNOSUPPORT;
+    }
+
+    int dtype = type & 0xf;
+    int cloexec = (type & 02000000) != 0;
+    int nonblock = (type & 00004000) != 0;
+
+    int fd = socket(ddomain, dtype, protocol);
+    if (fd < 0) return darwin_to_linux_errno(errno);
+
+    if (cloexec) fcntl(fd, F_SETFD, FD_CLOEXEC);
+    if (nonblock) {
+        int fl = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+    }
+    return fd;
+}
+
+int64_t handle_connect(int fd, const void *addr, socklen_t len) {
+    int ret = connect(fd, (const struct sockaddr *)addr, len);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_bind(int fd, const void *addr, socklen_t len) {
+    int ret = bind(fd, (const struct sockaddr *)addr, len);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_listen(int fd, int backlog) {
+    int ret = listen(fd, backlog);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_accept(int fd, void *addr, socklen_t *len) {
+    int ret = accept(fd, (struct sockaddr *)addr, len);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return ret;
+}
+
+int64_t handle_getsockname(int fd, void *addr, socklen_t *len) {
+    int ret = getsockname(fd, (struct sockaddr *)addr, len);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_getpeername(int fd, void *addr, socklen_t *len) {
+    int ret = getpeername(fd, (struct sockaddr *)addr, len);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_sendto(int fd, const void *buf, size_t len, int flags, const void *dest_addr, socklen_t addrlen) {
+    ssize_t ret = sendto(fd, buf, len, flags, (const struct sockaddr *)dest_addr, addrlen);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return ret;
+}
+
+int64_t handle_recvfrom(int fd, void *buf, size_t len, int flags, void *src_addr, socklen_t *addrlen) {
+    ssize_t ret = recvfrom(fd, buf, len, flags, (struct sockaddr *)src_addr, addrlen);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return ret;
+}
+
+int64_t handle_setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen) {
+    int ret = setsockopt(fd, level, optname, optval, optlen);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen) {
+    int ret = getsockopt(fd, level, optname, optval, optlen);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_shutdown(int fd, int how) {
+    int ret = shutdown(fd, how);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+

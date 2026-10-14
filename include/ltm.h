@@ -462,22 +462,32 @@
 #define LINUX_AT_EXECFN       31
 #define LINUX_AT_SYSINFO_EHDR 33
 
-/* Linux open flags & AT_FDCWD */
+/* Linux ARM64 open flags & AT_FDCWD (asm-generic/fcntl.h) */
 #define LINUX_AT_FDCWD        (-100)
 #define LINUX_O_RDONLY        00
 #define LINUX_O_WRONLY        01
 #define LINUX_O_RDWR          02
-#define LINUX_O_CREAT         0100
-#define LINUX_O_EXCL          0200
-#define LINUX_O_NOCTTY        0400
-#define LINUX_O_TRUNC         01000
-#define LINUX_O_APPEND        02000
-#define LINUX_O_NONBLOCK      04000
-#define LINUX_O_DSYNC         010000
-#define LINUX_O_ASYNC         020000
-#define LINUX_O_DIRECTORY     0200000
-#define LINUX_O_NOFOLLOW      0400000
-#define LINUX_O_CLOEXEC       02000000
+#define LINUX_O_CREAT         0100       /* 0x40 */
+#define LINUX_O_EXCL          0200       /* 0x80 */
+#define LINUX_O_NOCTTY        0400       /* 0x100 */
+#define LINUX_O_TRUNC         01000      /* 0x200 */
+#define LINUX_O_APPEND        02000      /* 0x400 */
+#define LINUX_O_NONBLOCK      04000      /* 0x800 */
+#define LINUX_O_DSYNC         010000     /* 0x1000 */
+#define LINUX_O_ASYNC         020000     /* 0x2000 */
+#define LINUX_O_DIRECTORY     040000     /* 0x4000 */
+#define LINUX_O_NOFOLLOW      0100000    /* 0x8000 */
+#define LINUX_O_LARGEFILE     0400000    /* 0x20000 */
+#define LINUX_O_CLOEXEC       02000000   /* 0x80000 */
+#define LINUX_O_PATH          010000000  /* 0x200000 */
+
+/* Linux AT_* flags */
+#define LINUX_AT_SYMLINK_NOFOLLOW 0x100
+#define LINUX_AT_REMOVEDIR        0x200
+#define LINUX_AT_SYMLINK_FOLLOW   0x400
+#define LINUX_AT_NO_AUTOMOUNT     0x800
+#define LINUX_AT_EMPTY_PATH       0x1000
+#define LINUX_AT_EACCESS          0x200
 
 /* Linux mmap flags */
 #define LINUX_MAP_SHARED      0x01
@@ -532,7 +542,9 @@ typedef struct {
     char **guest_argv;            /* Guest argv */
     char **guest_envp;            /* Guest envp */
     uintptr_t elf_base;           /* Load base address of ELF */
-    uintptr_t elf_entry;          /* Entry point address */
+    uintptr_t elf_entry;          /* Entry point address (interpreter or main) */
+    uintptr_t interp_base;        /* Base address of dynamic linker (or 0) */
+    uintptr_t main_entry;         /* Entry point of main executable */
     uintptr_t elf_ph_addr;        /* Program headers virtual address */
     uint16_t elf_ph_num;          /* Number of program headers */
     uint16_t elf_ph_ent;          /* Size of program header */
@@ -542,6 +554,7 @@ typedef struct {
     size_t guest_stack_size;      /* Guest stack size (8MB) */
     void *guest_sp;               /* Top of guest stack (entry sp) */
     int *child_tid_ptr;           /* set_tid_address pointer */
+    uintptr_t guest_tls;          /* Virtualized Linux TPIDR_EL0 thread pointer */
     bool debug_enabled;           /* LTM_DEBUG enabled */
     bool trace_syscalls;          /* LTM_STRACE enabled */
 } ltm_runtime_t;
