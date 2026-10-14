@@ -126,5 +126,203 @@ Welcome to the development log for **LTM (Linux Translation Module)**, running u
    - Built with Clang (`-Wall -Wextra -O2 -g -Iinclude`) with **0 compiler warnings and 0 errors**.
    - Validated against all 6 test suites with 100% pass rate.
 
+---
 
+## 🌟 The North Star Goal & Architectural Roadmap
 
+### 🎯 North Star Objective:
+**Run Arch Linux / Alpine Linux ARM64 inside LTM's chroot container so that `fastfetch` runs natively, rendering the distribution ASCII logo and accurate Apple Silicon hardware information!**
+
+### 🧭 Roadmap to 100% Linux ARM64 Binary Compatibility (Easy ➡️ Hard):
+
+```mermaid
+flowchart TD
+    T1["Tier 1: Freestanding & Static ELF Execution (100% Complete)"] --> T2["Tier 2: Real Distro Rootfs & Shell Foundations (In Progress)"]
+    T2 --> T3["Tier 3: Dynamic ELF Linker & musl/glibc Loader (Critical Path)"]
+    T3 --> T4["Tier 4: C Standard Library Runtime Interfacing (pthreads, futex, TLS)"]
+    T4 --> T5["Tier 5: Hardware & Topology Emulation (NORTH STAR: fastfetch)"]
+    T5 --> T6["Tier 6: Networking, Epoll, Eventfd & Concurrency (curl, apk)"]
+    T6 --> T7["Tier 7: Modern Linux Edge Cases & Stubs (io_uring, clone3, seccomp)"]
+```
+
+---
+
+### [Tier 1: Freestanding & Static ELF Execution] (✅ COMPLETED)
+- **Scope**: Foundational ELF loader, 16KB page alignment, instruction patcher (`svc #0` -> `brk #0`), `SIGTRAP` dispatcher, Darwin `PAGEZERO` bypass (`--image-base=0x400000000`), Darwin `x18` register defense (`-ffixed-x18`), guest stack/auxv setup, and 18 core Linux syscalls.
+- **Milestone Validation**: 6/6 test suites passed with 0 errors.
+
+---
+
+### [Tier 2: Real Distro Rootfs & Shell Foundations] (🔄 IN PROGRESS)
+- **Scope**: Genuine distro rootfs containment, static BusyBox execution, shell pipes, process management, and signal mapping.
+- **Architectural Deliverables**:
+  1. *Chroot Sandbox Containment*: Seamless rootfs virtualization (`--rootfs <dir>` or default `./rootfs`). Guest paths (`/bin`, `/lib`, `/etc`, `/usr`) resolve inside the rootfs while host escape attempts (`/Library`, `/System`, `/Users`, `../../etc/passwd`, `/private/var`) are strictly blocked.
+  2. *Guest Symlink Resolution*: Resolution of intra-rootfs symlinks (`/bin/sh -> /bin/busybox`, `/lib/ld-musl-aarch64.so.1 -> libc.musl-aarch64.so.1`).
+  3. *Filesystem Syscalls*: `readlinkat`, `statfs`/`fstatfs` (returning Linux EXT4/OVERLAYFS statfs), `mkdirat`, `unlinkat`, `renameat2`, `symlinkat`, `linkat`, `fchmodat`, `fchownat`, `faccessat2`, `utimensat`.
+  4. *Pipes & I/O Redirection*: `pipe2` (supporting `O_CLOEXEC` & `O_NONBLOCK`), `dup`, `dup2`, `dup3`, `fcntl` (`F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL`, `F_DUPFD`, `F_DUPFD_CLOEXEC`).
+  5. *Process Spawning (`sys_execve` & `fork`/`clone`)*:
+     - `fork`/`clone(SIGCHLD)`: Darwin process replication.
+     - `execve`: Re-executing LTM with guest binary path in clean process state (`ltm -r <rootfs> <binary>`), eliminating host memory leaks.
+     - `wait4`, `waitid`: Child process status reaping.
+  6. *Signal Translation & Terminal Control*:
+     - Linux-to-Darwin signal number translation table (`SIGCHLD`, `SIGPIPE`, `SIGINT`, `SIGTERM`, `SIGTSTP`, `SIGCONT`, `SIGHUP`).
+     - Terminal `ioctl`: `TCGETS`, `TCSETS`, `TCSETSW`, `TCSETSF`, `TIOCGPGRP`, `TIOCSPGRP`.
+- **Target Milestone**: Run static BusyBox executing shell scripts, directory navigation, pipelines (`cat /etc/os-release | grep PRETTY_NAME`), and text tools inside Alpine rootfs.
+
+---
+
+### [Tier 3: Dynamic ELF Linker & musl/glibc Loader Support] (📋 CRITICAL PATH)
+- **Scope**: Executing dynamically linked binaries through `/lib/ld-musl-aarch64.so.1` and `/lib/ld-linux-aarch64.so.1`.
+- **Key Architectural Breakthroughs**:
+  1. *The Apple Silicon W^X File-Backed Memory Barrier*:
+     - **Discovery**: On macOS Apple Silicon Darwin, file-backed executable mappings (`mmap` with `PROT_EXEC` and `fd >= 0`) CANNOT be patched in-place. Elevating permissions to write (`mprotect(PROT_READ|PROT_WRITE)`) and modifying code triggers a Darwin kernel `SIGBUS (10)` trap.
+     - **Solution: File-to-Anonymous mmap Conversion**: When dynamic linkers issue `mmap` with `PROT_EXEC` on library file descriptors, LTM allocates anonymous memory (`MAP_ANON | MAP_PRIVATE | MAP_JIT`), copies segment content via `pread(fd, buf, len, offset)`, hot-patches `svc #0` -> `brk #0` while writable, seals the pages with `mprotect(PROT_READ|PROT_EXEC)`, and flushes instruction caches with `sys_icache_invalidate()`.
+  2. *Dual-ELF Loader (`PT_INTERP`)*:
+     - Detect `PT_INTERP` in guest executables.
+     - Load the main application at high address base (`0x400000000`).
+     - Load the dynamic linker (`ld.so`) at a distinct base (`0x500000000`).
+     - Setup guest stack with complete auxv:
+       - `AT_BASE` = dynamic interpreter load base address.
+       - `AT_ENTRY` = main binary entry point.
+       - `AT_PHDR`, `AT_PHENT`, `AT_PHNUM` = main binary program headers.
+       - `AT_PAGESZ` = 16384 (Alpine uses 64KB alignment, fully compatible with 16KB hardware pages).
+       - `AT_RANDOM` = pointer to 16 bytes entropy.
+     - Transfer execution to the *dynamic linker's* entry point.
+  3. *Runtime Shared Library Patching*:
+     - Hot-patching shared libraries (`libc.so`, `libcrypto.so`) as `ld.so` loads them at runtime via `mmap`.
+- **Target Milestone**: Dynamically linked `/bin/busybox` in Alpine rootfs runs and displays BusyBox applet banner.
+
+---
+
+### [Tier 4: C Standard Library Runtime Interfacing] (📋 PLANNED)
+- **Scope**: Complete glibc and musl runtime compatibility, Thread-Local Storage (TLS), futexes, and pthread concurrency.
+- **Architectural Deliverables**:
+  1. *Thread-Local Storage (TLS)*:
+     - Direct manipulation of ARM64 `TPIDR_EL0` register.
+     - `sys_set_tid_address`: Storing clear-on-exit TID pointer.
+  2. *Futex Subsystem Completeness*:
+     - Bucketed hash table with `pthread_mutex_t` and `pthread_cond_t`.
+     - Full support for `FUTEX_WAIT`, `FUTEX_WAKE`, `FUTEX_WAIT_BITSET`, `FUTEX_WAKE_BITSET`, `FUTEX_REQUEUE`, `FUTEX_CMP_REQUEUE`.
+     - Real-time clock support (`FUTEX_CLOCK_REALTIME`).
+  3. *Multi-Threading (`sys_clone`)*:
+     - Map `CLONE_VM | CLONE_THREAD` to host `pthread_create`.
+     - Forward guest stack pointer, TLS pointer, and entry point.
+     - Trigger automatic `FUTEX_WAKE` on `clear_child_tid` when thread terminates.
+  4. *Guest Signal Frame Delivery & `rt_sigreturn`*:
+     - Construct Linux ARM64 `struct rt_sigframe` on guest stack (`siginfo_t`, `ucontext_t` with full register set `x0-x30`, `sp`, `pc`).
+     - Direct `lr` to restorer trampoline and `pc` to guest handler.
+     - Intercept `rt_sigreturn` trap, pop `ucontext_t`, restore guest state, and resume execution.
+  5. *Clocks & Resource Limits*:
+     - `clock_gettime` (`CLOCK_REALTIME`, `CLOCK_MONOTONIC`, `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID`).
+     - `clock_nanosleep`, `clock_getres`.
+     - `prlimit64`, `getrlimit`, `setrlimit`.
+- **Target Milestone**: Multi-threaded C and C++ programs running with pthreads and synchronization.
+
+---
+
+### [Tier 5: Hardware & System Topology Emulation for Fastfetch] (🌟 NORTH STAR)
+- **Scope**: Emulating virtual Linux hardware interfaces required for `fastfetch` to extract and display system specifications natively.
+- **Architectural Deliverables**:
+  1. *Virtual `/proc/cpuinfo`*:
+     - Multi-core ARM64 Apple Silicon topology derived from Darwin `hw.ncpu`.
+     - Populate ARM64 feature flags (`fp`, `asimd`, `aes`, `sha1`, `sha2`, `crc32`, `atomics`).
+     - Set `CPU implementer: 0x61` (Apple), `Model Name: Apple M-Series (ARM64)`.
+  2. *Virtual `/proc/meminfo`*:
+     - Compute `MemTotal` from `hw.memsize`.
+     - Compute `MemFree`, `MemAvailable`, `Cached`, `SwapTotal` from Darwin `host_statistics64(HOST_VM_INFO64)`.
+  3. *Virtual `/proc/uptime` & `/proc/loadavg`*:
+     - Derive uptime from `sysctl kern.boottime`.
+     - Derive load averages from `getloadavg()`.
+  4. *Virtual `/sys/devices/system/cpu/...`*:
+     - `/sys/devices/system/cpu/online`: e.g. "0-7" or "0-9".
+     - `/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq`.
+  5. *Virtual Machine Model*:
+     - `/sys/firmware/devicetree/base/model` or `/sys/class/dmi/id/product_name`: Return host Mac model.
+  6. *Terminal Geometry (`ioctl TIOCGWINSZ`)*:
+     - Translate Darwin `struct winsize` to Linux `struct linux_winsize` so fastfetch formats logos and columns without wrapping.
+  7. *Distro Release Passthrough*:
+     - Passthrough `/etc/os-release` from rootfs (`ID=alpine`, `PRETTY_NAME="Alpine Linux v3.20"`).
+- **Target Milestone**:
+  - Run `./ltm -r rootfs /usr/bin/fastfetch`!
+  - Native Alpine Linux logo and Apple Silicon CPU/RAM statistics rendered directly in the terminal!
+
+---
+
+### [Tier 6: Networking, Epoll, Eventfd, and Advanced Concurrency] (📋 PLANNED)
+- **Scope**: Network socket API, event demultiplexing via Darwin kqueue, and Linux IPC primitives.
+- **Architectural Deliverables**:
+  1. *Socket API*:
+     - `socket`, `socketpair`, `bind`, `listen`, `accept`, `accept4`, `connect`.
+     - `getsockname`, `getpeername`, `sendto`, `recvfrom`, `sendmsg`, `recvmsg`, `shutdown`.
+     - Socket option translation (`SOL_SOCKET`, `SO_REUSEADDR`, `SO_NONBLOCK`, `SO_CLOEXEC`).
+  2. *Epoll Emulation via Darwin Kqueue*:
+     - `epoll_create1` -> `kqueue()`.
+     - `epoll_ctl` -> `kevent()` (`EVFILT_READ`, `EVFILT_WRITE`, `EV_ADD`, `EV_DELETE`).
+     - `epoll_wait`, `epoll_pwait` -> `kevent()` event loop.
+  3. *Linux IPC Primitives*:
+     - `eventfd`, `eventfd2`: Emulated via non-blocking pipes.
+     - `timerfd_create`, `timerfd_settime`: Emulated via `kqueue` `EVFILT_TIMER`.
+     - `signalfd`, `signalfd4`: Emulated via `kqueue` `EVFILT_SIGNAL`.
+- **Target Milestone**: Package manager (`apk update` / `apk add`) and network tools (`curl`) working inside chroot.
+
+---
+
+### [Tier 7: Edge Cases & Modern Linux Features] (📋 PLANNED)
+- **Scope**: 100% Linux ARM64 binary compatibility across bleeding-edge software.
+- **Architectural Deliverables**:
+  1. *Graceful Modern Syscall Stubs*:
+     - `io_uring_setup`, `io_uring_enter`, `io_uring_register` (return `-ENOSYS` for graceful fallback).
+     - `clone3` (return `-ENOSYS` so glibc falls back to `clone`).
+     - `pidfd_open`, `pidfd_send_signal`, `pidfd_getfd`.
+     - `landlock_create_ruleset`, `landlock_add_rule`, `landlock_restrict_self`.
+     - `seccomp` (return 0 / `-ENOSYS` safely).
+  2. *Advanced Primitives*:
+     - `memfd_create` (backed by anonymous memory or `shm_open`).
+     - `statx` (populating modern `struct statx`).
+     - `copy_file_range` (backed by Darwin `fcopyfile()`).
+     - `getrandom` (backed by Darwin `getentropy()`).
+- **Target Milestone**: Any standard Linux ARM64 binary executes without failure or unhandled traps.
+
+---
+
+## 📋 Comprehensive Execution Checklist
+
+| Task ID | Tier | Component | Description | Status |
+| :--- | :---: | :--- | :--- | :---: |
+| **T1.1** | Tier 1 | Loader | ELF64 header & PT_LOAD parsing | ✅ Done |
+| **T1.2** | Tier 1 | Memory | 16KB page boundary alignment logic | ✅ Done |
+| **T1.3** | Tier 1 | Patcher | `svc #0` -> `brk #0` instruction rewriting | ✅ Done |
+| **T1.4** | Tier 1 | Dispatcher | `SIGTRAP` trap handler with `ucontext_t` register extraction | ✅ Done |
+| **T1.5** | Tier 1 | ABI | Guest stack construction (argc, argv, envp, auxv) | ✅ Done |
+| **T1.6** | Tier 1 | Syscalls | 18 core static syscalls (file I/O, brk, mmap, identity) | ✅ Done |
+| **T1.7** | Tier 1 | QA | Automated test suite (6/6 tests passing) | ✅ Done |
+| **T2.1** | Tier 2 | Sandbox | Rootfs chroot path canonicalization & escape defenses | 🔄 In Progress |
+| **T2.2** | Tier 2 | Filesystem | Symlink resolution within guest rootfs (`readlinkat`) | ⏳ Queued |
+| **T2.3** | Tier 2 | Filesystem | `statfs`/`fstatfs`, `mkdirat`, `unlinkat`, `renameat2`, `faccessat2` | ⏳ Queued |
+| **T2.4** | Tier 2 | I/O | `pipe2`, `dup2`, `dup3`, `fcntl` (flags & cloexec) | ⏳ Queued |
+| **T2.5** | Tier 2 | Process | `fork`/`clone(SIGCHLD)`, `execve` (re-exec LTM), `wait4` | ⏳ Queued |
+| **T2.6** | Tier 2 | Signals | Linux-to-Darwin signal translation & terminal ioctl | ⏳ Queued |
+| **T2.7** | Tier 2 | QA | Static BusyBox validation suite (`sh`, `ls`, pipes, scripts) | ⏳ Queued |
+| **T3.1** | Tier 3 | Loader | `PT_INTERP` detection & dual-ELF loading (`ld.so` at `0x500000000`) | ⏳ Queued |
+| **T3.2** | Tier 3 | Memory | File-to-anonymous mmap conversion (bypass Darwin W^X SIGBUS) | ⏳ Queued |
+| **T3.3** | Tier 3 | Patcher | Dynamic shared library runtime instruction patching | ⏳ Queued |
+| **T3.4** | Tier 3 | ABI | Full auxv setup (`AT_BASE`, `AT_ENTRY`, `AT_PHDR`, `AT_RANDOM`) | ⏳ Queued |
+| **T3.5** | Tier 3 | QA | Dynamic BusyBox validation (`/bin/busybox` musl) | ⏳ Queued |
+| **T4.1** | Tier 4 | Threads | TLS via ARM64 `tpidr_el0` & `set_tid_address` | ⏳ Queued |
+| **T4.2** | Tier 4 | Futex | Bucketed futex hash table (wait, wake, bitset, requeue, timeouts) | ⏳ Queued |
+| **T4.3** | Tier 4 | Threads | Multi-threading via `clone(CLONE_VM \| CLONE_THREAD)` -> `pthread_create` | ⏳ Queued |
+| **T4.4** | Tier 4 | Signals | Guest signal frame delivery (`rt_sigframe`) & `rt_sigreturn` | ⏳ Queued |
+| **T4.5** | Tier 4 | QA | Multi-threaded C/C++ benchmark suite | ⏳ Queued |
+| **T5.1** | Tier 5 | Procfs | Dynamic `/proc/cpuinfo` (Apple Silicon cores, features, BogoMIPS) | ⏳ Queued |
+| **T5.2** | Tier 5 | Procfs | Dynamic `/proc/meminfo` (RAM & swap from Darwin host_statistics64) | ⏳ Queued |
+| **T5.3** | Tier 5 | Procfs | `/proc/uptime`, `/proc/loadavg`, `/proc/stat` | ⏳ Queued |
+| **T5.4** | Tier 5 | Sysfs | `/sys/devices/system/cpu/...`, `/sys/class/dmi/id/...` | ⏳ Queued |
+| **T5.5** | Tier 5 | Terminal | `ioctl(TIOCGWINSZ)` window dimensions | ⏳ Queued |
+| **T5.6** | Tier 5 | QA | **🌟 FASTFETCH NATIVE VALIDATION IN CHROOT** | ⏳ Queued |
+| **T6.1** | Tier 6 | Network | BSD socket syscall translation (`socket`, `bind`, `connect`, etc.) | ⏳ Queued |
+| **T6.2** | Tier 6 | Epoll | `epoll_create1`, `epoll_ctl`, `epoll_wait` backed by Darwin kqueue | ⏳ Queued |
+| **T6.3** | Tier 6 | IPC | `eventfd2`, `timerfd_create/settime`, `signalfd4` | ⏳ Queued |
+| **T6.4** | Tier 6 | QA | Network validation (`curl https://...`, `apk update`) | ⏳ Queued |
+| **T7.1** | Tier 7 | Syscalls | Modern Linux stubs (`io_uring`, `clone3`, `pidfd`, `seccomp`) | ⏳ Queued |
+| **T7.2** | Tier 7 | Storage | `memfd_create`, `statx`, `copy_file_range`, `getrandom` | ⏳ Queued |
+| **T7.3** | Tier 7 | QA | 100% Compatibility test suite across major Linux distros | ⏳ Queued |

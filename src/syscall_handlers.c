@@ -389,8 +389,7 @@ int64_t handle_mmap(void *addr, size_t length, int prot, int flags, int fd, off_
     }
 
     if (prot & PROT_EXEC) {
-        patcher_scan_and_patch(res, aligned_len);
-        patcher_invalidate_cache(res, aligned_len);
+        patcher_patch_executable_range(res, aligned_len);
     }
 
     return (int64_t)(uintptr_t)res;

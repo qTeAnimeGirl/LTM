@@ -3,16 +3,15 @@
 LTM_TEST_ENTRYPOINT
 
 static const char *escapes[] = {
-    "/etc/passwd",
-    "/etc/shadow",
     "/Library",
     "/Library/Preferences",
     "/Users",
+    "/System",
+    "/System/Library",
     "../../etc/passwd",
     "../../../../../../etc/passwd",
     "/private/etc/passwd",
     "/private/var",
-    "/System",
     NULL
 };
 

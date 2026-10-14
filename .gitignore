@@ -1,0 +1,17 @@
+# Build artifacts
+*.o
+*.elf
+*.bin
+ltm
+tests/bin/*
+!tests/bin/.gitkeep
+
+# macOS metadata
+.DS_Store
+
+# Temporary files
+*.tmp
+
+# Distro rootfs (fetchable via scripts/setup_rootfs.sh)
+rootfs/
+test_binaries/
