@@ -2689,6 +2689,12 @@ static int copy_linux_to_darwin_sockaddr(const void *laddr, socklen_t llen, stru
         memset(dun, 0, sizeof(*dun));
         dun->sun_family = AF_UNIX;
         const char *lpath = (const char *)laddr + 2;
+        char resolved_path[1024];
+        if (lpath[0] != '\0') {
+            if (sandbox_resolve_path(LINUX_AT_FDCWD, lpath, resolved_path, sizeof(resolved_path), 0) == 0) {
+                lpath = resolved_path;
+            }
+        }
         size_t path_len = strlen(lpath);
         if (path_len >= sizeof(dun->sun_path)) path_len = sizeof(dun->sun_path) - 1;
         memcpy(dun->sun_path, lpath, path_len);
@@ -2730,10 +2736,15 @@ static int copy_darwin_to_linux_sockaddr(const struct sockaddr_storage *daddr, s
     if (sa->sa_family == AF_UNIX) {
         if (*llen >= 2) *(uint16_t *)laddr = 1;
         const struct sockaddr_un *dun = (const struct sockaddr_un *)daddr;
-        size_t path_len = strlen(dun->sun_path);
+        const char *spath = dun->sun_path;
+        size_t root_len = strlen(g_ltm.host_rootfs);
+        if (root_len > 0 && strncmp(spath, g_ltm.host_rootfs, root_len) == 0 && spath[root_len] == '/') {
+            spath += root_len;
+        }
+        size_t path_len = strlen(spath);
         size_t space = *llen > 2 ? *llen - 2 : 0;
         if (path_len >= space) path_len = space > 0 ? space - 1 : 0;
-        memcpy((char *)laddr + 2, dun->sun_path, path_len);
+        memcpy((char *)laddr + 2, spath, path_len);
         ((char *)laddr + 2)[path_len] = '\0';
         *llen = (socklen_t)(2 + path_len + 1);
         return 0;
