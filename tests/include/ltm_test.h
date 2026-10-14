@@ -298,6 +298,31 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_reboot              142
 #define SYS_add_key             217
 #define SYS_request_key         218
+#define SYS_keyctl              219
+#define SYS_swapon              224
+#define SYS_swapoff             225
+#define SYS_remap_file_pages    234
+#define SYS_mbind               235
+#define SYS_get_mempolicy       236
+#define SYS_set_mempolicy       237
+#define SYS_migrate_pages       238
+#define SYS_move_pages          239
+#define SYS_perf_event_open     241
+#define SYS_fanotify_init       262
+#define SYS_fanotify_mark       263
+#define SYS_name_to_handle_at   264
+#define SYS_open_by_handle_at   265
+#define SYS_setns               268
+#define SYS_process_vm_readv    270
+#define SYS_process_vm_writev   271
+#define SYS_kcmp                272
+#define SYS_finit_module        273
+#define SYS_seccomp             277
+#define SYS_bpf                 280
+#define SYS_pkey_mprotect       288
+#define SYS_pkey_alloc          289
+#define SYS_pkey_free           290
+#define SYS_clone3              435
 
 /* File open flags */
 #define AT_FDCWD        (-100)
@@ -2060,6 +2085,104 @@ static inline int sys_add_key(const char *type, const char *description, const v
 static inline int sys_request_key(const char *type, const char *description, const char *callout_info, int32_t destringid) {
     return (int)sys_syscall4(SYS_request_key, (long)type, (long)description, (long)callout_info, destringid);
 }
+
+/* Wave 8 Structures & Wrappers */
+struct file_handle {
+    unsigned int handle_bytes;
+    int handle_type;
+    unsigned char f_handle[0];
+};
+
+struct clone_args {
+    uint64_t flags;
+    uint64_t pidfd;
+    uint64_t child_tid;
+    uint64_t parent_tid;
+    uint64_t exit_signal;
+    uint64_t stack;
+    uint64_t stack_size;
+    uint64_t tls;
+    uint64_t set_tid;
+    uint64_t set_tid_size;
+    uint64_t cgroup;
+};
+
+static inline int sys_keyctl(int cmd, unsigned long a2, unsigned long a3, unsigned long a4, unsigned long a5) {
+    return (int)sys_syscall5(SYS_keyctl, cmd, a2, a3, a4, a5);
+}
+static inline int sys_swapon(const char *path, int swapflags) {
+    return (int)sys_syscall2(SYS_swapon, (long)path, swapflags);
+}
+static inline int sys_swapoff(const char *path) {
+    return (int)sys_syscall1(SYS_swapoff, (long)path);
+}
+static inline int sys_remap_file_pages(void *addr, size_t size, int prot, size_t pgoff, int flags) {
+    return (int)sys_syscall5(SYS_remap_file_pages, (long)addr, size, prot, pgoff, flags);
+}
+static inline int sys_mbind(void *addr, unsigned long len, int mode, const unsigned long *nmask, unsigned long maxnode, unsigned flags) {
+    return (int)sys_syscall6(SYS_mbind, (long)addr, len, mode, (long)nmask, maxnode, flags);
+}
+static inline int sys_get_mempolicy(int *mode, unsigned long *nmask, unsigned long maxnode, void *addr, unsigned long flags) {
+    return (int)sys_syscall5(SYS_get_mempolicy, (long)mode, (long)nmask, maxnode, (long)addr, flags);
+}
+static inline int sys_set_mempolicy(int mode, const unsigned long *nmask, unsigned long maxnode) {
+    return (int)sys_syscall3(SYS_set_mempolicy, mode, (long)nmask, maxnode);
+}
+static inline int sys_migrate_pages(pid_t pid, unsigned long maxnode, const unsigned long *from, const unsigned long *to) {
+    return (int)sys_syscall4(SYS_migrate_pages, pid, maxnode, (long)from, (long)to);
+}
+static inline int sys_move_pages(pid_t pid, unsigned long nr_pages, const void **pages, const int *nodes, int *status, int flags) {
+    return (int)sys_syscall6(SYS_move_pages, pid, nr_pages, (long)pages, (long)nodes, (long)status, flags);
+}
+static inline int sys_perf_event_open(void *attr_uptr, pid_t pid, int cpu, int group_fd, unsigned long flags) {
+    return (int)sys_syscall5(SYS_perf_event_open, (long)attr_uptr, pid, cpu, group_fd, flags);
+}
+static inline int sys_fanotify_init(unsigned int flags, unsigned int event_f_flags) {
+    return (int)sys_syscall2(SYS_fanotify_init, flags, event_f_flags);
+}
+static inline int sys_fanotify_mark(int fanotify_fd, unsigned int flags, uint64_t mask, int dirfd, const char *pathname) {
+    return (int)sys_syscall5(SYS_fanotify_mark, fanotify_fd, flags, mask, dirfd, (long)pathname);
+}
+static inline int sys_name_to_handle_at(int dirfd, const char *pathname, struct file_handle *handle, int *mount_id, int flags) {
+    return (int)sys_syscall5(SYS_name_to_handle_at, dirfd, (long)pathname, (long)handle, (long)mount_id, flags);
+}
+static inline int sys_open_by_handle_at(int mountdirfd, struct file_handle *handle, int flags) {
+    return (int)sys_syscall3(SYS_open_by_handle_at, mountdirfd, (long)handle, flags);
+}
+static inline int sys_setns(int fd, int nstype) {
+    return (int)sys_syscall2(SYS_setns, fd, nstype);
+}
+static inline int sys_process_vm_readv(pid_t pid, const struct iovec *local_iov, unsigned long liovcnt, const struct iovec *remote_iov, unsigned long riovcnt, unsigned long flags) {
+    return (int)sys_syscall6(SYS_process_vm_readv, pid, (long)local_iov, liovcnt, (long)remote_iov, riovcnt, flags);
+}
+static inline int sys_process_vm_writev(pid_t pid, const struct iovec *local_iov, unsigned long liovcnt, const struct iovec *remote_iov, unsigned long riovcnt, unsigned long flags) {
+    return (int)sys_syscall6(SYS_process_vm_writev, pid, (long)local_iov, liovcnt, (long)remote_iov, riovcnt, flags);
+}
+static inline int sys_kcmp(pid_t pid1, pid_t pid2, int type, unsigned long idx1, unsigned long idx2) {
+    return (int)sys_syscall5(SYS_kcmp, pid1, pid2, type, idx1, idx2);
+}
+static inline int sys_finit_module(int fd, const char *param_values, int flags) {
+    return (int)sys_syscall3(SYS_finit_module, fd, (long)param_values, flags);
+}
+static inline int sys_seccomp(unsigned int operation, unsigned int flags, void *args) {
+    return (int)sys_syscall3(SYS_seccomp, operation, flags, (long)args);
+}
+static inline int sys_bpf(int cmd, void *uattr, unsigned int size) {
+    return (int)sys_syscall3(SYS_bpf, cmd, (long)uattr, size);
+}
+static inline int sys_pkey_mprotect(void *addr, size_t len, int prot, int pkey) {
+    return (int)sys_syscall4(SYS_pkey_mprotect, (long)addr, len, prot, pkey);
+}
+static inline int sys_pkey_alloc(unsigned int flags, unsigned int access_rights) {
+    return (int)sys_syscall2(SYS_pkey_alloc, flags, access_rights);
+}
+static inline int sys_pkey_free(int pkey) {
+    return (int)sys_syscall1(SYS_pkey_free, pkey);
+}
+static inline int sys_clone3(struct clone_args *cl_args, size_t size) {
+    return (int)sys_syscall2(SYS_clone3, (long)cl_args, size);
+}
+
 
 
 /* String / memory utilities */

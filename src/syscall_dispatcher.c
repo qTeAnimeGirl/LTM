@@ -1421,6 +1421,83 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
             ret = handle_request_key((const char *)a0, (const char *)a1, (const char *)a2, (int32_t)a3);
             break;
 
+        /* Wave 8 Syscalls */
+        case LINUX_SYS_keyctl:
+            ret = handle_keyctl((int)a0, (unsigned long)a1, (unsigned long)a2, (unsigned long)a3, (unsigned long)a4);
+            break;
+        case LINUX_SYS_swapon:
+            ret = handle_swapon((const char *)a0, (int)a1);
+            break;
+        case LINUX_SYS_swapoff:
+            ret = handle_swapoff((const char *)a0);
+            break;
+        case LINUX_SYS_remap_file_pages:
+            ret = handle_remap_file_pages((void *)a0, (size_t)a1, (int)a2, (size_t)a3, (int)a4);
+            break;
+        case LINUX_SYS_mbind:
+            ret = handle_mbind((void *)a0, (unsigned long)a1, (int)a2, (const unsigned long *)a3, (unsigned long)a4, (unsigned)a5);
+            break;
+        case LINUX_SYS_get_mempolicy:
+            ret = handle_get_mempolicy((int *)a0, (unsigned long *)a1, (unsigned long)a2, (void *)a3, (unsigned long)a4);
+            break;
+        case LINUX_SYS_set_mempolicy:
+            ret = handle_set_mempolicy((int)a0, (const unsigned long *)a1, (unsigned long)a2);
+            break;
+        case LINUX_SYS_migrate_pages:
+            ret = handle_migrate_pages((pid_t)a0, (unsigned long)a1, (const unsigned long *)a2, (const unsigned long *)a3);
+            break;
+        case LINUX_SYS_move_pages:
+            ret = handle_move_pages((pid_t)a0, (unsigned long)a1, (const void **)a2, (const int *)a3, (int *)a4, (int)a5);
+            break;
+        case LINUX_SYS_perf_event_open:
+            ret = handle_perf_event_open((void *)a0, (pid_t)a1, (int)a2, (int)a3, (unsigned long)a4);
+            break;
+        case LINUX_SYS_fanotify_init:
+            ret = handle_fanotify_init((unsigned int)a0, (unsigned int)a1);
+            break;
+        case LINUX_SYS_fanotify_mark:
+            ret = handle_fanotify_mark((int)a0, (unsigned int)a1, (uint64_t)a2, (int)a3, (const char *)a4);
+            break;
+        case LINUX_SYS_name_to_handle_at:
+            ret = handle_name_to_handle_at((int)a0, (const char *)a1, (struct linux_file_handle *)a2, (int *)a3, (int)a4);
+            break;
+        case LINUX_SYS_open_by_handle_at:
+            ret = handle_open_by_handle_at((int)a0, (struct linux_file_handle *)a1, (int)a2);
+            break;
+        case LINUX_SYS_setns:
+            ret = handle_setns((int)a0, (int)a1);
+            break;
+        case LINUX_SYS_process_vm_readv:
+            ret = handle_process_vm_readv((pid_t)a0, (const struct iovec *)a1, (unsigned long)a2, (const struct iovec *)a3, (unsigned long)a4, (unsigned long)a5);
+            break;
+        case LINUX_SYS_process_vm_writev:
+            ret = handle_process_vm_writev((pid_t)a0, (const struct iovec *)a1, (unsigned long)a2, (const struct iovec *)a3, (unsigned long)a4, (unsigned long)a5);
+            break;
+        case LINUX_SYS_kcmp:
+            ret = handle_kcmp((pid_t)a0, (pid_t)a1, (int)a2, (unsigned long)a3, (unsigned long)a4);
+            break;
+        case LINUX_SYS_finit_module:
+            ret = handle_finit_module((int)a0, (const char *)a1, (int)a2);
+            break;
+        case LINUX_SYS_seccomp:
+            ret = handle_seccomp((unsigned int)a0, (unsigned int)a1, (void *)a2);
+            break;
+        case LINUX_SYS_bpf:
+            ret = handle_bpf((int)a0, (void *)a1, (unsigned int)a2);
+            break;
+        case LINUX_SYS_pkey_mprotect:
+            ret = handle_pkey_mprotect((void *)a0, (size_t)a1, (int)a2, (int)a3);
+            break;
+        case LINUX_SYS_pkey_alloc:
+            ret = handle_pkey_alloc((unsigned int)a0, (unsigned int)a1);
+            break;
+        case LINUX_SYS_pkey_free:
+            ret = handle_pkey_free((int)a0);
+            break;
+        case LINUX_SYS_clone3:
+            ret = handle_clone3((struct linux_clone_args *)a0, (size_t)a1, state);
+            break;
+
         default:
             ltm_log_debug("Unhandled Linux syscall: %llu (%s)", (unsigned long long)num, linux_syscall_name((int)num));
             ret = -LINUX_ENOSYS;

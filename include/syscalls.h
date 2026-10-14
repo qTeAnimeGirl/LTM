@@ -685,5 +685,52 @@ int64_t handle_reboot(int magic1, int magic2, int cmd, void *arg);
 int64_t handle_add_key(const char *type, const char *description, const void *payload, size_t plen, int32_t ringid);
 int64_t handle_request_key(const char *type, const char *description, const char *callout_info, int32_t destringid);
 
+/* Wave 8: Final 25 Linux ARM64 Syscalls */
+struct linux_file_handle {
+    unsigned int handle_bytes;
+    int handle_type;
+    unsigned char f_handle[0];
+};
+
+struct linux_clone_args {
+    uint64_t flags;
+    uint64_t pidfd;
+    uint64_t child_tid;
+    uint64_t parent_tid;
+    uint64_t exit_signal;
+    uint64_t stack;
+    uint64_t stack_size;
+    uint64_t tls;
+    uint64_t set_tid;
+    uint64_t set_tid_size;
+    uint64_t cgroup;
+};
+
+int64_t handle_keyctl(int cmd, unsigned long a2, unsigned long a3, unsigned long a4, unsigned long a5);
+int64_t handle_swapon(const char *path, int swapflags);
+int64_t handle_swapoff(const char *path);
+int64_t handle_remap_file_pages(void *addr, size_t size, int prot, size_t pgoff, int flags);
+int64_t handle_mbind(void *addr, unsigned long len, int mode, const unsigned long *nmask, unsigned long maxnode, unsigned flags);
+int64_t handle_get_mempolicy(int *mode, unsigned long *nmask, unsigned long maxnode, void *addr, unsigned long flags);
+int64_t handle_set_mempolicy(int mode, const unsigned long *nmask, unsigned long maxnode);
+int64_t handle_migrate_pages(pid_t pid, unsigned long maxnode, const unsigned long *from, const unsigned long *to);
+int64_t handle_move_pages(pid_t pid, unsigned long nr_pages, const void **pages, const int *nodes, int *status, int flags);
+int64_t handle_perf_event_open(void *attr_uptr, pid_t pid, int cpu, int group_fd, unsigned long flags);
+int64_t handle_fanotify_init(unsigned int flags, unsigned int event_f_flags);
+int64_t handle_fanotify_mark(int fanotify_fd, unsigned int flags, uint64_t mask, int dirfd, const char *pathname);
+int64_t handle_name_to_handle_at(int dirfd, const char *pathname, struct linux_file_handle *handle, int *mount_id, int flags);
+int64_t handle_open_by_handle_at(int mountdirfd, struct linux_file_handle *handle, int flags);
+int64_t handle_setns(int fd, int nstype);
+int64_t handle_process_vm_readv(pid_t pid, const struct iovec *local_iov, unsigned long liovcnt, const struct iovec *remote_iov, unsigned long riovcnt, unsigned long flags);
+int64_t handle_process_vm_writev(pid_t pid, const struct iovec *local_iov, unsigned long liovcnt, const struct iovec *remote_iov, unsigned long riovcnt, unsigned long flags);
+int64_t handle_kcmp(pid_t pid1, pid_t pid2, int type, unsigned long idx1, unsigned long idx2);
+int64_t handle_finit_module(int fd, const char *param_values, int flags);
+int64_t handle_seccomp(unsigned int operation, unsigned int flags, void *args);
+int64_t handle_bpf(int cmd, void *uattr, unsigned int size);
+int64_t handle_pkey_mprotect(void *addr, size_t len, int prot, int pkey);
+int64_t handle_pkey_alloc(unsigned int flags, unsigned int access_rights);
+int64_t handle_pkey_free(int pkey);
+int64_t handle_clone3(struct linux_clone_args *cl_args, size_t size, void *state);
+
 #endif /* SYSCALLS_H */
 

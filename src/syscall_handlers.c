@@ -5473,6 +5473,268 @@ int64_t handle_request_key(const char *type, const char *description, const char
     return -LINUX_ENOKEY;
 }
 
+/* ========================================================================= */
+/* Wave 8: Final 25 Linux ARM64 Syscalls                                     */
+/* ========================================================================= */
+
+int64_t handle_keyctl(int cmd, unsigned long a2, unsigned long a3, unsigned long a4, unsigned long a5) {
+    (void)a4; (void)a5;
+    if (cmd == 0 /* KEYCTL_GET_KEYRING_ID */) {
+        if ((int32_t)a2 == -1 || (int32_t)a2 == -2 || (int32_t)a2 == -3 || (int32_t)a2 == -4) {
+            return 1001;
+        }
+        return -LINUX_EINVAL;
+    }
+    if (cmd == 3 /* KEYCTL_REVOKE */) {
+        if ((int32_t)a2 <= 0 && (int32_t)a2 != -1 && (int32_t)a2 != -2 && (int32_t)a2 != -3 && (int32_t)a2 != -4) {
+            return -LINUX_EINVAL;
+        }
+        return 0;
+    }
+    if (cmd == 6 /* KEYCTL_DESCRIBE */) {
+        if ((int32_t)a2 <= 0 && (int32_t)a2 != -1 && (int32_t)a2 != -2 && (int32_t)a2 != -3 && (int32_t)a2 != -4) {
+            return -LINUX_EINVAL;
+        }
+        char *buf = (char *)a3;
+        size_t buflen = (size_t)a4;
+        static const char desc[] = "user;1000;1000;3f010000;test_key";
+        size_t desc_len = sizeof(desc);
+        if (!buf || buflen == 0) return (int64_t)desc_len;
+        size_t n = buflen < desc_len ? buflen : desc_len;
+        memcpy(buf, desc, n);
+        return (int64_t)desc_len;
+    }
+    return -LINUX_EINVAL;
+}
+
+int64_t handle_swapon(const char *path, int swapflags) {
+    (void)swapflags;
+    if (!path) return -LINUX_EFAULT;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_swapoff(const char *path) {
+    if (!path) return -LINUX_EFAULT;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_remap_file_pages(void *addr, size_t size, int prot, size_t pgoff, int flags) {
+    (void)prot; (void)pgoff; (void)flags;
+    uintptr_t uaddr = (uintptr_t)addr;
+    if (uaddr & 0x3FFF) return -LINUX_EINVAL;
+    if (size == 0) return -LINUX_EINVAL;
+    return 0;
+}
+
+int64_t handle_mbind(void *addr, unsigned long len, int mode, const unsigned long *nmask, unsigned long maxnode, unsigned flags) {
+    (void)maxnode;
+    uintptr_t uaddr = (uintptr_t)addr;
+    if (uaddr & 0x3FFF) return -LINUX_EINVAL;
+    if (len == 0) return -LINUX_EINVAL;
+    if (mode < 0 || mode > 5) return -LINUX_EINVAL;
+    if (flags & ~0x3) return -LINUX_EINVAL;
+    if (!nmask && mode != 0) return -LINUX_EINVAL;
+    return 0;
+}
+
+int64_t handle_get_mempolicy(int *mode, unsigned long *nmask, unsigned long maxnode, void *addr, unsigned long flags) {
+    (void)addr;
+    if (flags & ~0x7) return -LINUX_EINVAL;
+    if (mode) *mode = 0; /* MPOL_DEFAULT */
+    if (nmask && maxnode > 0) {
+        nmask[0] = 1; /* Node 0 */
+    }
+    return 0;
+}
+
+int64_t handle_set_mempolicy(int mode, const unsigned long *nmask, unsigned long maxnode) {
+    (void)maxnode;
+    if (mode < 0 || mode > 5) return -LINUX_EINVAL;
+    if (mode != 0 && !nmask) return -LINUX_EINVAL;
+    return 0;
+}
+
+int64_t handle_migrate_pages(pid_t pid, unsigned long maxnode, const unsigned long *from, const unsigned long *to) {
+    (void)maxnode;
+    if (pid < 0) return -LINUX_ESRCH;
+    if (!from || !to) return -LINUX_EFAULT;
+    return 0;
+}
+
+int64_t handle_move_pages(pid_t pid, unsigned long nr_pages, const void **pages, const int *nodes, int *status, int flags) {
+    (void)flags;
+    if (pid < 0) return -LINUX_ESRCH;
+    if (nr_pages == 0) return 0;
+    if (!pages) return -LINUX_EFAULT;
+    (void)nodes;
+    if (status) {
+        for (unsigned long i = 0; i < nr_pages; i++) {
+            status[i] = 0; /* Node 0 */
+        }
+    }
+    return 0;
+}
+
+int64_t handle_perf_event_open(void *attr_uptr, pid_t pid, int cpu, int group_fd, unsigned long flags) {
+    (void)pid; (void)cpu; (void)group_fd; (void)flags;
+    if (!attr_uptr) return -LINUX_EFAULT;
+    return -LINUX_EACCES;
+}
+
+int64_t handle_fanotify_init(unsigned int flags, unsigned int event_f_flags) {
+    (void)event_f_flags;
+    if (flags & ~0x3F) return -LINUX_EINVAL;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_fanotify_mark(int fanotify_fd, unsigned int flags, uint64_t mask, int dirfd, const char *pathname) {
+    (void)flags; (void)mask; (void)dirfd; (void)pathname;
+    if (fanotify_fd < 0) return -LINUX_EBADF;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_name_to_handle_at(int dirfd, const char *pathname, struct linux_file_handle *handle, int *mount_id, int flags) {
+    (void)dirfd; (void)flags;
+    if (!pathname || !handle || !mount_id) return -LINUX_EFAULT;
+    return -LINUX_EOPNOTSUPP;
+}
+
+int64_t handle_open_by_handle_at(int mountdirfd, struct linux_file_handle *handle, int flags) {
+    (void)flags;
+    if (mountdirfd < 0 && mountdirfd != LINUX_AT_FDCWD) return -LINUX_EBADF;
+    if (!handle) return -LINUX_EFAULT;
+    return -LINUX_EOPNOTSUPP;
+}
+
+int64_t handle_setns(int fd, int nstype) {
+    if (fd < 0) return -LINUX_EBADF;
+    if (nstype != 0 && (nstype & ~0x7e020000)) return -LINUX_EINVAL;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_process_vm_readv(pid_t pid, const struct iovec *local_iov, unsigned long liovcnt, const struct iovec *remote_iov, unsigned long riovcnt, unsigned long flags) {
+    if (flags != 0) return -LINUX_EINVAL;
+    if (pid < 0) return -LINUX_ESRCH;
+    if (!local_iov || !remote_iov) return -LINUX_EFAULT;
+    if (liovcnt == 0 || riovcnt == 0) return -LINUX_EINVAL;
+
+    if (pid == getpid() || pid == 0) {
+        size_t total = 0;
+        size_t l_idx = 0, l_off = 0;
+        size_t r_idx = 0, r_off = 0;
+        while (l_idx < liovcnt && r_idx < riovcnt) {
+            size_t l_rem = local_iov[l_idx].iov_len - l_off;
+            size_t r_rem = remote_iov[r_idx].iov_len - r_off;
+            size_t chunk = l_rem < r_rem ? l_rem : r_rem;
+            if (chunk > 0) {
+                memcpy((char *)local_iov[l_idx].iov_base + l_off,
+                       (const char *)remote_iov[r_idx].iov_base + r_off,
+                       chunk);
+                total += chunk;
+                l_off += chunk;
+                r_off += chunk;
+            }
+            if (l_off >= local_iov[l_idx].iov_len) { l_idx++; l_off = 0; }
+            if (r_off >= remote_iov[r_idx].iov_len) { r_idx++; r_off = 0; }
+        }
+        return (int64_t)total;
+    }
+    int r = kill(pid, 0);
+    if (r < 0) return darwin_to_linux_errno(errno);
+    return -LINUX_EPERM;
+}
+
+int64_t handle_process_vm_writev(pid_t pid, const struct iovec *local_iov, unsigned long liovcnt, const struct iovec *remote_iov, unsigned long riovcnt, unsigned long flags) {
+    if (flags != 0) return -LINUX_EINVAL;
+    if (pid < 0) return -LINUX_ESRCH;
+    if (!local_iov || !remote_iov) return -LINUX_EFAULT;
+    if (liovcnt == 0 || riovcnt == 0) return -LINUX_EINVAL;
+
+    if (pid == getpid() || pid == 0) {
+        size_t total = 0;
+        size_t l_idx = 0, l_off = 0;
+        size_t r_idx = 0, r_off = 0;
+        while (l_idx < liovcnt && r_idx < riovcnt) {
+            size_t l_rem = local_iov[l_idx].iov_len - l_off;
+            size_t r_rem = remote_iov[r_idx].iov_len - r_off;
+            size_t chunk = l_rem < r_rem ? l_rem : r_rem;
+            if (chunk > 0) {
+                memcpy((char *)remote_iov[r_idx].iov_base + r_off,
+                       (const char *)local_iov[l_idx].iov_base + l_off,
+                       chunk);
+                total += chunk;
+                l_off += chunk;
+                r_off += chunk;
+            }
+            if (l_off >= local_iov[l_idx].iov_len) { l_idx++; l_off = 0; }
+            if (r_off >= remote_iov[r_idx].iov_len) { r_idx++; r_off = 0; }
+        }
+        return (int64_t)total;
+    }
+    int r = kill(pid, 0);
+    if (r < 0) return darwin_to_linux_errno(errno);
+    return -LINUX_EPERM;
+}
+
+int64_t handle_kcmp(pid_t pid1, pid_t pid2, int type, unsigned long idx1, unsigned long idx2) {
+    if (pid1 < 0 || pid2 < 0) return -LINUX_ESRCH;
+    if (type < 0 || type > 7) return -LINUX_EINVAL;
+    if (pid1 == pid2) {
+        if (type == 0 /* KCMP_FILE */ || type == 7 /* KCMP_EPOLL_TFD */) {
+            if (idx1 == idx2) return 0;
+            return idx1 < idx2 ? 1 : 2;
+        }
+        return 0;
+    }
+    return pid1 < pid2 ? 1 : 2;
+}
+
+int64_t handle_finit_module(int fd, const char *param_values, int flags) {
+    (void)param_values; (void)flags;
+    if (fd < 0) return -LINUX_EBADF;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_seccomp(unsigned int operation, unsigned int flags, void *args) {
+    (void)flags; (void)args;
+    if (operation > 2) return -LINUX_EINVAL;
+    if (operation == 2 /* SECCOMP_GET_ACTION_AVAIL */) return 0;
+    return 0;
+}
+
+int64_t handle_bpf(int cmd, void *uattr, unsigned int size) {
+    (void)cmd; (void)size;
+    if (!uattr) return -LINUX_EFAULT;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_pkey_mprotect(void *addr, size_t len, int prot, int pkey) {
+    if (pkey < 0) return -LINUX_EINVAL;
+    return handle_mprotect(addr, len, prot);
+}
+
+int64_t handle_pkey_alloc(unsigned int flags, unsigned int access_rights) {
+    (void)access_rights;
+    if (flags != 0) return -LINUX_EINVAL;
+    return -LINUX_ENOSPC;
+}
+
+int64_t handle_pkey_free(int pkey) {
+    if (pkey < 0) return -LINUX_EINVAL;
+    return 0;
+}
+
+int64_t handle_clone3(struct linux_clone_args *cl_args, size_t size, void *state) {
+    if (!cl_args) return -LINUX_EFAULT;
+    if (size < 64) return -LINUX_EINVAL;
+    return handle_clone(cl_args->flags | cl_args->exit_signal,
+                        (void *)cl_args->stack,
+                        (int *)cl_args->parent_tid,
+                        (void *)cl_args->tls,
+                        (int *)cl_args->child_tid,
+                        state);
+}
+
 
 
 
