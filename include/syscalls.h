@@ -179,6 +179,18 @@ struct linux_termios {
     uint8_t  c_cc[19];
 };
 
+/* Linux ARM64 termios2 (44 bytes) */
+struct linux_termios2 {
+    uint32_t c_iflag;
+    uint32_t c_oflag;
+    uint32_t c_cflag;
+    uint32_t c_lflag;
+    uint8_t  c_line;
+    uint8_t  c_cc[19];
+    uint32_t c_ispeed;
+    uint32_t c_ospeed;
+};
+
 /* Linux Statfs 64 (120 bytes) */
 struct linux_statfs {
     int64_t  f_type;

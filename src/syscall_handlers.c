@@ -647,6 +647,22 @@ static void copy_linux_to_darwin_termios(const struct linux_termios *l, struct t
     cfsetospeed(d, spd);
 }
 
+static void copy_darwin_to_linux_termios2(const struct termios *d, struct linux_termios2 *l2) {
+    struct linux_termios l;
+    copy_darwin_to_linux_termios(d, &l);
+    memcpy(l2, &l, sizeof(l));
+    l2->c_ispeed = (uint32_t)cfgetispeed(d);
+    l2->c_ospeed = (uint32_t)cfgetospeed(d);
+}
+
+static void copy_linux_to_darwin_termios2(const struct linux_termios2 *l2, struct termios *d) {
+    struct linux_termios l;
+    memcpy(&l, l2, sizeof(l));
+    copy_linux_to_darwin_termios(&l, d);
+    if (l2->c_ispeed) cfsetispeed(d, (speed_t)l2->c_ispeed);
+    if (l2->c_ospeed) cfsetospeed(d, (speed_t)l2->c_ospeed);
+}
+
 int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
     /* TIOCGWINSZ: Linux 0x5413 */
     if (request == 0x5413) {
@@ -687,6 +703,17 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
         return 0;
     }
 
+    /* TCGETS2: Linux 0x802c542a */
+    if (request == 0x802c542a) {
+        if (!arg) return -LINUX_EFAULT;
+        struct termios tios;
+        if (tcgetattr(fd, &tios) != 0) {
+            return darwin_to_linux_errno(errno);
+        }
+        copy_darwin_to_linux_termios2(&tios, (struct linux_termios2 *)arg);
+        return 0;
+    }
+
     /* TCSETS: Linux 0x5402, TCSETSW: 0x5403, TCSETSF: 0x5404 */
     if (request == 0x5402 || request == 0x5403 || request == 0x5404) {
         if (!arg) return -LINUX_EFAULT;
@@ -698,6 +725,23 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
         int opt = TCSANOW;
         if (request == 0x5403) opt = TCSADRAIN;
         else if (request == 0x5404) opt = TCSAFLUSH;
+        if (tcsetattr(fd, opt, &tios) != 0) {
+            return darwin_to_linux_errno(errno);
+        }
+        return 0;
+    }
+
+    /* TCSETS2: Linux 0x402c542b, TCSETSW2: 0x402c542c, TCSETSF2: 0x402c542d */
+    if (request == 0x402c542b || request == 0x402c542c || request == 0x402c542d) {
+        if (!arg) return -LINUX_EFAULT;
+        struct termios tios;
+        if (tcgetattr(fd, &tios) != 0) {
+            memset(&tios, 0, sizeof(tios));
+        }
+        copy_linux_to_darwin_termios2((const struct linux_termios2 *)arg, &tios);
+        int opt = TCSANOW;
+        if (request == 0x402c542c) opt = TCSADRAIN;
+        else if (request == 0x402c542d) opt = TCSAFLUSH;
         if (tcsetattr(fd, opt, &tios) != 0) {
             return darwin_to_linux_errno(errno);
         }
@@ -732,8 +776,11 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
     if (request == 0x540f) {
         if (!arg) return -LINUX_EFAULT;
         pid_t pgrp = tcgetpgrp(fd);
-        if (pgrp < 0) {
+        if (pgrp <= 0) {
             pgrp = getpgrp();
+        }
+        if (pgrp <= 0) {
+            pgrp = getpid();
         }
         *(pid_t *)arg = pgrp;
         return 0;
@@ -753,6 +800,15 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
         tcsetpgrp(fd, pgrp);
 
         sigaction(SIGTTOU, &old_sa, NULL);
+        return 0;
+    }
+
+    /* TIOCGSID: Linux 0x5429 */
+    if (request == 0x5429) {
+        if (!arg) return -LINUX_EFAULT;
+        pid_t sid = tcgetsid(fd);
+        if (sid < 0) sid = getsid(0);
+        *(pid_t *)arg = sid;
         return 0;
     }
 
@@ -1056,13 +1112,90 @@ int64_t handle_pselect6(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
 
 #define LINUX_NSIG 65
 
+/* Linux ARM64 to Darwin signal translation */
+static inline int linux_to_darwin_signal(int lsig) {
+    switch (lsig) {
+        case 1:  return SIGHUP;     /* 1 */
+        case 2:  return SIGINT;     /* 2 */
+        case 3:  return SIGQUIT;    /* 3 */
+        case 4:  return SIGILL;     /* 4 */
+        case 5:  return SIGTRAP;    /* 5 */
+        case 6:  return SIGABRT;    /* 6 */
+        case 7:  return SIGBUS;     /* Darwin 10 */
+        case 8:  return SIGFPE;     /* 8 */
+        case 9:  return SIGKILL;    /* 9 */
+        case 10: return SIGUSR1;    /* Darwin 30 */
+        case 11: return SIGSEGV;    /* 11 */
+        case 12: return SIGUSR2;    /* Darwin 31 */
+        case 13: return SIGPIPE;    /* 13 */
+        case 14: return SIGALRM;    /* 14 */
+        case 15: return SIGTERM;    /* 15 */
+        case 16: return SIGURG;     /* LINUX_SIGSTKFLT -> Darwin SIGURG (16) */
+        case 17: return SIGCHLD;    /* Darwin 20 */
+        case 18: return SIGCONT;    /* Darwin 19 */
+        case 19: return SIGSTOP;    /* Darwin 17 */
+        case 20: return SIGTSTP;    /* Darwin 18 */
+        case 21: return SIGTTIN;    /* 21 */
+        case 22: return SIGTTOU;    /* 22 */
+        case 23: return SIGURG;     /* Darwin 16 */
+        case 24: return SIGXCPU;    /* 24 */
+        case 25: return SIGXFSZ;    /* 25 */
+        case 26: return SIGVTALRM;  /* 26 */
+        case 27: return SIGPROF;    /* 27 */
+        case 28: return SIGWINCH;   /* 28 */
+        case 29: return SIGIO;      /* Darwin 23 */
+        case 30: return SIGINFO;    /* LINUX_SIGPWR -> Darwin SIGINFO (29) */
+        case 31: return SIGSYS;     /* Darwin 12 */
+        default: return (lsig > 0 && lsig < 32) ? lsig : 0;
+    }
+}
+
+/* Darwin to Linux ARM64 signal translation */
+static inline int darwin_to_linux_signal(int dsig) {
+    switch (dsig) {
+        case 1:  return 1;   /* LINUX_SIGHUP */
+        case 2:  return 2;   /* LINUX_SIGINT */
+        case 3:  return 3;   /* LINUX_SIGQUIT */
+        case 4:  return 4;   /* LINUX_SIGILL */
+        case 5:  return 5;   /* LINUX_SIGTRAP */
+        case 6:  return 6;   /* LINUX_SIGABRT */
+        case 7:  return 7;   /* SIGEMT -> LINUX_SIGBUS */
+        case 8:  return 8;   /* LINUX_SIGFPE */
+        case 9:  return 9;   /* LINUX_SIGKILL */
+        case 10: return 7;   /* Darwin SIGBUS (10) -> LINUX_SIGBUS (7) */
+        case 11: return 11;  /* LINUX_SIGSEGV */
+        case 12: return 31;  /* Darwin SIGSYS (12) -> LINUX_SIGSYS (31) */
+        case 13: return 13;  /* LINUX_SIGPIPE */
+        case 14: return 14;  /* LINUX_SIGALRM */
+        case 15: return 15;  /* LINUX_SIGTERM */
+        case 16: return 23;  /* Darwin SIGURG (16) -> LINUX_SIGURG (23) */
+        case 17: return 19;  /* Darwin SIGSTOP (17) -> LINUX_SIGSTOP (19) */
+        case 18: return 20;  /* Darwin SIGTSTP (18) -> LINUX_SIGTSTP (20) */
+        case 19: return 18;  /* Darwin SIGCONT (19) -> LINUX_SIGCONT (18) */
+        case 20: return 17;  /* Darwin SIGCHLD (20) -> LINUX_SIGCHLD (17) */
+        case 21: return 21;  /* LINUX_SIGTTIN */
+        case 22: return 22;  /* LINUX_SIGTTOU */
+        case 23: return 29;  /* Darwin SIGIO (23) -> LINUX_SIGIO (29) */
+        case 24: return 24;  /* LINUX_SIGXCPU */
+        case 25: return 25;  /* LINUX_SIGXFSZ */
+        case 26: return 26;  /* LINUX_SIGVTALRM */
+        case 27: return 27;  /* LINUX_SIGPROF */
+        case 28: return 28;  /* LINUX_SIGWINCH */
+        case 29: return 29;  /* Darwin SIGINFO (29) -> LINUX_SIGIO (29) */
+        case 30: return 10;  /* Darwin SIGUSR1 (30) -> LINUX_SIGUSR1 (10) */
+        case 31: return 12;  /* Darwin SIGUSR2 (31) -> LINUX_SIGUSR2 (12) */
+        default: return (dsig > 0 && dsig < LINUX_NSIG) ? dsig : 0;
+    }
+}
+
 int64_t handle_kill(pid_t pid, int sig) {
     if (sig < 0 || sig >= LINUX_NSIG) return -LINUX_EINVAL;
     if (pid == 1 && sig == 0) return 0;
     if (signalfd_deliver_signal(sig, NULL)) {
         return 0;
     }
-    int ret = kill(pid, sig);
+    int d_sig = (sig == 0) ? 0 : linux_to_darwin_signal(sig);
+    int ret = kill(pid, d_sig);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return 0;
 }
@@ -1071,12 +1204,14 @@ int64_t handle_tkill(int tid, int sig) {
     if (sig < 0 || sig >= LINUX_NSIG) return -LINUX_EINVAL;
     if (tid <= 0) return -LINUX_ESRCH;
 
+    int d_sig = (sig == 0) ? 0 : linux_to_darwin_signal(sig);
+
     if (tid == getpid()) {
         if (sig == 0) return 0;
         if (signalfd_deliver_signal(sig, NULL)) {
             return 0;
         }
-        int ret = kill(getpid(), sig);
+        int ret = kill(getpid(), d_sig);
         if (ret < 0) return darwin_to_linux_errno(errno);
         return 0;
     }
@@ -1098,7 +1233,7 @@ int64_t handle_tkill(int tid, int sig) {
         int r = kill(tid, 0);
         if (r < 0) return darwin_to_linux_errno(errno);
         if (sig == 0) return 0;
-        r = kill(tid, sig);
+        r = kill(tid, d_sig);
         if (r < 0) return darwin_to_linux_errno(errno);
         return 0;
     }
@@ -1107,7 +1242,7 @@ int64_t handle_tkill(int tid, int sig) {
     if (signalfd_deliver_signal(sig, NULL)) {
         return 0;
     }
-    int prc = pthread_kill(target_th, sig);
+    int prc = pthread_kill(target_th, d_sig);
     if (prc != 0) return darwin_to_linux_errno(prc);
     return 0;
 }
@@ -1155,17 +1290,18 @@ int64_t handle_sigaltstack(const void *ss, void *oss) {
 static struct linux_sigaction g_guest_sigactions[LINUX_NSIG];
 
 struct ltm_sigframe {
+    struct linux_siginfo siginfo;
     arm_thread_state64_t saved_state;
     uint64_t magic;
 };
 
 #define LTM_SIGFRAME_MAGIC 0x4c544d5f534947ULL /* "LTM_SIG" */
 
-static void ltm_host_signal_handler(int sig, siginfo_t *info, void *ucontext) {
-    (void)info;
-    if (sig <= 0 || sig >= LINUX_NSIG) return;
+static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) {
+    int l_sig = darwin_to_linux_signal(d_sig);
+    if (l_sig <= 0 || l_sig >= LINUX_NSIG) return;
 
-    struct linux_sigaction *act = &g_guest_sigactions[sig];
+    struct linux_sigaction *act = &g_guest_sigactions[l_sig];
     if (!act->l_handler || act->l_handler == (void (*)(int))SIG_DFL || act->l_handler == (void (*)(int))SIG_IGN) {
         return;
     }
@@ -1173,65 +1309,72 @@ static void ltm_host_signal_handler(int sig, siginfo_t *info, void *ucontext) {
     ucontext_t *uc = (ucontext_t *)ucontext;
     arm_thread_state64_t *cur_state = &uc->uc_mcontext->__ss;
 
-    /* Push saved state onto guest stack */
+    /* Push saved state and siginfo onto guest stack */
     uintptr_t sp = cur_state->__sp;
     sp -= sizeof(struct ltm_sigframe);
     sp &= ~0xfULL;
 
     struct ltm_sigframe *frame = (struct ltm_sigframe *)sp;
+    memset(&frame->siginfo, 0, sizeof(frame->siginfo));
+    frame->siginfo.si_signo = l_sig;
+    frame->siginfo.si_code = info ? info->si_code : 0;
+    if (info && l_sig == 17 /* LINUX_SIGCHLD */) {
+        frame->siginfo._sifields._sigchld._pid = info->si_pid;
+        frame->siginfo._sifields._sigchld._status = info->si_status;
+    }
+
     memcpy(&frame->saved_state, cur_state, sizeof(arm_thread_state64_t));
     frame->magic = LTM_SIGFRAME_MAGIC;
 
-    uint32_t fault_insn = 0;
-    if (cur_state->__pc >= 0x1000) {
-        fault_insn = *(uint32_t *)cur_state->__pc;
-    }
-    ltm_log_error("Guest signal %d delivered: PC=0x%llx (insn=0x%08x), fault_addr=%p",
-                  sig, (unsigned long long)cur_state->__pc, fault_insn, info ? info->si_addr : NULL);
-    for (int i = 0; i < 31; i += 2) {
-        ltm_log_error("  x%-2d = 0x%016llx  x%-2d = 0x%016llx",
-                      i, (unsigned long long)cur_state->__x[i],
-                      i+1, (i+1 < 31) ? (unsigned long long)cur_state->__x[i+1] : 0ULL);
-    }
-    ltm_log_error("  sp   = 0x%016llx  lr   = 0x%016llx",
-                  (unsigned long long)cur_state->__sp, (unsigned long long)cur_state->__lr);
-
-    if (cur_state->__pc >= 0x1000) {
-        uint32_t *code = (uint32_t *)(cur_state->__pc - 16);
-        ltm_log_error("Code around PC:");
-        for (int i = -4; i <= 4; i++) {
-            ltm_log_error("  %s 0x%llx: 0x%08x", (i == 0 ? "=>" : "  "),
-                          (unsigned long long)(cur_state->__pc + i * 4), code[i + 4]);
+    /* Only log crash dumps for fatal exception signals */
+    if (l_sig == 4 /* SIGILL */ || l_sig == 7 /* SIGBUS */ ||
+        l_sig == 8 /* SIGFPE */ || l_sig == 11 /* SIGSEGV */ || l_sig == 31 /* SIGSYS */) {
+        uint32_t fault_insn = 0;
+        if (cur_state->__pc >= 0x1000) {
+            fault_insn = *(uint32_t *)cur_state->__pc;
         }
-    }
-    if (cur_state->__sp >= 0x1000) {
-        uint64_t *stk = (uint64_t *)cur_state->__sp;
-        ltm_log_error("Stack dump:");
-        for (int i = 0; i < 16; i += 2) {
-            ltm_log_error("  sp+%02x: 0x%016llx 0x%016llx",
-                          i * 8, (unsigned long long)stk[i], (unsigned long long)stk[i+1]);
+        ltm_log_error("Guest crash signal %d delivered: PC=0x%llx (insn=0x%08x), fault_addr=%p",
+                      l_sig, (unsigned long long)cur_state->__pc, fault_insn, info ? info->si_addr : NULL);
+        for (int i = 0; i < 31; i += 2) {
+            ltm_log_error("  x%-2d = 0x%016llx  x%-2d = 0x%016llx",
+                          i, (unsigned long long)cur_state->__x[i],
+                          i+1, (i+1 < 31) ? (unsigned long long)cur_state->__x[i+1] : 0ULL);
         }
-    }
-    if (cur_state->__x[8] >= 0x1000) {
-        uint32_t *state_mem = (uint32_t *)cur_state->__x[8];
-        ltm_log_error("Memory at x8 (%p):", (void *)cur_state->__x[8]);
-        for (int i = 0; i < 32; i += 4) {
-            ltm_log_error("  x8+%02x: 0x%08x 0x%08x 0x%08x 0x%08x",
-                          i * 4, state_mem[i], state_mem[i+1], state_mem[i+2], state_mem[i+3]);
+        ltm_log_error("  sp   = 0x%016llx  lr   = 0x%016llx",
+                      (unsigned long long)cur_state->__sp, (unsigned long long)cur_state->__lr);
+        if (cur_state->__sp >= 0x1000) {
+            uint64_t *stk = (uint64_t *)cur_state->__sp;
+            ltm_log_error("Stack dump:");
+            for (int i = 0; i < 32; i += 2) {
+                ltm_log_error("  sp+%03x: 0x%016llx 0x%016llx",
+                              i * 8, (unsigned long long)stk[i], (unsigned long long)stk[i+1]);
+            }
+        }
+        if (cur_state->__fp >= 0x1000) {
+            uint64_t *fp = (uint64_t *)cur_state->__fp;
+            ltm_log_error("=== CALLSTACK BACKTRACE ===");
+            int depth = 0;
+            while (fp >= (uint64_t *)0x1000 && depth < 20) {
+                ltm_log_error("  #%d: fp=%p, lr=0x%llx", depth, fp, (unsigned long long)fp[1]);
+                fp = (uint64_t *)fp[0];
+                depth++;
+            }
         }
     }
 
-    /* Setup registers to execute guest signal handler */
-    arm_thread_state64_t target_state;
-    memset(&target_state, 0, sizeof(target_state));
-    target_state.__x[0] = sig;
-    target_state.__x[1] = 0;
-    target_state.__x[2] = sp;
+    /* Setup registers to execute guest signal handler preserving callee-saved context */
+    arm_thread_state64_t target_state = *cur_state;
+    target_state.__x[0] = l_sig;                          /* signo */
+    target_state.__x[1] = (uintptr_t)&frame->siginfo;     /* siginfo_t * */
+    target_state.__x[2] = sp;                             /* ucontext_t * */
     target_state.__sp = sp;
-    target_state.__lr = act->l_restorer ? (uintptr_t)act->l_restorer : (uintptr_t)ltm_sigreturn_stub;
+    uintptr_t restorer = ((act->l_flags & 0x04000000ULL) && act->l_restorer)
+                         ? (uintptr_t)act->l_restorer
+                         : (uintptr_t)ltm_sigreturn_stub;
+    target_state.__lr = restorer;
     target_state.__pc = (uintptr_t)act->l_handler;
 
-    /* Unmask the signal so subsequent signals (like periodic SIGALRM) can be delivered */
+    /* Unmask the signal so subsequent signals can be delivered */
     sigset_t set;
     sigemptyset(&set);
     pthread_sigmask(SIG_SETMASK, &set, NULL);
@@ -1243,8 +1386,8 @@ static void ltm_host_signal_handler(int sig, siginfo_t *info, void *ucontext) {
 int64_t handle_rt_sigaction(int signum, const struct linux_sigaction *act, struct linux_sigaction *oldact, size_t sigsetsize) {
     if (sigsetsize != 8) return -LINUX_EINVAL;
     if (signum <= 0 || signum >= LINUX_NSIG) return -LINUX_EINVAL;
-    if (signum == SIGKILL || signum == SIGSTOP) return -LINUX_EINVAL;
-    if (signum == SIGTRAP) return 0; /* Keep SIGTRAP for LTM dispatcher */
+    if (signum == 9 /* LINUX_SIGKILL */ || signum == 19 /* LINUX_SIGSTOP */) return -LINUX_EINVAL;
+    if (signum == 5 /* LINUX_SIGTRAP */) return 0; /* Keep SIGTRAP for LTM dispatcher */
 
     if (oldact) {
         *oldact = g_guest_sigactions[signum];
@@ -1253,20 +1396,23 @@ int64_t handle_rt_sigaction(int signum, const struct linux_sigaction *act, struc
     if (act) {
         g_guest_sigactions[signum] = *act;
 
-        struct sigaction d_sa;
-        memset(&d_sa, 0, sizeof(d_sa));
+        int d_sig = linux_to_darwin_signal(signum);
+        if (d_sig > 0 && d_sig != SIGTRAP && d_sig != SIGKILL && d_sig != SIGSTOP) {
+            struct sigaction d_sa;
+            memset(&d_sa, 0, sizeof(d_sa));
 
-        if (act->l_handler == (void (*)(int))SIG_DFL) {
-            d_sa.sa_handler = SIG_DFL;
-            sigaction(signum, &d_sa, NULL);
-        } else if (act->l_handler == (void (*)(int))SIG_IGN) {
-            d_sa.sa_handler = SIG_IGN;
-            sigaction(signum, &d_sa, NULL);
-        } else {
-            d_sa.sa_sigaction = ltm_host_signal_handler;
-            d_sa.sa_flags = SA_SIGINFO | SA_NODEFER;
-            sigemptyset(&d_sa.sa_mask);
-            sigaction(signum, &d_sa, NULL);
+            if (act->l_handler == (void (*)(int))SIG_DFL) {
+                d_sa.sa_handler = SIG_DFL;
+                sigaction(d_sig, &d_sa, NULL);
+            } else if (act->l_handler == (void (*)(int))SIG_IGN) {
+                d_sa.sa_handler = SIG_IGN;
+                sigaction(d_sig, &d_sa, NULL);
+            } else {
+                d_sa.sa_sigaction = ltm_host_signal_handler;
+                d_sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+                sigemptyset(&d_sa.sa_mask);
+                sigaction(d_sig, &d_sa, NULL);
+            }
         }
     }
 
@@ -1298,7 +1444,16 @@ int64_t handle_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, si
         sigset_t cur;
         sigemptyset(&cur);
         pthread_sigmask(SIG_SETMASK, NULL, &cur);
-        *oldset = (uint64_t)(unsigned int)cur;
+        uint64_t l_old = 0;
+        for (int i = 1; i < 32; i++) {
+            if (sigismember(&cur, i)) {
+                int l_sig = darwin_to_linux_signal(i);
+                if (l_sig > 0 && l_sig < 64) {
+                    l_old |= (1ULL << (l_sig - 1));
+                }
+            }
+        }
+        *oldset = l_old;
     }
     if (set) {
         if (how != 0 /* SIG_BLOCK */ && how != 1 /* SIG_UNBLOCK */ && how != 2 /* SIG_SETMASK */) {
@@ -1306,9 +1461,12 @@ int64_t handle_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, si
         }
         sigset_t d_set;
         sigemptyset(&d_set);
-        for (int i = 1; i < 32; i++) {
+        for (int i = 1; i < 64; i++) {
             if (*set & (1ULL << (i - 1))) {
-                sigaddset(&d_set, i);
+                int d_sig = linux_to_darwin_signal(i);
+                if (d_sig > 0 && d_sig != SIGKILL && d_sig != SIGSTOP) {
+                    sigaddset(&d_set, d_sig);
+                }
             }
         }
         int d_how = (how == 0) ? SIG_BLOCK : (how == 1 ? SIG_UNBLOCK : SIG_SETMASK);
@@ -4742,9 +4900,12 @@ int64_t handle_rt_sigsuspend(const uint64_t *unewset, size_t sigsetsize) {
     sigset_t dset;
     sigemptyset(&dset);
     uint64_t mask = *unewset;
-    for (int s = 1; s <= 31; s++) {
+    for (int s = 1; s <= 64; s++) {
         if (mask & (1ULL << (s - 1))) {
-            sigaddset(&dset, s);
+            int d_sig = linux_to_darwin_signal(s);
+            if (d_sig > 0 && d_sig != SIGKILL && d_sig != SIGSTOP) {
+                sigaddset(&dset, d_sig);
+            }
         }
     }
     sigsuspend(&dset);
@@ -4763,9 +4924,12 @@ int64_t handle_rt_sigtimedwait(const uint64_t *uthese, struct linux_siginfo *uin
     sigset_t dset;
     sigemptyset(&dset);
     uint64_t mask = *uthese;
-    for (int s = 1; s <= 31; s++) {
+    for (int s = 1; s <= 64; s++) {
         if (mask & (1ULL << (s - 1))) {
-            sigaddset(&dset, s);
+            int d_sig = linux_to_darwin_signal(s);
+            if (d_sig > 0 && d_sig != SIGKILL && d_sig != SIGSTOP) {
+                sigaddset(&dset, d_sig);
+            }
         }
     }
 
@@ -4775,12 +4939,13 @@ int64_t handle_rt_sigtimedwait(const uint64_t *uthese, struct linux_siginfo *uin
 
     for (int s = 1; s <= 31; s++) {
         if (sigismember(&pending, s) && sigismember(&dset, s)) {
+            int l_sig = darwin_to_linux_signal(s);
             if (uinfo) {
                 memset(uinfo, 0, sizeof(*uinfo));
-                uinfo->si_signo = s;
+                uinfo->si_signo = l_sig;
                 uinfo->si_code = 0; /* SI_USER */
             }
-            return s;
+            return l_sig;
         }
     }
 
