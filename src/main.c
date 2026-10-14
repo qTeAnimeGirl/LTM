@@ -10,10 +10,14 @@ static void print_usage(const char *progname) {
         "LTM (Linux Translation Module) for macOS Apple Silicon ARM64\n"
         "Usage: %s [options] <elf-binary> [guest args...]\n\n"
         "Options:\n"
-        "  -v, --verbose    Enable verbose debug logging (or set LTM_DEBUG=1)\n"
-        "  -s, --strace     Enable syscall tracing (or set LTM_STRACE=1)\n"
-        "  -h, --help       Display this help message and exit\n",
-        progname);
+        "  -r, --rootfs <dir> Set guest root directory (chroot rootfs, or set LTM_ROOTFS=<dir>)\n"
+        "  -v, --verbose      Enable verbose debug logging (or set LTM_DEBUG=1)\n"
+        "  -s, --strace       Enable syscall tracing (or set LTM_STRACE=1)\n"
+        "  -h, --help         Display this help message and exit\n\n"
+        "Examples:\n"
+        "  %s ./tests/bin/test_hello\n"
+        "  %s -r ./alpine_rootfs /bin/busybox ls -la /\n",
+        progname, progname, progname);
 }
 
 int main(int argc, char **argv, char **envp) {
@@ -25,6 +29,7 @@ int main(int argc, char **argv, char **envp) {
     int arg_idx = 1;
     bool debug = getenv("LTM_DEBUG") != NULL;
     bool strace = getenv("LTM_STRACE") != NULL;
+    const char *rootfs_arg = getenv("LTM_ROOTFS");
 
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
         if (strcmp(argv[arg_idx], "-v") == 0 || strcmp(argv[arg_idx], "--verbose") == 0) {
@@ -33,6 +38,14 @@ int main(int argc, char **argv, char **envp) {
         } else if (strcmp(argv[arg_idx], "-s") == 0 || strcmp(argv[arg_idx], "--strace") == 0) {
             strace = true;
             arg_idx++;
+        } else if (strcmp(argv[arg_idx], "-r") == 0 || strcmp(argv[arg_idx], "--root") == 0 ||
+                   strcmp(argv[arg_idx], "--rootfs") == 0) {
+            arg_idx++;
+            if (arg_idx >= argc) {
+                fprintf(stderr, "Error: -r / --rootfs requires a directory argument\n");
+                return 1;
+            }
+            rootfs_arg = argv[arg_idx++];
         } else if (strcmp(argv[arg_idx], "-h") == 0 || strcmp(argv[arg_idx], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -52,17 +65,30 @@ int main(int argc, char **argv, char **envp) {
     g_ltm.debug_enabled = debug;
     g_ltm.trace_syscalls = strace;
 
-    const char *binary_arg = argv[arg_idx];
-    if (!realpath(binary_arg, g_ltm.binary_path)) {
-        /* If realpath fails (e.g. relative), copy as is */
-        strncpy(g_ltm.binary_path, binary_arg, sizeof(g_ltm.binary_path) - 1);
-        g_ltm.binary_path[sizeof(g_ltm.binary_path) - 1] = '\0';
+    /* Initialize sandbox with chosen chroot rootfs */
+    if (sandbox_init(rootfs_arg) != 0) {
+        ltm_log_error("Failed to initialize sandbox rootfs '%s'", rootfs_arg ? rootfs_arg : "(default)");
+        return 1;
     }
 
-    /* Initialize sandbox rooted at $PWD */
-    if (sandbox_init(NULL) != 0) {
-        ltm_log_error("Failed to initialize sandbox");
-        return 1;
+    const char *binary_arg = argv[arg_idx];
+    char chroot_cand[1024];
+
+    /* If binary is an absolute path within chroot (e.g. /bin/busybox) */
+    if (binary_arg[0] == '/' && g_ltm.host_rootfs[0] != '\0') {
+        snprintf(chroot_cand, sizeof(chroot_cand), "%s%s", g_ltm.host_rootfs, binary_arg);
+        if (access(chroot_cand, F_OK) == 0) {
+            strncpy(g_ltm.binary_path, chroot_cand, sizeof(g_ltm.binary_path) - 1);
+            g_ltm.binary_path[sizeof(g_ltm.binary_path) - 1] = '\0';
+        } else if (!realpath(binary_arg, g_ltm.binary_path)) {
+            strncpy(g_ltm.binary_path, binary_arg, sizeof(g_ltm.binary_path) - 1);
+            g_ltm.binary_path[sizeof(g_ltm.binary_path) - 1] = '\0';
+        }
+    } else {
+        if (!realpath(binary_arg, g_ltm.binary_path)) {
+            strncpy(g_ltm.binary_path, binary_arg, sizeof(g_ltm.binary_path) - 1);
+            g_ltm.binary_path[sizeof(g_ltm.binary_path) - 1] = '\0';
+        }
     }
 
     /* Prepare guest argc / argv / envp */

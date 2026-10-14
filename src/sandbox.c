@@ -19,25 +19,35 @@ static int create_mem_fd(const void *data, size_t len) {
     return fd;
 }
 
-int sandbox_init(const char *root_dir) {
-    if (!root_dir) {
-        root_dir = getcwd(NULL, 0);
-        if (!root_dir) return -1;
+int sandbox_init(const char *rootfs_dir) {
+    char cwd[1024];
+    if (!getcwd(cwd, sizeof(cwd))) return -1;
+    strncpy(g_ltm.host_root, cwd, sizeof(g_ltm.host_root) - 1);
+    g_ltm.host_root[sizeof(g_ltm.host_root) - 1] = '\0';
+
+    const char *target_rootfs = rootfs_dir;
+    if (!target_rootfs || target_rootfs[0] == '\0') {
+        struct stat st;
+        if (stat("rootfs", &st) == 0 && S_ISDIR(st.st_mode)) {
+            target_rootfs = "rootfs";
+        } else {
+            target_rootfs = cwd;
+        }
     }
 
-    if (!realpath(root_dir, g_ltm.host_root)) {
-        strncpy(g_ltm.host_root, root_dir, sizeof(g_ltm.host_root) - 1);
-        g_ltm.host_root[sizeof(g_ltm.host_root) - 1] = '\0';
+    if (!realpath(target_rootfs, g_ltm.host_rootfs)) {
+        strncpy(g_ltm.host_rootfs, target_rootfs, sizeof(g_ltm.host_rootfs) - 1);
+        g_ltm.host_rootfs[sizeof(g_ltm.host_rootfs) - 1] = '\0';
     }
 
     /* Strip trailing slashes */
-    size_t len = strlen(g_ltm.host_root);
-    while (len > 1 && g_ltm.host_root[len - 1] == '/') {
-        g_ltm.host_root[len - 1] = '\0';
+    size_t len = strlen(g_ltm.host_rootfs);
+    while (len > 1 && g_ltm.host_rootfs[len - 1] == '/') {
+        g_ltm.host_rootfs[len - 1] = '\0';
         len--;
     }
 
-    ltm_log_debug("Sandbox root initialized: %s", g_ltm.host_root);
+    ltm_log_info("Sandbox chroot rootfs initialized: %s (invocation dir: %s)", g_ltm.host_rootfs, g_ltm.host_root);
     return 0;
 }
 
@@ -221,55 +231,39 @@ int sandbox_resolve_path(int dirfd, const char *guest_path, char *host_path_buf,
         return 1;
     }
 
-    char norm_guest[1024];
     const char *src = guest_path;
 
-    /* Handle home and root virtual aliases */
+    /* Handle home and root virtual aliases if not present in rootfs */
+    char test_target[1024];
     if (strncmp(src, "/home/user", 10) == 0) {
-        src += 10;
-        if (*src == '\0') src = "/";
+        snprintf(test_target, sizeof(test_target), "%s/home/user", g_ltm.host_rootfs);
+        if (access(test_target, F_OK) != 0) {
+            /* If /home/user doesn't exist in rootfs, alias to rootfs root */
+            src += 10;
+            if (*src == '\0') src = "/";
+        }
     } else if (strncmp(src, "/root", 5) == 0) {
-        src += 5;
-        if (*src == '\0') src = "/";
-    }
-
-    /* Strict check: block explicit escapes to forbidden host directories */
-    const char *forbidden_prefixes[] = {
-        "/System", "/Library", "/Users", "/Applications",
-        "/private", "/etc", "/var", "/usr", "/bin", "/sbin", "/opt",
-        NULL
-    };
-
-    if (src[0] == '/') {
-        for (int i = 0; forbidden_prefixes[i] != NULL; i++) {
-            size_t plen = strlen(forbidden_prefixes[i]);
-            if (strncmp(src, forbidden_prefixes[i], plen) == 0 &&
-                (src[plen] == '/' || src[plen] == '\0')) {
-                /* Check if host_root matches this path (e.g. host_root is /Users/...) */
-                if (strncmp(src, g_ltm.host_root, strlen(g_ltm.host_root)) != 0) {
-                    ltm_log_debug("Sandbox BLOCKED forbidden path: %s", src);
-                    return -LINUX_EACCES;
-                }
-            }
+        snprintf(test_target, sizeof(test_target), "%s/root", g_ltm.host_rootfs);
+        if (access(test_target, F_OK) != 0) {
+            src += 5;
+            if (*src == '\0') src = "/";
         }
     }
 
     /* Canonicalize path components */
     char full_virtual[1024];
     if (src[0] == '/') {
-        /* Absolute virtual path: rooted at sandbox root */
+        /* Absolute virtual path: rooted at chroot rootfs */
         snprintf(full_virtual, sizeof(full_virtual), "%s", src);
     } else {
-        /* Relative path: determine directory base */
+        /* Relative path */
         if (dirfd == LINUX_AT_FDCWD || dirfd == AT_FDCWD) {
             snprintf(full_virtual, sizeof(full_virtual), "/%s", src);
         } else {
-            /* Retrieve path from dirfd if needed */
             char dir_path[1024];
             if (fcntl(dirfd, F_GETPATH, dir_path) == 0) {
-                /* Check if dir_path is within sandbox */
-                if (strncmp(dir_path, g_ltm.host_root, strlen(g_ltm.host_root)) == 0) {
-                    const char *rel_base = dir_path + strlen(g_ltm.host_root);
+                if (strncmp(dir_path, g_ltm.host_rootfs, strlen(g_ltm.host_rootfs)) == 0) {
+                    const char *rel_base = dir_path + strlen(g_ltm.host_rootfs);
                     if (*rel_base == '\0') rel_base = "/";
                     snprintf(full_virtual, sizeof(full_virtual), "%s/%s", rel_base, src);
                 } else {
@@ -296,8 +290,8 @@ int sandbox_resolve_path(int dirfd, const char *guest_path, char *host_path_buf,
             if (depth > 0) {
                 depth--;
             } else {
-                /* Attempted directory traversal escape above root */
-                ltm_log_debug("Sandbox BLOCKED directory traversal attempt: %s", guest_path);
+                /* Attempted directory traversal escape above chroot rootfs */
+                ltm_log_debug("Sandbox BLOCKED directory traversal escape: %s", guest_path);
                 return -LINUX_EACCES;
             }
         } else {
@@ -308,6 +302,7 @@ int sandbox_resolve_path(int dirfd, const char *guest_path, char *host_path_buf,
         token = strtok(NULL, "/");
     }
 
+    char norm_guest[1024];
     norm_guest[0] = '\0';
     size_t norm_len = 0;
     for (int i = 0; i < depth; i++) {
@@ -317,17 +312,17 @@ int sandbox_resolve_path(int dirfd, const char *guest_path, char *host_path_buf,
         strcpy(norm_guest, "");
     }
 
-    /* Construct host path */
-    int written = snprintf(host_path_buf, buf_sz, "%s%s", g_ltm.host_root, norm_guest);
+    /* Construct host path within chroot rootfs */
+    int written = snprintf(host_path_buf, buf_sz, "%s%s", g_ltm.host_rootfs, norm_guest);
     if (written < 0 || (size_t)written >= buf_sz) {
         return -LINUX_ENAMETOOLONG;
     }
 
-    /* Verify existing path does not symlink escape the sandbox */
+    /* Verify existing path does not symlink escape the chroot rootfs */
     char resolved_real[1024];
     if (realpath(host_path_buf, resolved_real)) {
-        size_t root_len = strlen(g_ltm.host_root);
-        if (strncmp(resolved_real, g_ltm.host_root, root_len) != 0 ||
+        size_t root_len = strlen(g_ltm.host_rootfs);
+        if (strncmp(resolved_real, g_ltm.host_rootfs, root_len) != 0 ||
             (resolved_real[root_len] != '/' && resolved_real[root_len] != '\0')) {
             ltm_log_debug("Sandbox BLOCKED symlink escape: %s -> %s", host_path_buf, resolved_real);
             return -LINUX_EACCES;

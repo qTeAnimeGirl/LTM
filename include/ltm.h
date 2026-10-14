@@ -525,7 +525,8 @@
 
 /* Global runtime state */
 typedef struct {
-    char host_root[1024];         /* Root directory ($PWD) */
+    char host_root[1024];         /* Working directory / invocation root ($PWD) */
+    char host_rootfs[1024];       /* Chroot rootfs directory */
     char binary_path[1024];       /* Canonical path to guest binary */
     int guest_argc;               /* Guest argc */
     char **guest_argv;            /* Guest argv */
