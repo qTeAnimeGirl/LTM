@@ -1,5 +1,6 @@
 #include "linux_syscall_table.h"
 #include "syscalls.h"
+#include "elf_loader.h"
 
 static void *g_alt_stack = NULL;
 #define ALT_STACK_SIZE (1024 * 1024) /* 1MB dedicated signal stack */
@@ -126,7 +127,7 @@ int syscall_dispatcher_init(void) {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = ltm_sig_handler;
-    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
     sigemptyset(&sa.sa_mask);
 
     if (sigaction(SIGTRAP, &sa, NULL) != 0) {
