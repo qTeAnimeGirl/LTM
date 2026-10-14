@@ -1,4 +1,5 @@
 #include "sandbox.h"
+#include <mach/mach_host.h>
 
 static int create_mem_fd(const void *data, size_t len) {
     char tmppath[] = "/tmp/ltm_vfs_XXXXXX";
@@ -31,8 +32,13 @@ int sandbox_init(const char *rootfs_dir) {
         if (stat("rootfs", &st) == 0 && S_ISDIR(st.st_mode)) {
             target_rootfs = "rootfs";
         } else {
-            target_rootfs = cwd;
+            return -2; /* Rootfs directory not found */
         }
+    }
+
+    struct stat st;
+    if (stat(target_rootfs, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        return -2;
     }
 
     if (!realpath(target_rootfs, g_ltm.host_rootfs)) {
@@ -51,9 +57,21 @@ int sandbox_init(const char *rootfs_dir) {
     return 0;
 }
 
+int sandbox_init_standalone(void) {
+    char cwd[1024];
+    if (!getcwd(cwd, sizeof(cwd))) return -1;
+    strncpy(g_ltm.host_root, cwd, sizeof(g_ltm.host_root) - 1);
+    g_ltm.host_root[sizeof(g_ltm.host_root) - 1] = '\0';
+    strncpy(g_ltm.host_rootfs, cwd, sizeof(g_ltm.host_rootfs) - 1);
+    g_ltm.host_rootfs[sizeof(g_ltm.host_rootfs) - 1] = '\0';
+    ltm_log_info("Sandbox standalone mode initialized (jail: %s)", g_ltm.host_rootfs);
+    return 0;
+}
+
 bool sandbox_is_virtual_path(const char *path) {
     if (!path) return false;
     return (strncmp(path, "/proc", 5) == 0 ||
+            strncmp(path, "/sys", 4) == 0 ||
             strncmp(path, "/dev/null", 9) == 0 ||
             strncmp(path, "/dev/zero", 9) == 0 ||
             strncmp(path, "/dev/urandom", 12) == 0 ||
@@ -89,7 +107,7 @@ int sandbox_virtual_stat(const char *path, struct stat *st) {
         return 0;
     }
 
-    if (strncmp(path, "/proc", 5) == 0) {
+    if (strncmp(path, "/proc", 5) == 0 || strncmp(path, "/sys", 4) == 0) {
         st->st_mode = S_IFREG | 0444;
         st->st_size = 4096;
         return 0;
@@ -105,7 +123,11 @@ int sandbox_virtual_stat(const char *path, struct stat *st) {
 }
 
 static int open_proc_cpuinfo(void) {
-    char buf[4096];
+    char buf[16384];
+    char brand[256] = "Apple Silicon Processor";
+    size_t b_len = sizeof(brand);
+    sysctlbyname("machdep.cpu.brand_string", brand, &b_len, NULL, 0);
+
     int ncpus = 8;
     size_t size = sizeof(ncpus);
     if (sysctlbyname("hw.ncpu", &ncpus, &size, NULL, 0) != 0 || ncpus <= 0) {
@@ -113,17 +135,18 @@ static int open_proc_cpuinfo(void) {
     }
 
     size_t offset = 0;
-    for (int i = 0; i < ncpus && offset < sizeof(buf) - 256; i++) {
+    for (int i = 0; i < ncpus && offset < sizeof(buf) - 512; i++) {
         int written = snprintf(buf + offset, sizeof(buf) - offset,
             "processor\t: %d\n"
             "BogoMIPS\t: 48.00\n"
             "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm ssbs sb paca pacg dcpodp flagm2 frint\n"
             "CPU implementer\t: 0x61\n"
             "CPU architecture: 8\n"
-            "CPU variant\t: 0x1\n"
+            "CPU variant\t: 0x0\n"
             "CPU part\t: 0x000\n"
-            "CPU revision\t: 1\n\n",
-            i);
+            "CPU revision\t: 1\n"
+            "model name\t: %s\n\n",
+            i, brand);
         if (written > 0) offset += written;
     }
 
@@ -133,6 +156,58 @@ static int open_proc_cpuinfo(void) {
 static int open_proc_version(void) {
     const char *ver = "Linux version 6.6.0-ltm (ltm@apple-silicon) (gcc (Ubuntu 11.4.0) 11.4.0) #1 SMP PREEMPT_DYNAMIC Wed Oct 14 00:00:00 UTC 2026\n";
     return create_mem_fd(ver, strlen(ver));
+}
+
+static int open_proc_uptime(void) {
+    struct timeval boottime;
+    size_t btsize = sizeof(boottime);
+    double uptime = 3600.0;
+    if (sysctlbyname("kern.boottime", &boottime, &btsize, NULL, 0) == 0) {
+        struct timeval now;
+        gettimeofday(&now, NULL);
+        uptime = (double)(now.tv_sec - boottime.tv_sec) + (double)(now.tv_usec - boottime.tv_usec) / 1000000.0;
+    }
+    char buf[128];
+    int len = snprintf(buf, sizeof(buf), "%.2f %.2f\n", uptime, uptime * 0.7);
+    if (len < 0) return -LINUX_EIO;
+    return create_mem_fd(buf, len);
+}
+
+static int open_proc_loadavg(void) {
+    struct loadavg load;
+    size_t lsize = sizeof(load);
+    double a1 = 0.0, a5 = 0.0, a15 = 0.0;
+    if (sysctlbyname("vm.loadavg", &load, &lsize, NULL, 0) == 0) {
+        a1 = (double)load.ldavg[0] / (double)load.fscale;
+        a5 = (double)load.ldavg[1] / (double)load.fscale;
+        a15 = (double)load.ldavg[2] / (double)load.fscale;
+    }
+    char buf[128];
+    int len = snprintf(buf, sizeof(buf), "%.2f %.2f %.2f 1/128 %d\n", a1, a5, a15, getpid());
+    if (len < 0) return -LINUX_EIO;
+    return create_mem_fd(buf, len);
+}
+
+static int open_sys_cpu_range(void) {
+    int ncpus = 8;
+    size_t size = sizeof(ncpus);
+    if (sysctlbyname("hw.ncpu", &ncpus, &size, NULL, 0) != 0 || ncpus <= 0) {
+        ncpus = 8;
+    }
+    char buf[64];
+    int len = snprintf(buf, sizeof(buf), "0-%d\n", ncpus - 1);
+    if (len < 0) return -LINUX_EIO;
+    return create_mem_fd(buf, len);
+}
+
+static int open_sys_product_name(void) {
+    char model[128] = "Mac";
+    size_t size = sizeof(model);
+    sysctlbyname("hw.model", model, &size, NULL, 0);
+    char buf[256];
+    int len = snprintf(buf, sizeof(buf), "%s\n", model);
+    if (len < 0) return -LINUX_EIO;
+    return create_mem_fd(buf, len);
 }
 
 static int open_proc_cmdline(void) {
@@ -149,12 +224,40 @@ static int open_proc_cmdline(void) {
 }
 
 static int open_proc_meminfo(void) {
-    uint64_t memsize = 16ULL * 1024 * 1024 * 1024;
+    vm_size_t page_size = 16384;
+    mach_port_t host_port = mach_host_self();
+    host_page_size(host_port, &page_size);
+
+    vm_statistics64_data_t vm_stat;
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    uint64_t memsize = 0;
     size_t size = sizeof(memsize);
     sysctlbyname("hw.memsize", &memsize, &size, NULL, 0);
+    if (memsize == 0) memsize = 16ULL * 1024 * 1024 * 1024;
 
-    uint64_t mem_kb = memsize / 1024;
-    uint64_t free_kb = mem_kb / 2;
+    uint64_t mem_total_kb = memsize / 1024;
+    uint64_t free_kb = mem_total_kb / 4;
+    uint64_t active_kb = mem_total_kb / 2;
+    uint64_t inactive_kb = mem_total_kb / 4;
+    uint64_t cached_kb = 0;
+
+    if (host_statistics64(host_port, HOST_VM_INFO64, (host_info64_t)&vm_stat, &count) == KERN_SUCCESS) {
+        free_kb = ((uint64_t)vm_stat.free_count * page_size) / 1024;
+        active_kb = ((uint64_t)vm_stat.active_count * page_size) / 1024;
+        inactive_kb = ((uint64_t)vm_stat.inactive_count * page_size) / 1024;
+        cached_kb = ((uint64_t)(vm_stat.purgeable_count + vm_stat.external_page_count) * page_size) / 1024;
+    }
+
+    uint64_t avail_kb = free_kb + inactive_kb;
+
+    struct xsw_usage swap;
+    size_t swap_size = sizeof(swap);
+    uint64_t swap_total_kb = 0;
+    uint64_t swap_free_kb = 0;
+    if (sysctlbyname("vm.swapusage", &swap, &swap_size, NULL, 0) == 0) {
+        swap_total_kb = swap.xsu_total / 1024;
+        swap_free_kb = swap.xsu_avail / 1024;
+    }
 
     char buf[1024];
     int len = snprintf(buf, sizeof(buf),
@@ -163,12 +266,18 @@ static int open_proc_meminfo(void) {
         "MemAvailable:   %llu kB\n"
         "Buffers:               0 kB\n"
         "Cached:          %llu kB\n"
-        "SwapTotal:             0 kB\n"
-        "SwapFree:              0 kB\n",
-        (unsigned long long)mem_kb,
+        "Active:          %llu kB\n"
+        "Inactive:        %llu kB\n"
+        "SwapTotal:      %llu kB\n"
+        "SwapFree:       %llu kB\n",
+        (unsigned long long)mem_total_kb,
         (unsigned long long)free_kb,
-        (unsigned long long)free_kb,
-        (unsigned long long)(free_kb / 2));
+        (unsigned long long)avail_kb,
+        (unsigned long long)(cached_kb > 0 ? cached_kb : inactive_kb),
+        (unsigned long long)active_kb,
+        (unsigned long long)inactive_kb,
+        (unsigned long long)swap_total_kb,
+        (unsigned long long)swap_free_kb);
     if (len < 0) return -LINUX_EIO;
     return create_mem_fd(buf, len);
 }
@@ -206,6 +315,8 @@ int sandbox_open_virtual(const char *path, int flags, mode_t mode) {
 
     if (strcmp(path, "/proc/cpuinfo") == 0) return open_proc_cpuinfo();
     if (strcmp(path, "/proc/version") == 0) return open_proc_version();
+    if (strcmp(path, "/proc/uptime") == 0) return open_proc_uptime();
+    if (strcmp(path, "/proc/loadavg") == 0) return open_proc_loadavg();
     if (strcmp(path, "/proc/sys/kernel/osrelease") == 0) {
         const char *rel = "6.6.0-ltm\n";
         return create_mem_fd(rel, strlen(rel));
@@ -215,6 +326,19 @@ int sandbox_open_virtual(const char *path, int flags, mode_t mode) {
     if (strcmp(path, "/proc/self/maps") == 0) return open_proc_maps();
     if (strcmp(path, "/proc/self/exe") == 0) {
         return open(g_ltm.binary_path, O_RDONLY);
+    }
+
+    if (strcmp(path, "/sys/devices/system/cpu/online") == 0 ||
+        strcmp(path, "/sys/devices/system/cpu/present") == 0 ||
+        strcmp(path, "/sys/devices/system/cpu/possible") == 0) {
+        return open_sys_cpu_range();
+    }
+    if (strcmp(path, "/sys/class/dmi/id/product_name") == 0) {
+        return open_sys_product_name();
+    }
+    if (strcmp(path, "/sys/class/dmi/id/sys_vendor") == 0) {
+        const char *vendor = "Apple Inc.\n";
+        return create_mem_fd(vendor, strlen(vendor));
     }
 
     return -LINUX_ENOENT;

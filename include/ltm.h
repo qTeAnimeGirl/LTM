@@ -569,7 +569,9 @@ extern ltm_runtime_t g_ltm;
 } while (0)
 
 #define ltm_log_info(fmt, ...) do { \
-    fprintf(stderr, "[LTM:INFO] " fmt "\n", ##__VA_ARGS__); \
+    if (g_ltm.debug_enabled) { \
+        fprintf(stderr, "[LTM:INFO] " fmt "\n", ##__VA_ARGS__); \
+    } \
 } while (0)
 
 #define ltm_log_error(fmt, ...) do { \

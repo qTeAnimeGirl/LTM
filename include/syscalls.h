@@ -102,6 +102,16 @@ struct linux_winsize {
     uint16_t ws_ypixel;
 };
 
+/* Linux ARM64 termios (36 bytes) */
+struct linux_termios {
+    uint32_t c_iflag;
+    uint32_t c_oflag;
+    uint32_t c_cflag;
+    uint32_t c_lflag;
+    uint8_t  c_line;
+    uint8_t  c_cc[19];
+};
+
 /* Syscall Dispatcher Registration & Entry */
 int syscall_dispatcher_init(void);
 int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
@@ -123,6 +133,8 @@ int64_t handle_dup3(int oldfd, int newfd, int flags);
 int64_t handle_fcntl(int fd, int cmd, unsigned long arg);
 int64_t handle_getdents64(int fd, void *dirp, size_t count);
 int64_t handle_ppoll(struct pollfd *fds, nfds_t nfds, const struct linux_timespec *tmo_p, const void *sigmask);
+int64_t handle_pselect6(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
+                        const struct linux_timespec *timeout, const void *sig);
 
 int64_t handle_tkill(int tid, int sig);
 int64_t handle_tgkill(int tgid, int tid, int sig);

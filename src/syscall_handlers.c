@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <sys/un.h>
+#include <sys/select.h>
 
 /* Futex bucket structure */
 typedef struct {
@@ -150,6 +151,28 @@ int64_t handle_lseek(int fd, off_t offset, int whence) {
     return res;
 }
 
+static void copy_darwin_to_linux_termios(const struct termios *d, struct linux_termios *l) {
+    memset(l, 0, sizeof(*l));
+    l->c_iflag = (uint32_t)d->c_iflag;
+    l->c_oflag = (uint32_t)d->c_oflag;
+    l->c_cflag = (uint32_t)d->c_cflag;
+    l->c_lflag = (uint32_t)d->c_lflag;
+    l->c_line  = 0;
+    for (int i = 0; i < 19; i++) {
+        l->c_cc[i] = (uint8_t)d->c_cc[i];
+    }
+}
+
+static void copy_linux_to_darwin_termios(const struct linux_termios *l, struct termios *d) {
+    d->c_iflag = (tcflag_t)l->c_iflag;
+    d->c_oflag = (tcflag_t)l->c_oflag;
+    d->c_cflag = (tcflag_t)l->c_cflag;
+    d->c_lflag = (tcflag_t)l->c_lflag;
+    for (int i = 0; i < 19; i++) {
+        d->c_cc[i] = (cc_t)l->c_cc[i];
+    }
+}
+
 int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
     /* TIOCGWINSZ: Linux 0x5413 */
     if (request == 0x5413) {
@@ -167,19 +190,53 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
         return darwin_to_linux_errno(errno);
     }
 
+    /* TIOCSWINSZ: Linux 0x5414 */
+    if (request == 0x5414) {
+        if (!arg) return -LINUX_EINVAL;
+        struct linux_winsize *lws = (struct linux_winsize *)arg;
+        struct winsize ws;
+        ws.ws_row = lws->ws_row;
+        ws.ws_col = lws->ws_col;
+        ws.ws_xpixel = lws->ws_xpixel;
+        ws.ws_ypixel = lws->ws_ypixel;
+        if (ioctl(fd, TIOCSWINSZ, &ws) == 0) return 0;
+        return darwin_to_linux_errno(errno);
+    }
+
     /* TCGETS: Linux 0x5401 */
     if (request == 0x5401) {
+        if (!arg) return -LINUX_EINVAL;
         struct termios tios;
-        if (tcgetattr(fd, &tios) == 0) {
-            return 0;
+        if (tcgetattr(fd, &tios) != 0) {
+            return darwin_to_linux_errno(errno);
         }
-        return darwin_to_linux_errno(errno);
+        copy_darwin_to_linux_termios(&tios, (struct linux_termios *)arg);
+        return 0;
+    }
+
+    /* TCSETS: Linux 0x5402, TCSETSW: 0x5403, TCSETSF: 0x5404 */
+    if (request == 0x5402 || request == 0x5403 || request == 0x5404) {
+        if (!arg) return -LINUX_EINVAL;
+        struct termios tios;
+        if (tcgetattr(fd, &tios) != 0) {
+            memset(&tios, 0, sizeof(tios));
+        }
+        copy_linux_to_darwin_termios((const struct linux_termios *)arg, &tios);
+        int opt = TCSANOW;
+        if (request == 0x5403) opt = TCSADRAIN;
+        else if (request == 0x5404) opt = TCSAFLUSH;
+        if (tcsetattr(fd, opt, &tios) != 0) {
+            return darwin_to_linux_errno(errno);
+        }
+        return 0;
     }
 
     /* TIOCGPGRP: Linux 0x540f */
     if (request == 0x540f) {
         pid_t pgrp = tcgetpgrp(fd);
-        if (pgrp < 0) return darwin_to_linux_errno(errno);
+        if (pgrp < 0) {
+            pgrp = getpgrp();
+        }
         if (arg) *(pid_t *)arg = pgrp;
         return 0;
     }
@@ -187,7 +244,25 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
     /* TIOCSPGRP: Linux 0x5410 */
     if (request == 0x5410) {
         if (!arg) return -LINUX_EINVAL;
-        if (tcsetpgrp(fd, *(pid_t *)arg) != 0) return darwin_to_linux_errno(errno);
+        pid_t pgrp = *(pid_t *)arg;
+
+        struct sigaction sa, old_sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = SIG_IGN;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGTTOU, &sa, &old_sa);
+
+        tcsetpgrp(fd, pgrp);
+
+        sigaction(SIGTTOU, &old_sa, NULL);
+        return 0;
+    }
+
+    /* FIONREAD: Linux 0x541b */
+    if (request == 0x541b) {
+        int n = 0;
+        if (ioctl(fd, FIONREAD, &n) != 0) return darwin_to_linux_errno(errno);
+        if (arg) *(int *)arg = n;
         return 0;
     }
 
@@ -307,6 +382,38 @@ int64_t handle_ppoll(struct pollfd *fds, nfds_t nfds, const struct linux_timespe
     }
     int ret = poll(fds, nfds, timeout_ms);
     if (ret < 0) return darwin_to_linux_errno(errno);
+    return ret;
+}
+
+int64_t handle_pselect6(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
+                        const struct linux_timespec *timeout, const void *sig) {
+    (void)sig;
+    struct timespec ts;
+    struct timespec *pts = NULL;
+    if (timeout) {
+        ts.tv_sec = timeout->tv_sec;
+        ts.tv_nsec = timeout->tv_nsec;
+        pts = &ts;
+    }
+
+    fd_set rfds, wfds, efds;
+    if (readfds) memcpy(&rfds, readfds, sizeof(rfds));
+    if (writefds) memcpy(&wfds, writefds, sizeof(wfds));
+    if (exceptfds) memcpy(&efds, exceptfds, sizeof(efds));
+
+    int ret = pselect(nfds,
+                      readfds ? &rfds : NULL,
+                      writefds ? &wfds : NULL,
+                      exceptfds ? &efds : NULL,
+                      pts,
+                      NULL);
+
+    if (ret < 0) return darwin_to_linux_errno(errno);
+
+    if (readfds) memcpy(readfds, &rfds, sizeof(rfds));
+    if (writefds) memcpy(writefds, &wfds, sizeof(wfds));
+    if (exceptfds) memcpy(exceptfds, &efds, sizeof(efds));
+
     return ret;
 }
 

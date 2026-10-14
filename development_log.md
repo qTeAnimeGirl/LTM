@@ -365,3 +365,53 @@ flowchart TD
    - Tested interactive and script execution in GNU Bash: associative arrays, subshells, pipelines, math expressions, and executing `fastfetch` inside Bash.
    - `fastfetch` outputs the full Alpine Linux ASCII logo, OS version, kernel, packages, shell, terminal, CPU cores, memory stats, and color palette with 0 errors!
 
+
+
+---
+
+## [Sprint 3] Interactive Shells, Live Apple Silicon Hardware Telemetry, & Autonomous Agent Architecture
+
+**Date**: 2026-10-14
+**Author**: Engineering Swarm (Lead Architect, Core Systems Coder, Diligent Tester, Helpful Planner)
+
+### 1. Executive Summary
+In Sprint 3, the team addressed the key operational requirements for solidifying LTM into a production-grade, extensible translation runtime:
+1. **Interactive Shell & TTY Engine**: Diagnosed and resolved the premature exit of GNU Bash and BusyBox `sh` in interactive terminal sessions, implementing full bidirectional Linux-Darwin termios translation, Readline `pselect6` event loop multiplexing, and job control `SIGTTOU` isolation.
+2. **Live Apple Silicon Hardware Telemetry**: Removed all simulated/hardcoded values from virtual `/proc` and `/sys` files. Replaced with real-time dynamic Mach kernel VM telemetry and Darwin `sysctl` interfaces (Apple M3, 8 cores, live memory page counters, boottime, load averages, and Mac15,13 model info).
+3. **Missing Rootfs Guard & Self-Installer CLI**: Implemented a protective guard that gracefully refuses execution if no rootfs is found, and integrated an automatic one-click installer (`./ltm --install-rootfs` / `-i`) directly within the binary.
+4. **Documentation & AI Agent Handbook**: Authored `ARCHITECTURE.md` and `AGENTS.md` to establish clear specifications, architectural invariants, and step-by-step guides for future AI agent swarms and contributors.
+
+---
+
+### 2. Technical Discoveries & Resolutions
+
+#### A. Interactive Readline Premature EOF (`pselect6`)
+- **Root Cause**: When GNU Readline 8.2+ initializes an interactive terminal loop, it calls `pselect6` (syscall 72). When `pselect6` returned `-ENOSYS` (-38), Readline treated the error as EOF on stdin, printed `exit`, and invoked `exit_group(0)`.
+- **Fix**: Implemented `handle_pselect6()` in `src/syscall_handlers.c`. Unpacks Linux `struct timespec` and `sigset_t`, converting them to Darwin's `pselect()` parameters.
+
+#### B. The 36-Byte Linux vs. 72-Byte Darwin Termios ABI Mismatch
+- **Root Cause**: On Linux ARM64, `struct termios` is 36 bytes (using 32-bit `tcflag_t`). On macOS Darwin, `struct termios` is 72 bytes (using 64-bit `unsigned long` flags). Invoking Darwin's `tcgetattr()` directly on a guest buffer overwrote 36 bytes beyond the buffer boundary, corrupting adjacent stack frames and causing silent crashes.
+- **Fix**: Defined `struct linux_termios` in `include/syscalls.h`. Implemented bidirectional conversion functions (`copy_darwin_to_linux_termios` and `copy_linux_to_darwin_termios`). Added handlers for `TCGETS`, `TCSETS`, `TCSETSW`, `TCSETSF`, `TIOCGWINSZ`, `TIOCSWINSZ`, `TIOCGPGRP`, `TIOCSPGRP`, and `FIONREAD`.
+
+#### C. Job Control Suspension via `SIGTTOU`
+- **Root Cause**: When interactive shells execute `ioctl(TIOCSPGRP, ...)` to manage process groups, Darwin kernel sends `SIGTTOU` if the process is not the foreground group leader, instantly suspending the process in the background.
+- **Fix**: Wrapped terminal process group assignments with temporary `SIGTTOU` masking (`SIG_IGN`), allowing shells to smoothly acquire terminal control without freezing.
+
+#### D. Live Mach VM Statistics & Hardware Bridge
+- **Implementation**: In `src/sandbox.c`, integrated Darwin kernel Mach APIs:
+  - `host_statistics64(HOST_VM_INFO64)` calculates live `free_count`, `inactive_count`, `active_count`, `wire_count`, and `speculative_count`.
+  - Dynamically calculates `MemTotal`, `MemFree`, `MemAvailable`, `Cached`, and `Swap` with 16KB Apple Silicon page size multiplication.
+  - Queries `machdep.cpu.brand_string` ("Apple M3"), `hw.ncpu` (8 cores), `kern.boottime`, `vm.loadavg`, and `hw.model` ("Mac15,13").
+  - `fastfetch` now renders completely authentic hardware telemetry with zero artificial simulation.
+
+#### E. Rootfs Guard & Binary Self-Installer
+- **Implementation**: Added detection in `src/main.c`. If `rootfs` is missing when executing a container binary, LTM displays a friendly error guiding the user to run `./ltm --install-rootfs`.
+- The `--install-rootfs` flag autonomously downloads Alpine Linux aarch64 minirootfs, Fastfetch, GNU Bash, Readline, and ncurses, extracting and configuring them into `./rootfs`.
+
+---
+
+### 3. Verification & Test Outcomes
+- **Automated Regression Suite (`./run_tests.sh`)**: 6/6 tests passing (100% pass rate).
+- **Fastfetch**: Verified displaying live Apple M3 CPU, 8 cores, 13.71 GiB / 24.00 GiB memory usage, and 9h+ uptime.
+- **Interactive GNU Bash**: Verified pty interaction with command execution (`echo`, `uname -a`, `pwd`), subshells, and exit code propagation (`exit 42`).
+- **Interactive BusyBox Shell**: Verified pty interaction with input and clean exit (`exit 17`).

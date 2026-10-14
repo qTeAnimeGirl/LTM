@@ -180,6 +180,10 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case LINUX_SYS_ppoll:
             ret = handle_ppoll((struct pollfd *)a0, (nfds_t)a1, (const struct linux_timespec *)a2, (const void *)a3);
             break;
+        case LINUX_SYS_pselect6:
+            ret = handle_pselect6((int)a0, (fd_set *)a1, (fd_set *)a2, (fd_set *)a3,
+                                  (const struct linux_timespec *)a4, (const void *)a5);
+            break;
         case LINUX_SYS_tkill:
             ret = handle_tkill((int)a0, (int)a1);
             break;

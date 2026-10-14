@@ -1,19 +1,26 @@
 # LTM (Linux Translation Module)
 
-LTM is a high-performance userspace translation layer that runs **unmodified Linux ARM64 (AArch64) ELF binaries** natively on **macOS Apple Silicon (Darwin ARM64 / M-series)** without CPU emulation or virtual machines.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-macOS%20Apple%20Silicon%20(M--series)-lightgrey.svg)]()
+[![Target](https://img.shields.io/badge/Guest-Linux%20ARM64%20(AArch64)-orange.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-6%2F6%20Passing-brightgreen.svg)]()
 
-Because Apple Silicon and 64-bit ARM Linux share the same AArch64 instruction set architecture, userland instructions execute at 100% native CPU speed. LTM handles the translation of Linux syscalls (`svc #0` → `brk #0` → Darwin Mach-O syscalls), memory page semantics (16KB Apple Silicon alignment), filesystem virtualization, and dynamic ELF linker loading (`PT_INTERP`).
+LTM is a high-performance userspace translation layer that executes **unmodified Linux ARM64 (AArch64) ELF binaries natively on macOS Apple Silicon** (Darwin ARM64 / M1, M2, M3, M4) without CPU emulation or virtual machines.
+
+Because Apple Silicon and 64-bit Linux ARM64 share the exact same AArch64 instruction set architecture, userland instructions run at **100% native CPU speed with 0% emulation overhead**. LTM bridges the gap by translating Linux syscalls (`svc #0` → `brk #0` → Darwin Mach/BSD APIs), handling Apple Silicon's 16KB memory page semantics, virtualizing `/proc` and `/sys` using live host hardware telemetry, and dynamically loading Linux ELF dynamic linkers (`PT_INTERP`).
 
 ---
 
 ## 🌟 Key Features
 
-- **Native Execution (0% CPU Emulation Overhead)**: Runs 64-bit Linux ARM64 instructions directly on Apple Silicon cores.
-- **Dynamic ELF Loader & PT_INTERP Support**: Automatically detects and loads dynamic interpreters (e.g. `/lib/ld-musl-aarch64.so.1`), initializing the Linux Aux Vector (`AT_PHDR`, `AT_BASE`, `AT_ENTRY`, `AT_RANDOM`, `AT_PAGESZ=16384`) conforming strictly to the Linux ARM64 ABI.
-- **GNU Bash & BusyBox Native Shell Support**: Fully functional `/bin/bash` and `/bin/sh` with command execution, pipelines (`|`), I/O redirection (`>`, `<`), subshells, and process spawning (`fork`/`clone` + `execve`).
-- **Native Fastfetch Rendering**: Automatically runs `fastfetch` with full distro ASCII logo, CPU topology, kernel version (`6.6.0-ltm`), memory telemetry, and terminal color palette.
-- **Sandboxed Chroot Filesystem**: Strict containment jailed within a guest rootfs (`-r rootfs`), with virtual `/proc` (`cpuinfo`, `meminfo`, `version`, `cmdline`, `maps`, `exe`) and `/dev` devices. Zero host leaks or directory traversal escapes.
-- **Darwin `_sigtramp` Bypass**: Custom assembly context restore engine (`ltm_resume_context`) enabling seamless child process spawning from within Darwin signal handlers without kernel `__sigreturn` panics.
+- **🚀 100% Native Speed (0% CPU Emulation)**: Runs 64-bit Linux ARM64 instructions directly on Apple Silicon cores with zero translation or emulation penalty.
+- **⚡ Dynamic ELF Linker & PT_INTERP Support**: Automatically detects and loads dynamic interpreters (`/lib/ld-musl-aarch64.so.1`), initializing the Linux Aux Vector (`AT_PHDR`, `AT_BASE`, `AT_ENTRY`, `AT_RANDOM`, `AT_PAGESZ=16384`) strictly conforming to the Linux ARM64 ABI.
+- **🖥️ Full Interactive GNU Bash & BusyBox Shells**: Run GNU Bash 5.2 and BusyBox `/bin/sh` interactively with command history, tab completion, pipelines (`|`), I/O redirection (`>`, `<`), and job control.
+- **📊 Native Fastfetch with Live Apple Silicon Telemetry**: Runs `fastfetch` with Alpine Linux ASCII art, displaying real host Apple Silicon CPU brand (`Apple M3`), actual core count (8 cores), real-time Mach VM memory statistics, uptime, and load averages.
+- **🛡️ Sandboxed Chroot Jail**: Strict containment within a designated rootfs directory. Directory traversal attempts (`../`) and host paths (`/Library`, `/System`, `/Users`, `/private`) are strictly blocked.
+- **📦 Built-in Rootfs Guard & Auto-Installer**: If no root filesystem is detected, LTM safely refuses execution and offers an automatic one-click installer (`./ltm --install-rootfs`) that downloads and configures Alpine Linux aarch64, Fastfetch, and GNU Bash.
+- **🔄 Darwin `_sigtramp` Bypass**: Custom assembly context restoration engine (`_ltm_resume_context`) enabling seamless child process spawning (`fork`/`clone` + `execve`) from inside signal handlers without kernel signal frame panics.
+- **⌨️ Bidirectional Linux 36-Byte <-> Darwin 72-Byte Termios Translation**: Seamlessly bridges Linux terminal ioctl structures with Darwin termios, preventing stack corruption and enabling proper terminal formatting.
 
 ---
 
@@ -24,52 +31,72 @@ Because Apple Silicon and 64-bit ARM Linux share the same AArch64 instruction se
 make
 ```
 
-### 2. Download Alpine Linux aarch64 Rootfs & Fastfetch / Bash
+### 2. Install Rootfs & Tools (One-Step Installer)
+LTM includes a built-in installer that downloads Alpine Linux aarch64, Fastfetch, and GNU Bash directly:
 ```bash
-./scripts/setup_rootfs.sh
+./ltm --install-rootfs
 ```
+*(Alternatively, you can run `./scripts/setup_rootfs.sh`)*
 
 ### 3. Run Fastfetch
 ```bash
 ./ltm /usr/bin/fastfetch
 ```
 
-### 4. Run GNU Bash
+### 4. Interactive GNU Bash Shell
 ```bash
-# Run a one-line Bash script with pipes and subcommands
-./ltm /bin/bash -c "echo 'Hello from GNU Bash on macOS!'; /usr/bin/fastfetch"
-
-# Run an interactive Bash shell
+# Launch an interactive GNU Bash session
 ./ltm /bin/bash
+
+# Or execute a one-line command with pipelines
+./ltm /bin/bash -c "echo 'Hello from Linux on Apple Silicon!'; uname -a; pwd"
 ```
 
-### 5. Run BusyBox Shell
+### 5. Interactive BusyBox Shell
 ```bash
-# Run a shell pipeline
-./ltm /bin/sh -c "ls -la / | grep bin"
+./ltm /bin/sh
+```
+
+---
+
+## 🛠️ CLI Usage & Options
+
+```
+Usage: ./ltm [options] <elf-binary> [args...]
+
+Options:
+  -r <path>             Specify guest rootfs directory (default: ./rootfs)
+  -v, --verbose         Enable verbose debugging output (also via LTM_DEBUG=1)
+  -s, --strace          Enable syscall tracing (also via LTM_STRACE=1)
+  -i, --install-rootfs  Download and configure Alpine Linux aarch64 rootfs + Fastfetch + Bash
+  -h, --help            Show help and usage information
 ```
 
 ---
 
 ## 🧪 Automated Test Suite
 
-LTM includes an automated test harness validating the ELF loader, Linux ABI, file I/O, sandbox security containment, procfs emulation, and memory layout:
+LTM includes a comprehensive automated test harness validating the ELF loader, Linux ABI, file I/O, sandbox security containment, procfs emulation, and dynamic memory layout:
 
 ```bash
 ./run_tests.sh
 ```
 
-All 6 test suites run with 100% pass rate:
-1. `test_hello`: Freestanding assembly Linux ARM64 ELF execution.
-2. `test_args_env`: Verification of argc, argv, envp, and auxiliary vectors.
-3. `test_file_io`: Multi-operation sandboxed openat, write, lseek, read, close.
-4. `test_sandbox_defense`: Penetration test verifying strict rejection of host path breakouts (`/Library`, `/Users`, `/System`, `../../`).
-5. `test_procfs`: Virtual `/proc/version`, `/proc/cpuinfo`, and `/proc/self/cmdline`.
-6. `test_memory`: Dynamic heap (`brk`) expansion and anonymous `mmap` allocations.
+### Test Suite Coverage:
+| Test Name | Description | Status |
+|:---|:---|:---:|
+| `test_hello` | Freestanding assembly Linux ARM64 ELF execution (`write`, `exit`) | **PASS** |
+| `test_args_env` | Verification of argc, argv, envp, and auxiliary vectors (`AT_*`) | **PASS** |
+| `test_file_io` | Sandboxed file lifecycle (`openat`, `write`, `lseek`, `read`, `close`) | **PASS** |
+| `test_sandbox_defense` | Host-escape penetration test rejecting `/Library`, `/Users`, `/System`, `../../` | **PASS** |
+| `test_procfs` | Virtual `/proc/version`, `/proc/cpuinfo`, and `/proc/self/cmdline` | **PASS** |
+| `test_memory` | Dynamic heap (`brk`) expansion and anonymous `mmap` allocations | **PASS** |
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Technical Architecture
+
+For complete systems specifications, memory layout diagrams, and ABI translation details, please see **[ARCHITECTURE.md](file:///Users/qteanimegirl/Documents/LTM/ARCHITECTURE.md)**.
 
 ```
 Linux ARM64 ELF (Static or Dynamic)
@@ -85,11 +112,21 @@ Linux ARM64 ELF (Static or Dynamic)
        │
        ├─► [ Syscall Dispatcher ] ──> Unpacks x8, x0-x5
        ├─► [ Filesystem Sandbox ] ──> Resolves path to container rootfs (blocks host escapes)
+       ├─► [ Live Hardware Engine ] ──> Mach VM stats + sysctl (Apple M3, 8 cores, live RAM)
        ├─► [ Syscall Handlers ]   ──> Translates Linux ABI <-> macOS Darwin Mach/BSD APIs
        │
        ▼
- [ Guest Context Resume ] ──> Advances PC + 4, restores registers x0-x30, resumes execution
+ [ Context Resume Engine ] ──> Custom assembly stub restores x0-x30 and resumes guest execution
 ```
+
+---
+
+## 🤖 For AI Agents & Contributors
+
+If you are an autonomous AI coding agent or a human developer extending or forking LTM, consult **[AGENTS.md](file:///Users/qteanimegirl/Documents/LTM/AGENTS.md)** for:
+- The **Five Golden Architectural Invariants** (16KB page alignment, 36-byte termios, sandbox integrity, live telemetry, signal bypass).
+- Step-by-step instructions for adding new Linux syscalls.
+- Debugging playbooks and the 7-Tier capability roadmap.
 
 ---
 

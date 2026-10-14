@@ -5,6 +5,7 @@
 
 /* Initialize the sandbox with the given root directory (typically $PWD) */
 int sandbox_init(const char *root_dir);
+int sandbox_init_standalone(void);
 
 /* Check if the given guest path is a virtual path (/proc/..., /dev/...) */
 bool sandbox_is_virtual_path(const char *path);
