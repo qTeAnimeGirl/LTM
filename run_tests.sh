@@ -145,16 +145,37 @@ run_single_test() {
     fi
 }
 
-# Run the 6 core tests
+# Run core and sprint tests
 run_single_test "test_hello" "Hello from unmodified Linux ARM64 ELF!"
 run_single_test "test_args_env" "All Linux ABI stack checks passed!" "arg1" "arg2" "var=123"
 run_single_test "test_file_io" "All file operations"
 run_single_test "test_sandbox_defense" "All host escape vectors strictly prevented!"
 run_single_test "test_procfs" "Virtual procfs successfully inspected"
 run_single_test "test_memory" "Both brk and mmap memory allocation validated!"
+run_single_test "test_ps_procfs" "test_ps_procfs: All /proc directory entries and process files verified!"
+run_single_test "test_wave1_syscalls" "All 14 Wave 1 syscalls verified across all 3 Mandate cases!"
+
+# Test BusyBox ps if busybox is available
+if [ -x "$SCRIPT_DIR/rootfs/bin/busybox" ]; then
+    TOTAL=$((TOTAL + 1))
+    echo -e "${C_BOLD}${C_CYAN}------------------------------------------------------${C_RESET}"
+    echo -e "${C_BOLD}Test #$TOTAL: ${C_YELLOW}busybox ps / ps aux${C_RESET}"
+    set +e
+    PS_OUT="$("$LTM" /bin/busybox ps)"
+    PS_EXIT=$?
+    set -u
+    if [ $PS_EXIT -eq 0 ] && echo "$PS_OUT" | grep -q -E "PID.*USER.*COMMAND" && echo "$PS_OUT" | grep -q -E "[0-9]+.*"; then
+        echo -e "${C_GREEN}${C_BOLD}[PASS]${C_RESET} ${C_GREEN}busybox ps displayed processes:${C_RESET}\n$PS_OUT"
+        PASSED=$((PASSED + 1))
+    else
+        echo -e "${C_RED}${C_BOLD}[FAIL]${C_RESET} ${C_RED}busybox ps failed to display running processes!${C_RESET}"
+        echo -e "Output:\n$PS_OUT"
+        FAILED=$((FAILED + 1))
+    fi
+fi
 
 # Clean up any sandbox temporary files created during testing
-rm -f "$SCRIPT_DIR/ltm_io_test_file.tmp" "$SCRIPT_DIR/sandbox_test.txt"
+rm -f "$SCRIPT_DIR/ltm_io_test_file.tmp" "$SCRIPT_DIR/sandbox_test.txt" "$SCRIPT_DIR/wave1_test_file.tmp"
 
 # Summary
 echo -e "\n${C_BOLD}${C_BLUE}======================================================${C_RESET}"

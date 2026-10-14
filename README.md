@@ -4,7 +4,7 @@
 [![Platform](https://img.shields.io/badge/Platform-macOS%20Apple%20Silicon%20(M--series)-lightgrey.svg)]()
 [![Target](https://img.shields.io/badge/Guest-Linux%20ARM64%20(AArch64)-orange.svg)]()
 [![Kernel](https://img.shields.io/badge/Kernel-LTM%202026.1A-blueviolet.svg)]()
-[![Tests](https://img.shields.io/badge/Tests-6%2F6%20Passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-9%2F9%20Passing-brightgreen.svg)]()
 
 **LTM (Linux To Mac)** is an ultra-high-performance userspace translation layer that executes **unmodified Linux ARM64 (AArch64) ELF binaries natively on macOS Apple Silicon** (Darwin ARM64 / M1, M2, M3, M4) without CPU emulation or virtual machines.
 
@@ -172,6 +172,9 @@ LTM includes an automated test harness validating the ELF loader, Linux ABI, fil
 | `test_sandbox_defense` | Host-escape penetration test rejecting `/Library`, `/Users`, `/System`, `../../` | **PASS** |
 | `test_procfs` | Virtual `/proc/version`, `/proc/cpuinfo`, and `/proc/self/cmdline` | **PASS** |
 | `test_memory` | Dynamic heap (`brk`) expansion and anonymous `mmap` allocations | **PASS** |
+| `test_ps_procfs` | Process virtualization: `/proc/[pid]` numeric enumeration, `stat`, `status`, `comm` | **PASS** |
+| `test_wave1_syscalls`| 3-Way Mandate (Happy, Boundary, Errno) across 14 Wave 1 syscalls | **PASS** |
+| `busybox ps` | Live process discovery and table formatting (`ps` / `ps aux`) | **PASS** |
 
 ---
 

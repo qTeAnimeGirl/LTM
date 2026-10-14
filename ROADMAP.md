@@ -23,7 +23,7 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 - [x] **Darwin 4GB PAGEZERO Compatibility**: Relocation of static binaries above Darwin's 4GB zero-page protection boundary (`0x400000000`).
 - [x] **Initial Linux ARM64 Stack ABI**: Allocation of 8MB stack with `argc`, `argv[]`, `envp[]`, and comprehensive auxiliary vector (`AT_PHDR`, `AT_BASE`, `AT_PAGESZ=16384`, `AT_ENTRY`, `AT_RANDOM`, `AT_CLKTCK=100`, etc.).
 - [x] **Freestanding Assembly Trampoline**: `jump_to_elf` assembly stub setting `sp` and jumping directly to guest `_start`.
-- [x] **Automated Regression Suite**: 6-test suite (`test_hello`, `test_args_env`, `test_file_io`, `test_sandbox_defense`, `test_procfs`, `test_memory`) with 100% pass rate.
+- [x] **Automated Regression Suite**: Core test suite (`test_hello`, `test_args_env`, `test_file_io`, `test_sandbox_defense`, `test_procfs`, `test_memory`) with 100% pass rate.
 
 ### Milestone 2: Dynamic ELF Loading & Musl C Runtime (Sprint 2)
 - [x] **`PT_INTERP` Dynamic Linker Loader**: Detection and mapping of dynamic linkers (`/lib/ld-musl-aarch64.so.1` or `ld-linux-aarch64.so.1`) at dedicated high memory bases (`0x500000000`).
@@ -58,6 +58,29 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 - [x] **IP Sockopt Mapping**: Mapped `IPPROTO_IP` options between Linux and Darwin, absorbing benign metadata options (`IP_RECVTTL`, `IP_RETOPTS`, `IP_RECVOPTS`, `IP_OPTIONS`).
 - [x] **Kernel Personality**: Branded as `LTM 2026.1A` across `uname(2)`, `/proc/version`, and `/proc/sys/kernel/osrelease`.
 
+### Milestone 7: Process Virtualization (`ps`), Register Purity & 14-Syscall Wave 1 (Sprint 8)
+- [x] **Context Resume Register Purity (`_ltm_resume_context`)**: Restored full general-purpose registers (`x16`, `x17`, `x0..x15`, `x18..x30`), `sp`, and CPSR `nzcv` condition flags, preventing register clobbering during signal delivery.
+- [x] **Process Virtualization for `ps`**:
+  - Dynamically synthesizes numeric process directories in `getdents64` for `/proc`: `.`, `..`, `1` (init / root shell), `<guest_pid>` (current process), `self` (symlink).
+  - Virtualizes `/proc/[pid]/stat` with Field 2 formatted strictly as basename `(comm)`, plus `/proc/[pid]/status`, `/proc/[pid]/comm`, `/proc/[pid]/cmdline`.
+  - Nonexistent PIDs return `-LINUX_ENOENT`.
+  - `./ltm /bin/busybox ps` and `./ltm /bin/busybox ps aux` successfully display active container processes!
+- [x] **Security Hardening**: Fixed `dirfd` error handling to return `-LINUX_EBADF` on invalid descriptors, and corrected NULL pointer validation across all file syscalls to return `-LINUX_EFAULT`.
+- [x] **14 Wave 1 Syscalls Implemented with 3-Way Mandate (Happy, Boundary, Errno)**:
+  - `statfs` (43) & `fstatfs` (44)
+  - `truncate` (45) & `ftruncate` (46)
+  - `fchmod` (52) & `fchmodat` (53)
+  - `fchown` (54) & `fchownat` (55)
+  - `fsync` (82) & `fdatasync` (83)
+  - `sched_setaffinity` (122), `sched_getaffinity` (123), `sched_yield` (124)
+  - `times` (153)
+  - `setpgid` (154), `getpgid` (155), `getsid` (156), `setsid` (157)
+  - `getrusage` (165)
+  - `umask` (166)
+  - `readahead` (213)
+  - `madvise` (233)
+- [x] **Automated Regression Suite Expansion**: Expanded from 6 to 9 test suites with 100% pass rate (`test_ps_procfs`, `test_wave1_syscalls`, `busybox ps`).
+
 ---
 
 ## 3. Comprehensive Syscall Implementation Matrix
@@ -73,27 +96,37 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 24 | `dup3` | File I/O | **Implemented** | `dup2` with `O_CLOEXEC` flag support |
 | 25 | `fcntl` | File I/O | **Implemented** | Command translation (`F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL`, `F_DUPFD`) |
 | 29 | `ioctl` | Terminal/I/O | **Implemented** | `TIOCGWINSZ`, `TIOCSWINSZ`, `TCGETS`, `TCSETS`, `TIOCSCTTY`, `TIOCGPGRP`, `TIOCSPGRP`, `FIONREAD` |
-| 34 | `mkdirat` | Filesystem | **Implemented** | Sandboxed directory creation |
-| 35 | `unlinkat` | Filesystem | **Implemented** | Sandboxed file unlinking |
-| 36 | `symlinkat` | Filesystem | **Implemented** | Sandboxed symlink creation |
-| 37 | `linkat` | Filesystem | **Implemented** | Sandboxed hardlink creation |
-| 38 | `renameat` | Filesystem | **Implemented** | Sandboxed file renaming |
-| 48 | `faccessat` | Filesystem | **Implemented** | Permissions verification within sandbox |
-| 56 | `openat` | File I/O | **Implemented** | Sandboxed path resolution, flags mapping, virtual proc/dev |
+| 34 | `mkdirat` | Filesystem | **Implemented** | Sandboxed directory creation with `-EFAULT` pointer check |
+| 35 | `unlinkat` | Filesystem | **Implemented** | Sandboxed file unlinking with `-EFAULT` pointer check |
+| 36 | `symlinkat` | Filesystem | **Implemented** | Sandboxed symlink creation with `-EFAULT` pointer check |
+| 37 | `linkat` | Filesystem | **Implemented** | Sandboxed hardlink creation with `-EFAULT` pointer check |
+| 38 | `renameat` | Filesystem | **Implemented** | Sandboxed file renaming with `-EFAULT` pointer check |
+| 43 | `statfs` | Filesystem | **Implemented** | Translates Darwin `statfs` to Linux `struct linux_statfs64` (EXT4 `0xEF53`) |
+| 44 | `fstatfs` | Filesystem | **Implemented** | Translates Darwin `fstatfs` to Linux `struct linux_statfs64` |
+| 45 | `truncate` | File I/O | **Implemented** | Sandboxed path resolution + Darwin `truncate()`, validates `length >= 0` |
+| 46 | `ftruncate` | File I/O | **Implemented** | Darwin `ftruncate()`, validates `fd >= 0` and `length >= 0` |
+| 48 | `faccessat` | Filesystem | **Implemented** | Permissions verification within sandbox with `-EFAULT` check |
+| 52 | `fchmod` | Filesystem | **Implemented** | Changes open fd permissions, validates `fd >= 0` |
+| 53 | `fchmodat` | Filesystem | **Implemented** | Sandboxed path permissions change with symlink flag handling |
+| 54 | `fchown` | Filesystem | **Implemented** | Validates `fd >= 0` via `fstat()`, returns 0 in root container |
+| 55 | `fchownat` | Filesystem | **Implemented** | Validates path existence, returns 0 in root container |
+| 56 | `openat` | File I/O | **Implemented** | Sandboxed path resolution, flags mapping, virtual proc/dev, `-EFAULT` check |
 | 57 | `close` | File I/O | **Implemented** | Closes descriptor, cleans tracking tables and epoll instances |
 | 59 | `pipe2` | IPC / I/O | **Implemented** | Creates pipe with `O_CLOEXEC` and `O_NONBLOCK` support |
-| 61 | `getdents64` | Filesystem | **Implemented** | Converts Darwin `dirent` to Linux `linux_dirent64`, synthetic proc/dev |
+| 61 | `getdents64` | Filesystem | **Implemented** | Converts dirents + dynamic `/proc` PID injection (`1`, `<pid>`, `self`) |
 | 62 | `lseek` | File I/O | **Implemented** | Repositions read/write file offset |
 | 63 | `read` | File I/O | **Implemented** | Reads from file descriptor with error translation |
 | 64 | `write` | File I/O | **Implemented** | Writes to file descriptor with error translation |
-| 65 | `readv` | File I/O | **Implemented** | Vectored I/O read |
-| 66 | `writev` | File I/O | **Implemented** | Vectored I/O write |
+| 65 | `readv` | File I/O | **Implemented** | Vectored I/O read with count validation |
+| 66 | `writev` | File I/O | **Implemented** | Vectored I/O write with count validation |
 | 71 | `sendfile` | File I/O | **Implemented** | Kernel-space data transfer between descriptors |
 | 72 | `pselect6` | Event Loop | **Implemented** | Synchronous I/O multiplexing with timespec timeout |
 | 73 | `ppoll` | Event Loop | **Implemented** | Polls file descriptors with nanosecond timeout |
-| 78 | `readlinkat` | Filesystem | **Implemented** | Sandboxed readlink with virtual proc/self/exe support |
+| 78 | `readlinkat` | Filesystem | **Implemented** | Sandboxed readlink with virtual proc/self/exe support, `-EFAULT` check |
 | 79 | `newfstatat` | Filesystem | **Implemented** | Translates Darwin `struct stat` to Linux `linux_stat` (32-bit dev, 64-bit ino) |
 | 80 | `fstat` | Filesystem | **Implemented** | Translates open fd stat to `linux_stat` with root ownership |
+| 82 | `fsync` | File I/O | **Implemented** | Flushes modified file data to disk via Darwin `fsync()` |
+| 83 | `fdatasync` | File I/O | **Implemented** | Flushes file data to disk via Darwin `fsync()` |
 | 90 | `capget` | Security | **Implemented** | Reports full effective/permitted capabilities (`0xffffffff`) |
 | 91 | `capset` | Security | **Implemented** | Virtualized superuser privilege setter (returns 0) |
 | 93 | `exit` | Process | **Implemented** | Terminates calling thread |
@@ -106,6 +139,9 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 104 | `getitimer` | Timers | **Implemented** | Reads remaining timer duration |
 | 113 | `clock_gettime` | Time | **Implemented** | Maps `CLOCK_REALTIME`, `CLOCK_MONOTONIC`, `CLOCK_BOOTTIME` |
 | 114 | `clock_getres` | Time | **Implemented** | Returns clock resolution |
+| 122 | `sched_setaffinity` | Scheduling | **Implemented** | Validates mask and length, benign success |
+| 123 | `sched_getaffinity` | Scheduling | **Implemented** | Populates CPU affinity bitmask from Darwin `hw.ncpu` |
+| 124 | `sched_yield` | Scheduling | **Implemented** | Yields processor execution via Darwin `sched_yield()` |
 | 129 | `kill` | Signals | **Implemented** | Sends signal to process |
 | 130 | `tkill` | Signals | **Implemented** | Sends signal to thread |
 | 131 | `tgkill` | Signals | **Implemented** | Sends signal to thread group |
@@ -115,9 +151,16 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 139 | `rt_sigreturn` | Signals | **Implemented** | Custom assembly restorer popping stack frame and resuming guest |
 | 148 | `getresuid` | Identity | **Implemented** | Returns real, effective, and saved UID (all 0) |
 | 150 | `getresgid` | Identity | **Implemented** | Returns real, effective, and saved GID (all 0) |
+| 153 | `times` | System Info | **Implemented** | Copies user/system CPU execution ticks to `struct linux_tms` |
+| 154 | `setpgid` | Process | **Implemented** | Virtualized process group setter preventing terminal suspension |
+| 155 | `getpgid` | Process | **Implemented** | Returns process group ID |
+| 156 | `getsid` | Process | **Implemented** | Returns session ID |
+| 157 | `setsid` | Process | **Implemented** | Creates new session, sets process group |
 | 158 | `getgroups` | Identity | **Implemented** | Returns supplementary group list (`gid=0`) |
 | 159 | `setgroups` | Identity | **Implemented** | Sets supplementary groups |
 | 160 | `uname` | System Info | **Implemented** | Reports `Linux`, `ltm-mac`, `LTM 2026.1A`, `aarch64` |
+| 165 | `getrusage` | Resource Usage | **Implemented** | Reports resource usage, converts Darwin bytes to Linux KB (`ru_maxrss`) |
+| 166 | `umask` | Filesystem | **Implemented** | Sets file mode creation mask via Darwin `umask()` |
 | 167 | `prctl` | Process | **Implemented** | Handles `PR_SET_NAME`, `PR_GET_NAME`, `PR_SET_DUMPABLE` |
 | 169 | `gettimeofday` | Time | **Implemented** | Current time in seconds and microseconds |
 | 172 | `getpid` | Identity | **Implemented** | Returns process ID |
@@ -143,12 +186,14 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 210 | `shutdown` | Networking | **Implemented** | Shuts down read/write channels of socket |
 | 211 | `sendmsg` | Networking | **Implemented** | Sends message with `msghdr` translation |
 | 212 | `recvmsg` | Networking | **Implemented** | Receives message, strips IPv4 header on ICMP datagrams |
+| 213 | `readahead` | File I/O | **Implemented** | Validates fd via `fstat()`, returns 0 |
 | 214 | `brk` | Memory | **Implemented** | Dynamic heap allocation and expansion |
 | 215 | `munmap` | Memory | **Implemented** | Unmaps 16KB page-aligned memory |
 | 220 | `clone` | Process | **Implemented** | Subprocess fork with child signal handler registration |
 | 221 | `execve` | Process | **Implemented** | Re-executes container binaries with sanitized environment |
 | 222 | `mmap` | Memory | **Implemented** | 16KB-aligned memory allocation, MAP_ANONYMOUS, MAP_JIT |
 | 226 | `mprotect` | Memory | **Implemented** | Modifies page protections, re-patches executable ranges |
+| 233 | `madvise` | Memory | **Implemented** | Validates 16KB page alignment, delegates to Darwin `madvise()` |
 | 260 | `wait4` | Process | **Implemented** | Waits for child process termination with status translation |
 | 261 | `prlimit64` | Resources | **Implemented** | Resource limits query and configuration |
 
@@ -158,6 +203,7 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 
 | Binary / Application | Target Architecture | Distribution / Libc | Status | Capabilities Verified |
 |:---|:---:|:---:|:---:|:---|
+| **`ps` / `ps aux`** | `aarch64` | Dynamic / Musl | **100% Working** | Discovers container processes, PID 1, current PID, formatted user, time, and command |
 | **Fastfetch** | `aarch64` | Dynamic / Musl | **100% Working** | Live CPU (`Apple M3`), RAM, Uptime, Host model, Alpine ASCII logo |
 | **GNU Bash 5.2** | `aarch64` | Dynamic / Musl | **100% Working** | Interactive prompt, history, completions, pipes, redirections, jobs |
 | **BusyBox `/bin/sh`** | `aarch64` | Dynamic / Musl | **100% Working** | Interactive shell, built-in commands, scripts, signal handling |
@@ -165,22 +211,23 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | **`wget`** | `aarch64` | Dynamic / Musl | **100% Working** | HTTP / HTTPS (TLS 1.3) client requests, DNS lookups, downloads |
 | **`whoami` & `id`** | `aarch64` | Dynamic / Musl | **100% Working** | Correctly outputs `root` and `uid=0(root) gid=0(root) groups=0(root)` |
 | **`uname`** | `aarch64` | Dynamic / Musl | **100% Working** | Outputs `Linux ltm-mac LTM 2026.1A ... aarch64 Linux` |
-| **Standard Coreutils** | `aarch64` | Dynamic / Musl | **100% Working** | `ls`, `cat`, `mkdir`, `rm`, `cp`, `mv`, `head`, `tail`, `grep`, `sleep` |
-| **Automated Test Suite** | `aarch64` | Static / Freestanding | **100% Working** | 6 of 6 test suites pass cleanly |
+| **Standard Coreutils** | `aarch64` | Dynamic / Musl | **100% Working** | `ls`, `cat`, `mkdir`, `rm`, `cp`, `mv`, `head`, `tail`, `grep`, `sleep`, `stat` |
+| **Automated Test Suite** | `aarch64` | Static / Freestanding | **100% Working** | **9 of 9 test suites pass cleanly** (100% pass rate) |
 
 ---
 
 ## 5. What Is Left To Be Done (Future Capability Roadmap)
 
-### Tier 1: Easy — Extended Syscall Coverage & Edge Stubs
-- [ ] **`statfs` / `fstatfs` (Syscalls 43 & 44)**:
-  - Populate Linux `struct statfs64` from Darwin `statfs()`, reporting filesystem type (`0xEF53` for ext4), block sizes, and free disk space.
-- [ ] **Extended Terminal Ioctls**:
-  - `TIOCGWINSZ` and `TIOCSWINSZ` are implemented; add `TIOCSBRK`, `TIOCCBRK`, `TIOCMGET`, `TIOCMSET` stubs for serial/terminal utilities.
-- [ ] **`sysinfo` Expansion**:
-  - Add synthetic load averages (`loads[3]`), swap stats, and shared memory to `handle_sysinfo`.
+### Tier 1: Easy — Complete!
+- [x] `statfs` / `fstatfs` (Syscalls 43 & 44)
+- [x] Extended process metadata & `getrusage` (165)
+- [x] Process control & session leadership (`setpgid`, `getpgid`, `getsid`, `setsid`)
+- [x] File truncation & mode modification (`truncate`, `ftruncate`, `fchmod`, `fchmodat`, `fchown`, `fchownat`)
+- [x] Disk synchronization (`fsync`, `fdatasync`)
+- [x] Memory advising (`madvise`) & prefetching (`readahead`)
+- [x] Process virtualization for `ps` and `ps aux`
 
-### Tier 2: Medium — Advanced Event Multiplexing & IPC
+### Tier 2: Medium — Advanced Event Multiplexing & IPC (Wave 2)
 - [ ] **Native `kqueue` Backend for `epoll`**:
   - Currently `epoll_pwait` delegates to Darwin `poll`. Mapping `epoll_create1` / `epoll_ctl` directly to Darwin `kqueue` / `kevent64_t` will deliver zero-copy, scalable event notifications for high-concurrency servers.
 - [ ] **`timerfd` Subsystem (Syscalls 85 & 86)**:

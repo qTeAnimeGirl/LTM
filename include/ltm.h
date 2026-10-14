@@ -28,6 +28,10 @@
 #include <sys/ioctl.h>
 #include <sys/sysctl.h>
 #include <limits.h>
+#include <sys/mount.h>
+#include <sys/times.h>
+#include <sys/resource.h>
+#include <sched.h>
 
 /* LTM (Linux To Mac) Project Metadata */
 #define LTM_PROJECT_NAME          "LTM (Linux To Mac)"

@@ -26,21 +26,47 @@ typedef unsigned long uintptr_t;
 typedef enum { false = 0, true = 1 } bool;
 
 /* Linux ARM64 System Call Numbers */
-#define SYS_openat      56
-#define SYS_close       57
-#define SYS_lseek       62
-#define SYS_read        63
-#define SYS_write       64
-#define SYS_newfstatat  79
-#define SYS_exit        93
-#define SYS_exit_group  94
-#define SYS_uname       160
-#define SYS_getpid      172
-#define SYS_getuid      174
-#define SYS_getgid      176
-#define SYS_brk         214
-#define SYS_munmap      215
-#define SYS_mmap        222
+#define SYS_statfs          43
+#define SYS_fstatfs         44
+#define SYS_truncate        45
+#define SYS_ftruncate       46
+#define SYS_fchmod          52
+#define SYS_fchmodat        53
+#define SYS_fchownat        54
+#define SYS_fchown          55
+#define SYS_openat          56
+#define SYS_close           57
+#define SYS_getdents64      61
+#define SYS_lseek           62
+#define SYS_read            63
+#define SYS_write           64
+#define SYS_newfstatat      79
+#define SYS_fsync           82
+#define SYS_fdatasync       83
+#define SYS_exit            93
+#define SYS_exit_group      94
+#define SYS_sched_setaffinity 122
+#define SYS_sched_getaffinity 123
+#define SYS_sched_yield     124
+#define SYS_times           153
+#define SYS_setpgid         154
+#define SYS_getpgid         155
+#define SYS_getsid          156
+#define SYS_setsid          157
+#define SYS_uname           160
+#define SYS_getrusage       165
+#define SYS_umask           166
+#define SYS_getpid          172
+#define SYS_getppid         173
+#define SYS_getuid          174
+#define SYS_geteuid         175
+#define SYS_getgid          176
+#define SYS_getegid         177
+#define SYS_readahead       213
+#define SYS_brk             214
+#define SYS_munmap          215
+#define SYS_mmap            222
+#define SYS_madvise         233
 
 /* File open flags */
 #define AT_FDCWD        (-100)
@@ -79,7 +105,91 @@ typedef enum { false = 0, true = 1 } bool;
 #define EACCES          13
 #define EFAULT          14
 #define EEXIST          17
+#define ENOTDIR         20
+#define EISDIR          21
 #define EINVAL          22
+#define ENOSYS          38
+
+/* Madvise Advice */
+#define MADV_NORMAL     0
+#define MADV_RANDOM     1
+#define MADV_SEQUENTIAL 2
+#define MADV_WILLNEED   3
+#define MADV_DONTNEED   4
+
+/* Getrusage Who */
+#define RUSAGE_SELF     0
+#define RUSAGE_CHILDREN (-1)
+#define RUSAGE_THREAD   1
+
+/* Directory entry 64 */
+struct linux_dirent64 {
+    uint64_t        d_ino;
+    int64_t         d_off;
+    unsigned short  d_reclen;
+    unsigned char   d_type;
+    char            d_name[];
+};
+
+#define DT_UNKNOWN      0
+#define DT_FIFO         1
+#define DT_CHR          2
+#define DT_DIR          4
+#define DT_BLK          6
+#define DT_REG          8
+#define DT_LNK          10
+#define DT_SOCK         12
+#define DT_WHT          14
+
+/* Statfs 64 */
+struct linux_statfs {
+    int64_t  f_type;
+    int64_t  f_bsize;
+    int64_t  f_blocks;
+    int64_t  f_bfree;
+    int64_t  f_bavail;
+    int64_t  f_files;
+    int64_t  f_ffree;
+    struct { int32_t val[2]; } f_fsid;
+    int64_t  f_namelen;
+    int64_t  f_frsize;
+    int64_t  f_flags;
+    int64_t  f_spare[4];
+};
+
+/* Times struct */
+struct linux_tms {
+    long tms_utime;
+    long tms_stime;
+    long tms_cutime;
+    long tms_cstime;
+};
+
+/* Timeval struct */
+struct linux_timeval {
+    long tv_sec;
+    long tv_usec;
+};
+
+/* Rusage struct */
+struct linux_rusage {
+    struct linux_timeval ru_utime;
+    struct linux_timeval ru_stime;
+    long   ru_maxrss;
+    long   ru_ixrss;
+    long   ru_idrss;
+    long   ru_isrss;
+    long   ru_minflt;
+    long   ru_majflt;
+    long   ru_nswap;
+    long   ru_inblock;
+    long   ru_oublock;
+    long   ru_msgsnd;
+    long   ru_msgrcv;
+    long   ru_nsignals;
+    long   ru_nvcsw;
+    long   ru_nivcsw;
+};
 
 /* Linux Auxiliary Vector Types */
 #define AT_NULL         0
@@ -153,6 +263,17 @@ static inline long sys_syscall4(long n, long a1, long a2, long a3, long a4) {
     return x0;
 }
 
+static inline long sys_syscall5(long n, long a1, long a2, long a3, long a4, long a5) {
+    register long x8 __asm__("x8") = n;
+    register long x0 __asm__("x0") = a1;
+    register long x1 __asm__("x1") = a2;
+    register long x2 __asm__("x2") = a3;
+    register long x3 __asm__("x3") = a4;
+    register long x4 __asm__("x4") = a5;
+    __asm__ volatile("svc #0" : "=r"(x0) : "r"(x8), "0"(x0), "r"(x1), "r"(x2), "r"(x3), "r"(x4) : "memory");
+    return x0;
+}
+
 static inline long sys_syscall6(long n, long a1, long a2, long a3, long a4, long a5, long a6) {
     register long x8 __asm__("x8") = n;
     register long x0 __asm__("x0") = a1;
@@ -206,6 +327,102 @@ static inline void *sys_mmap(void *addr, size_t length, int prot, int flags, int
 
 static inline int sys_munmap(void *addr, size_t length) {
     return (int)sys_syscall2(SYS_munmap, (long)addr, length);
+}
+
+static inline int sys_statfs(const char *path, struct linux_statfs *buf) {
+    return (int)sys_syscall2(SYS_statfs, (long)path, (long)buf);
+}
+
+static inline int sys_fstatfs(int fd, struct linux_statfs *buf) {
+    return (int)sys_syscall2(SYS_fstatfs, fd, (long)buf);
+}
+
+static inline int sys_truncate(const char *path, off_t length) {
+    return (int)sys_syscall2(SYS_truncate, (long)path, length);
+}
+
+static inline int sys_ftruncate(int fd, off_t length) {
+    return (int)sys_syscall2(SYS_ftruncate, fd, length);
+}
+
+static inline int sys_fchmod(int fd, int mode) {
+    return (int)sys_syscall2(SYS_fchmod, fd, mode);
+}
+
+static inline int sys_fchmodat(int dirfd, const char *pathname, int mode, int flags) {
+    return (int)sys_syscall4(SYS_fchmodat, dirfd, (long)pathname, mode, flags);
+}
+
+static inline int sys_fchown(int fd, int uid, int gid) {
+    return (int)sys_syscall3(SYS_fchown, fd, uid, gid);
+}
+
+static inline int sys_fchownat(int dirfd, const char *pathname, int uid, int gid, int flags) {
+    return (int)sys_syscall5(SYS_fchownat, dirfd, (long)pathname, uid, gid, flags);
+}
+
+static inline int sys_fsync(int fd) {
+    return (int)sys_syscall1(SYS_fsync, fd);
+}
+
+static inline int sys_fdatasync(int fd) {
+    return (int)sys_syscall1(SYS_fdatasync, fd);
+}
+
+static inline int sys_sched_setaffinity(int pid, size_t cpusetsize, const unsigned long *mask) {
+    return (int)sys_syscall3(SYS_sched_setaffinity, pid, cpusetsize, (long)mask);
+}
+
+static inline int sys_sched_getaffinity(int pid, size_t cpusetsize, unsigned long *mask) {
+    return (int)sys_syscall3(SYS_sched_getaffinity, pid, cpusetsize, (long)mask);
+}
+
+static inline int sys_sched_yield(void) {
+    return (int)sys_syscall0(SYS_sched_yield);
+}
+
+static inline long sys_times(struct linux_tms *buf) {
+    return sys_syscall1(SYS_times, (long)buf);
+}
+
+static inline int sys_setpgid(int pid, int pgid) {
+    return (int)sys_syscall2(SYS_setpgid, pid, pgid);
+}
+
+static inline int sys_getpgid(int pid) {
+    return (int)sys_syscall1(SYS_getpgid, pid);
+}
+
+static inline int sys_getsid(int pid) {
+    return (int)sys_syscall1(SYS_getsid, pid);
+}
+
+static inline int sys_setsid(void) {
+    return (int)sys_syscall0(SYS_setsid);
+}
+
+static inline int sys_getrusage(int who, struct linux_rusage *usage) {
+    return (int)sys_syscall2(SYS_getrusage, who, (long)usage);
+}
+
+static inline int sys_umask(int mask) {
+    return (int)sys_syscall1(SYS_umask, mask);
+}
+
+static inline ssize_t sys_readahead(int fd, off_t offset, size_t count) {
+    return (ssize_t)sys_syscall3(SYS_readahead, fd, offset, count);
+}
+
+static inline int sys_madvise(void *addr, size_t length, int advice) {
+    return (int)sys_syscall3(SYS_madvise, (long)addr, length, advice);
+}
+
+static inline int sys_getdents64(int fd, void *dirp, size_t count) {
+    return (int)sys_syscall3(SYS_getdents64, fd, (long)dirp, count);
+}
+
+static inline int sys_getpid(void) {
+    return (int)sys_syscall0(SYS_getpid);
 }
 
 /* String / memory utilities */

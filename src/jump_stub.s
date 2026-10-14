@@ -48,37 +48,28 @@ _ltm_jump_to_entry:
 .global _ltm_resume_context
 _ltm_resume_context:
     // x0 = pointer to arm_thread_state64_t
-    mov x16, x0
-
-    // Load guest sp
-    ldr x1, [x16, #248]
+    ldr w1, [x0, #264]      // Load __cpsr
+    msr nzcv, x1            // Restore NZCV condition flags
+    ldr x1, [x0, #248]      // Load guest __sp
     mov sp, x1
-
-    // Load guest pc
-    ldr x17, [x16, #256]
-
-    // Load fp (x29) and lr (x30)
-    ldp x29, x30, [x16, #232]
-
-    // Load registers in pairs
-    ldp x2, x3, [x16, #16]
-    ldp x4, x5, [x16, #32]
-    ldp x6, x7, [x16, #48]
-    ldp x8, x9, [x16, #64]
-    ldp x10, x11, [x16, #80]
-    ldp x12, x13, [x16, #96]
-    ldp x14, x15, [x16, #112]
-    ldp x18, x19, [x16, #144]
-    ldp x20, x21, [x16, #160]
-    ldp x22, x23, [x16, #176]
-    ldp x24, x25, [x16, #192]
-    ldp x26, x27, [x16, #208]
-    ldr x28, [x16, #224]
-
-    // Load x0 and x1 last
-    ldp x0, x1, [x16, #0]
-
-    br x17
+    ldr x16, [x0, #256]     // Load target __pc into x16
+    ldr x17, [x0, #136]     // Restore guest x17 from offset 136
+    ldp x29, x30, [x0, #232]
+    ldr x28, [x0, #224]
+    ldp x26, x27, [x0, #208]
+    ldp x24, x25, [x0, #192]
+    ldp x22, x23, [x0, #176]
+    ldp x20, x21, [x0, #160]
+    ldp x18, x19, [x0, #144]
+    ldp x14, x15, [x0, #112]
+    ldp x12, x13, [x0, #96]
+    ldp x10, x11, [x0, #80]
+    ldp x8, x9, [x0, #64]
+    ldp x6, x7, [x0, #48]
+    ldp x4, x5, [x0, #32]
+    ldp x2, x3, [x0, #16]
+    ldp x0, x1, [x0, #0]
+    br x16
 
 .global _ltm_sigreturn_stub
 _ltm_sigreturn_stub:

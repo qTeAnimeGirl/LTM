@@ -102,6 +102,10 @@ int syscall_dispatcher_init(void) {
     sigemptyset(&empty_mask);
     sigprocmask(SIG_SETMASK, &empty_mask, NULL);
 
+    /* Ignore background terminal signals to prevent background job control suspension */
+    signal(SIGTTOU, SIG_IGN);
+    signal(SIGTTIN, SIG_IGN);
+
     /* Allocate alternate stack for safe signal handling */
     g_alt_stack = mmap(NULL, ALT_STACK_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (g_alt_stack == MAP_FAILED) {
@@ -174,6 +178,18 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case LINUX_SYS_newfstatat:
             ret = handle_newfstatat((int)a0, (const char *)a1, (struct linux_stat *)a2, (int)a3);
             break;
+        case LINUX_SYS_statfs:
+            ret = handle_statfs((const char *)a0, (struct linux_statfs *)a1);
+            break;
+        case LINUX_SYS_fstatfs:
+            ret = handle_fstatfs((int)a0, (struct linux_statfs *)a1);
+            break;
+        case LINUX_SYS_truncate:
+            ret = handle_truncate((const char *)a0, (off_t)a1);
+            break;
+        case LINUX_SYS_ftruncate:
+            ret = handle_ftruncate((int)a0, (off_t)a1);
+            break;
         case LINUX_SYS_lseek:
             ret = handle_lseek((int)a0, (off_t)a1, (int)a2);
             break;
@@ -233,7 +249,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
             ret = handle_mprotect((void *)a0, (size_t)a1, (int)a2);
             break;
         case LINUX_SYS_madvise:
-            ret = 0; /* benign no-op */
+            ret = handle_madvise((void *)a0, (size_t)a1, (int)a2);
             break;
         case LINUX_SYS_getpid:
             ret = handle_getpid();
@@ -357,6 +373,21 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case LINUX_SYS_getpgid:
             ret = handle_getpgid((pid_t)a0);
             break;
+        case LINUX_SYS_getsid:
+            ret = handle_getsid((pid_t)a0);
+            break;
+        case LINUX_SYS_setsid:
+            ret = handle_setsid();
+            break;
+        case LINUX_SYS_times:
+            ret = handle_times((struct linux_tms *)a0);
+            break;
+        case LINUX_SYS_getrusage:
+            ret = handle_getrusage((int)a0, (struct linux_rusage *)a1);
+            break;
+        case LINUX_SYS_umask:
+            ret = handle_umask((mode_t)a0);
+            break;
         case LINUX_SYS_setuid:
         case LINUX_SYS_setgid:
         case LINUX_SYS_setreuid:
@@ -398,6 +429,12 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case LINUX_SYS_fchown:
             ret = handle_fchown((int)a0, (uid_t)a1, (gid_t)a2);
             break;
+        case LINUX_SYS_fsync:
+            ret = handle_fsync((int)a0);
+            break;
+        case LINUX_SYS_fdatasync:
+            ret = handle_fdatasync((int)a0);
+            break;
         case LINUX_SYS_utimensat:
             ret = handle_utimensat((int)a0, (const char *)a1, (const struct linux_timespec *)a2, (int)a3);
             break;
@@ -406,6 +443,9 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
             break;
         case LINUX_SYS_sched_setaffinity:
             ret = handle_sched_setaffinity((pid_t)a0, (size_t)a1, (const unsigned long *)a2);
+            break;
+        case LINUX_SYS_sched_yield:
+            ret = handle_sched_yield();
             break;
         case LINUX_SYS_socket:
             ret = handle_socket((int)a0, (int)a1, (int)a2);
@@ -454,6 +494,9 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
             break;
         case LINUX_SYS_shutdown:
             ret = handle_shutdown((int)a0, (int)a1);
+            break;
+        case LINUX_SYS_readahead:
+            ret = handle_readahead((int)a0, (off_t)a1, (size_t)a2);
             break;
         case LINUX_SYS_rseq:
             ret = -LINUX_ENOSYS;

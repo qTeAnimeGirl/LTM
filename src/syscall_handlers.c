@@ -50,7 +50,7 @@ int64_t handle_write(int fd, const void *buf, size_t count) {
 }
 
 int64_t handle_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
-    if (!pathname) return -LINUX_EINVAL;
+    if (!pathname) return -LINUX_EFAULT;
 
     /* Translate Linux open flags to Darwin open flags */
     int dflags = 0;
@@ -433,15 +433,14 @@ static void copy_linux_to_darwin_termios(const struct linux_termios *l, struct t
 int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
     /* TIOCGWINSZ: Linux 0x5413 */
     if (request == 0x5413) {
+        if (!arg) return -LINUX_EFAULT;
         struct winsize ws;
         if (ioctl(fd, TIOCGWINSZ, &ws) == 0) {
-            if (arg) {
-                struct linux_winsize *lws = (struct linux_winsize *)arg;
-                lws->ws_row = ws.ws_row;
-                lws->ws_col = ws.ws_col;
-                lws->ws_xpixel = ws.ws_xpixel;
-                lws->ws_ypixel = ws.ws_ypixel;
-            }
+            struct linux_winsize *lws = (struct linux_winsize *)arg;
+            lws->ws_row = ws.ws_row;
+            lws->ws_col = ws.ws_col;
+            lws->ws_xpixel = ws.ws_xpixel;
+            lws->ws_ypixel = ws.ws_ypixel;
             return 0;
         }
         return darwin_to_linux_errno(errno);
@@ -449,7 +448,7 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
 
     /* TIOCSWINSZ: Linux 0x5414 */
     if (request == 0x5414) {
-        if (!arg) return -LINUX_EINVAL;
+        if (!arg) return -LINUX_EFAULT;
         struct linux_winsize *lws = (struct linux_winsize *)arg;
         struct winsize ws;
         ws.ws_row = lws->ws_row;
@@ -462,7 +461,7 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
 
     /* TCGETS: Linux 0x5401 */
     if (request == 0x5401) {
-        if (!arg) return -LINUX_EINVAL;
+        if (!arg) return -LINUX_EFAULT;
         struct termios tios;
         if (tcgetattr(fd, &tios) != 0) {
             return darwin_to_linux_errno(errno);
@@ -473,7 +472,7 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
 
     /* TCSETS: Linux 0x5402, TCSETSW: 0x5403, TCSETSF: 0x5404 */
     if (request == 0x5402 || request == 0x5403 || request == 0x5404) {
-        if (!arg) return -LINUX_EINVAL;
+        if (!arg) return -LINUX_EFAULT;
         struct termios tios;
         if (tcgetattr(fd, &tios) != 0) {
             memset(&tios, 0, sizeof(tios));
@@ -514,17 +513,18 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
 
     /* TIOCGPGRP: Linux 0x540f */
     if (request == 0x540f) {
+        if (!arg) return -LINUX_EFAULT;
         pid_t pgrp = tcgetpgrp(fd);
         if (pgrp < 0) {
             pgrp = getpgrp();
         }
-        if (arg) *(pid_t *)arg = pgrp;
+        *(pid_t *)arg = pgrp;
         return 0;
     }
 
     /* TIOCSPGRP: Linux 0x5410 */
     if (request == 0x5410) {
-        if (!arg) return -LINUX_EINVAL;
+        if (!arg) return -LINUX_EFAULT;
         pid_t pgrp = *(pid_t *)arg;
 
         struct sigaction sa, old_sa;
@@ -541,9 +541,10 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
 
     /* FIONREAD: Linux 0x541b */
     if (request == 0x541b) {
+        if (!arg) return -LINUX_EFAULT;
         int n = 0;
         if (ioctl(fd, FIONREAD, &n) != 0) return darwin_to_linux_errno(errno);
-        if (arg) *(int *)arg = n;
+        *(int *)arg = n;
         return 0;
     }
 
@@ -619,7 +620,120 @@ int64_t handle_fcntl(int fd, int cmd, unsigned long arg) {
 }
 
 int64_t handle_getdents64(int fd, void *dirp, size_t count) {
-    if (!dirp || count == 0) return -LINUX_EINVAL;
+    if (!dirp) return -LINUX_EFAULT;
+    if (count == 0) return -LINUX_EINVAL;
+
+    char dir_path[1024];
+    bool is_proc = false;
+    if (fcntl(fd, F_GETPATH, dir_path) == 0) {
+        size_t dlen = strlen(dir_path);
+        if ((dlen == 5 && strcmp(dir_path, "/proc") == 0) ||
+            (dlen > 5 && strcmp(dir_path + dlen - 5, "/proc") == 0)) {
+            is_proc = true;
+        }
+    }
+
+    if (is_proc) {
+        char pid_str[16];
+        snprintf(pid_str, sizeof(pid_str), "%d", getpid());
+
+        struct {
+            const char *name;
+            uint8_t d_type;
+            uint64_t ino;
+        } proc_entries[20];
+        int total_entries = 0;
+
+        proc_entries[total_entries].name = ".";
+        proc_entries[total_entries].d_type = DT_DIR;
+        proc_entries[total_entries++].ino = 1;
+
+        proc_entries[total_entries].name = "..";
+        proc_entries[total_entries].d_type = DT_DIR;
+        proc_entries[total_entries++].ino = 1;
+
+        proc_entries[total_entries].name = "1";
+        proc_entries[total_entries].d_type = DT_DIR;
+        proc_entries[total_entries++].ino = 2;
+
+        if (getpid() != 1) {
+            proc_entries[total_entries].name = pid_str;
+            proc_entries[total_entries].d_type = DT_DIR;
+            proc_entries[total_entries++].ino = 3;
+        }
+
+        proc_entries[total_entries].name = "self";
+        proc_entries[total_entries].d_type = DT_LNK;
+        proc_entries[total_entries++].ino = 4;
+
+        proc_entries[total_entries].name = "cpuinfo";
+        proc_entries[total_entries].d_type = DT_REG;
+        proc_entries[total_entries++].ino = 5;
+
+        proc_entries[total_entries].name = "meminfo";
+        proc_entries[total_entries].d_type = DT_REG;
+        proc_entries[total_entries++].ino = 6;
+
+        proc_entries[total_entries].name = "version";
+        proc_entries[total_entries].d_type = DT_REG;
+        proc_entries[total_entries++].ino = 7;
+
+        proc_entries[total_entries].name = "stat";
+        proc_entries[total_entries].d_type = DT_REG;
+        proc_entries[total_entries++].ino = 8;
+
+        proc_entries[total_entries].name = "uptime";
+        proc_entries[total_entries].d_type = DT_REG;
+        proc_entries[total_entries++].ino = 9;
+
+        proc_entries[total_entries].name = "loadavg";
+        proc_entries[total_entries].d_type = DT_REG;
+        proc_entries[total_entries++].ino = 10;
+
+        proc_entries[total_entries].name = "mounts";
+        proc_entries[total_entries].d_type = DT_REG;
+        proc_entries[total_entries++].ino = 11;
+
+        proc_entries[total_entries].name = "filesystems";
+        proc_entries[total_entries].d_type = DT_REG;
+        proc_entries[total_entries++].ino = 12;
+
+        proc_entries[total_entries].name = "sys";
+        proc_entries[total_entries].d_type = DT_DIR;
+        proc_entries[total_entries++].ino = 13;
+
+        off_t cur_idx = lseek(fd, 0, SEEK_CUR);
+        if (cur_idx < 0) cur_idx = 0;
+        if (cur_idx >= total_entries) return 0;
+
+        size_t bytes_written = 0;
+        char *out = (char *)dirp;
+
+        while (cur_idx < total_entries) {
+            size_t namelen = strlen(proc_entries[cur_idx].name);
+            size_t reclen = (offsetof(struct linux_dirent64, d_name) + namelen + 1 + 7) & ~7ULL;
+            if (bytes_written + reclen > count) {
+                break;
+            }
+
+            struct linux_dirent64 *ld = (struct linux_dirent64 *)(out + bytes_written);
+            ld->d_ino = proc_entries[cur_idx].ino;
+            ld->d_off = cur_idx + 1;
+            ld->d_reclen = (uint16_t)reclen;
+            ld->d_type = proc_entries[cur_idx].d_type;
+            memcpy(ld->d_name, proc_entries[cur_idx].name, namelen + 1);
+
+            bytes_written += reclen;
+            cur_idx++;
+        }
+
+        if (bytes_written == 0 && cur_idx < total_entries) {
+            return -LINUX_EINVAL;
+        }
+
+        lseek(fd, cur_idx, SEEK_SET);
+        return bytes_written;
+    }
 
     DIR *d = NULL;
     if (fd >= 0 && fd < DIR_CACHE_MAX && g_dir_cache[fd]) {
@@ -1240,7 +1354,8 @@ int64_t handle_clone(uint64_t flags, void *stack, int *ptid, void *tls, int *cti
 }
 
 int64_t handle_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) {
-    if (!pathname || !buf || bufsiz == 0) return -LINUX_EINVAL;
+    if (!pathname || !buf) return -LINUX_EFAULT;
+    if (bufsiz == 0) return -LINUX_EINVAL;
 
     if (sandbox_is_virtual_path(pathname)) {
         return sandbox_virtual_readlink(pathname, buf, bufsiz);
@@ -1352,22 +1467,21 @@ int64_t handle_fchdir(int fd) {
 }
 
 int64_t handle_setpgid(pid_t pid, pid_t pgid) {
-    if (setpgid(pid, pgid) != 0) {
-        return darwin_to_linux_errno(errno);
-    }
+    if (pid < 0 || pgid < 0) return -LINUX_EINVAL;
+    if (pid > 0 && pid != getpid()) return -LINUX_ESRCH;
     return 0;
 }
 
 int64_t handle_getpgid(pid_t pid) {
-    pid_t ret = getpgid(pid);
-    if (ret < 0) {
-        return darwin_to_linux_errno(errno);
-    }
+    if (pid < 0) return -LINUX_EINVAL;
+    if (pid > 0 && pid != getpid()) return -LINUX_ESRCH;
+    pid_t ret = getpgrp();
+    if (ret <= 0) ret = getpid();
     return ret;
 }
 
 int64_t handle_execve(const char *pathname, char *const argv[], char *const envp[]) {
-    if (!pathname) return -LINUX_EINVAL;
+    if (!pathname) return -LINUX_EFAULT;
 
     char host_path[1024];
     int res = sandbox_resolve_path(LINUX_AT_FDCWD, pathname, host_path, sizeof(host_path), 0);
@@ -1424,7 +1538,7 @@ int64_t handle_execve(const char *pathname, char *const argv[], char *const envp
 }
 
 int64_t handle_unlinkat(int dirfd, const char *pathname, int flags) {
-    if (!pathname) return -LINUX_EINVAL;
+    if (!pathname) return -LINUX_EFAULT;
     char host_path[1024];
     int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), AT_SYMLINK_NOFOLLOW);
     if (res < 0) return res;
@@ -1440,7 +1554,7 @@ int64_t handle_unlinkat(int dirfd, const char *pathname, int flags) {
 }
 
 int64_t handle_mkdirat(int dirfd, const char *pathname, mode_t mode) {
-    if (!pathname) return -LINUX_EINVAL;
+    if (!pathname) return -LINUX_EFAULT;
     char host_path[1024];
     int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), 0);
     if (res < 0) return res;
@@ -1453,7 +1567,7 @@ int64_t handle_mkdirat(int dirfd, const char *pathname, mode_t mode) {
 
 int64_t handle_faccessat(int dirfd, const char *pathname, int mode, int flags) {
     (void)flags;
-    if (!pathname) return -LINUX_EINVAL;
+    if (!pathname) return -LINUX_EFAULT;
     char host_path[1024];
     int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), 0);
     if (res < 0) return res;
@@ -1465,7 +1579,7 @@ int64_t handle_faccessat(int dirfd, const char *pathname, int mode, int flags) {
 }
 
 int64_t handle_renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath) {
-    if (!oldpath || !newpath) return -LINUX_EINVAL;
+    if (!oldpath || !newpath) return -LINUX_EFAULT;
     char old_host[1024], new_host[1024];
     int r1 = sandbox_resolve_path(olddirfd, oldpath, old_host, sizeof(old_host), 0);
     if (r1 < 0) return r1;
@@ -1485,7 +1599,7 @@ int64_t handle_renameat2(int olddirfd, const char *oldpath, int newdirfd, const 
 }
 
 int64_t handle_symlinkat(const char *target, int newdirfd, const char *linkpath) {
-    if (!target || !linkpath) return -LINUX_EINVAL;
+    if (!target || !linkpath) return -LINUX_EFAULT;
     char link_host[1024];
     int res = sandbox_resolve_path(newdirfd, linkpath, link_host, sizeof(link_host), 0);
     if (res < 0) return res;
@@ -1498,7 +1612,7 @@ int64_t handle_symlinkat(const char *target, int newdirfd, const char *linkpath)
 
 int64_t handle_linkat(int olddirfd, const char *oldpath, int newdirfd, const char *linkpath, int flags) {
     (void)flags;
-    if (!oldpath || !linkpath) return -LINUX_EINVAL;
+    if (!oldpath || !linkpath) return -LINUX_EFAULT;
     char old_host[1024], link_host[1024];
     int r1 = sandbox_resolve_path(olddirfd, oldpath, old_host, sizeof(old_host), 0);
     if (r1 < 0) return r1;
@@ -1514,7 +1628,7 @@ int64_t handle_linkat(int olddirfd, const char *oldpath, int newdirfd, const cha
 
 int64_t handle_fchmodat(int dirfd, const char *pathname, mode_t mode, int flags) {
     (void)flags;
-    if (!pathname) return -LINUX_EINVAL;
+    if (!pathname) return -LINUX_EFAULT;
     char host_path[1024];
     int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), 0);
     if (res < 0) return res;
@@ -1526,18 +1640,38 @@ int64_t handle_fchmodat(int dirfd, const char *pathname, mode_t mode, int flags)
 }
 
 int64_t handle_fchmod(int fd, mode_t mode) {
+    if (fd < 0) return -LINUX_EBADF;
     int ret = fchmod(fd, mode);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return 0;
 }
 
 int64_t handle_fchownat(int dirfd, const char *pathname, uid_t owner, gid_t group, int flags) {
-    (void)dirfd; (void)pathname; (void)owner; (void)group; (void)flags;
+    (void)flags;
+    if (!pathname) return -LINUX_EFAULT;
+    char host_path[1024];
+    int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), 0);
+    if (res < 0) return res;
+    if (res == 1) return 0;
+
+    if (access(host_path, F_OK) != 0) {
+        return -LINUX_ENOENT;
+    }
+
+    int ret = chown(host_path, owner, group);
+    if (ret < 0 && errno != EPERM && errno != EACCES) {
+        return darwin_to_linux_errno(errno);
+    }
     return 0;
 }
 
 int64_t handle_fchown(int fd, uid_t owner, gid_t group) {
-    (void)fd; (void)owner; (void)group;
+    if (fd < 0) return -LINUX_EBADF;
+    if (fcntl(fd, F_GETFL) < 0) return -LINUX_EBADF;
+    int ret = fchown(fd, owner, group);
+    if (ret < 0 && errno != EPERM && errno != EACCES) {
+        return darwin_to_linux_errno(errno);
+    }
     return 0;
 }
 
@@ -1581,11 +1715,14 @@ int64_t handle_utimensat(int dirfd, const char *pathname, const struct linux_tim
 }
 
 int64_t handle_sched_getaffinity(pid_t pid, size_t cpusetsize, unsigned long *mask) {
-    (void)pid;
-    if (!mask || cpusetsize < sizeof(unsigned long)) return -LINUX_EINVAL;
+    if (pid < 0 || (pid > 0 && pid != getpid())) return -LINUX_ESRCH;
+    if (cpusetsize == 0) return -LINUX_EINVAL;
+    if (!mask) return -LINUX_EFAULT;
+
     int ncpu = 8;
     size_t size = sizeof(ncpu);
     sysctlbyname("hw.ncpu", &ncpu, &size, NULL, 0);
+    if (ncpu <= 0) ncpu = 8;
 
     memset(mask, 0, cpusetsize);
     for (int i = 0; i < ncpu && i < (int)(cpusetsize * 8); i++) {
@@ -1595,7 +1732,198 @@ int64_t handle_sched_getaffinity(pid_t pid, size_t cpusetsize, unsigned long *ma
 }
 
 int64_t handle_sched_setaffinity(pid_t pid, size_t cpusetsize, const unsigned long *mask) {
-    (void)pid; (void)cpusetsize; (void)mask;
+    if (pid < 0 || (pid > 0 && pid != getpid())) return -LINUX_ESRCH;
+    if (cpusetsize == 0) return -LINUX_EINVAL;
+    if (!mask) return -LINUX_EFAULT;
+    return 0;
+}
+
+/* Wave 1 Syscalls */
+
+int64_t handle_statfs(const char *pathname, struct linux_statfs *buf) {
+    if (!pathname || !buf) return -LINUX_EFAULT;
+
+    char host_path[1024];
+    int res = sandbox_resolve_path(LINUX_AT_FDCWD, pathname, host_path, sizeof(host_path), 0);
+    if (res < 0) return res;
+    if (res == 1) {
+        strncpy(host_path, g_ltm.host_rootfs, sizeof(host_path) - 1);
+        host_path[sizeof(host_path) - 1] = '\0';
+    }
+
+    struct statfs dst;
+    if (statfs(host_path, &dst) != 0) {
+        return darwin_to_linux_errno(errno);
+    }
+
+    memset(buf, 0, sizeof(*buf));
+    buf->f_type = 0xEF53; /* EXT4_SUPER_MAGIC */
+    buf->f_bsize = dst.f_bsize > 0 ? dst.f_bsize : 4096;
+    buf->f_blocks = dst.f_blocks;
+    buf->f_bfree = dst.f_bfree;
+    buf->f_bavail = dst.f_bavail;
+    buf->f_files = dst.f_files;
+    buf->f_ffree = dst.f_ffree;
+    buf->f_fsid.val[0] = dst.f_fsid.val[0];
+    buf->f_fsid.val[1] = dst.f_fsid.val[1];
+    buf->f_namelen = 255;
+    buf->f_frsize = dst.f_bsize > 0 ? dst.f_bsize : 4096;
+    buf->f_flags = 0;
+    return 0;
+}
+
+int64_t handle_fstatfs(int fd, struct linux_statfs *buf) {
+    if (!buf) return -LINUX_EFAULT;
+    if (fd < 0) return -LINUX_EBADF;
+
+    struct statfs dst;
+    if (fstatfs(fd, &dst) != 0) {
+        return darwin_to_linux_errno(errno);
+    }
+
+    memset(buf, 0, sizeof(*buf));
+    buf->f_type = 0xEF53; /* EXT4_SUPER_MAGIC */
+    buf->f_bsize = dst.f_bsize > 0 ? dst.f_bsize : 4096;
+    buf->f_blocks = dst.f_blocks;
+    buf->f_bfree = dst.f_bfree;
+    buf->f_bavail = dst.f_bavail;
+    buf->f_files = dst.f_files;
+    buf->f_ffree = dst.f_ffree;
+    buf->f_fsid.val[0] = dst.f_fsid.val[0];
+    buf->f_fsid.val[1] = dst.f_fsid.val[1];
+    buf->f_namelen = 255;
+    buf->f_frsize = dst.f_bsize > 0 ? dst.f_bsize : 4096;
+    buf->f_flags = 0;
+    return 0;
+}
+
+int64_t handle_truncate(const char *path, off_t length) {
+    if (!path) return -LINUX_EFAULT;
+    if (length < 0) return -LINUX_EINVAL;
+
+    char host_path[1024];
+    int res = sandbox_resolve_path(LINUX_AT_FDCWD, path, host_path, sizeof(host_path), 0);
+    if (res < 0) return res;
+    if (res == 1) return -LINUX_EACCES;
+
+    if (truncate(host_path, length) != 0) {
+        return darwin_to_linux_errno(errno);
+    }
+    return 0;
+}
+
+int64_t handle_ftruncate(int fd, off_t length) {
+    if (fd < 0) return -LINUX_EBADF;
+    if (length < 0) return -LINUX_EINVAL;
+
+    if (ftruncate(fd, length) != 0) {
+        return darwin_to_linux_errno(errno);
+    }
+    return 0;
+}
+
+int64_t handle_fsync(int fd) {
+    if (fd < 0) return -LINUX_EBADF;
+    if (fsync(fd) != 0) {
+        return darwin_to_linux_errno(errno);
+    }
+    return 0;
+}
+
+int64_t handle_fdatasync(int fd) {
+    if (fd < 0) return -LINUX_EBADF;
+    if (fsync(fd) != 0) {
+        return darwin_to_linux_errno(errno);
+    }
+    return 0;
+}
+
+int64_t handle_sched_yield(void) {
+    sched_yield();
+    return 0;
+}
+
+int64_t handle_times(struct linux_tms *buf) {
+    struct tms dt;
+    clock_t ticks = times(&dt);
+    if (ticks == (clock_t)-1) {
+        return darwin_to_linux_errno(errno);
+    }
+
+    if (buf != NULL) {
+        if ((uintptr_t)buf < 0x1000) return -LINUX_EFAULT;
+        buf->tms_utime = dt.tms_utime;
+        buf->tms_stime = dt.tms_stime;
+        buf->tms_cutime = dt.tms_cutime;
+        buf->tms_cstime = dt.tms_cstime;
+    }
+    return (int64_t)ticks;
+}
+
+int64_t handle_getsid(pid_t pid) {
+    if (pid < 0) return -LINUX_EINVAL;
+    if (pid > 0 && pid != getpid()) return -LINUX_ESRCH;
+    pid_t ret = getsid(0);
+    if (ret <= 0) ret = getpid();
+    return ret;
+}
+
+int64_t handle_setsid(void) {
+    pid_t ret = setsid();
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return ret;
+}
+
+int64_t handle_getrusage(int who, struct linux_rusage *usage) {
+    if (!usage) return -LINUX_EFAULT;
+    if (who != 0 && who != -1 && who != 1) return -LINUX_EINVAL;
+
+    int d_who = (who == 1) ? RUSAGE_SELF : who;
+    struct rusage dru;
+    memset(&dru, 0, sizeof(dru));
+    if (getrusage(d_who, &dru) != 0) {
+        return darwin_to_linux_errno(errno);
+    }
+
+    memset(usage, 0, sizeof(*usage));
+    usage->ru_utime.tv_sec = dru.ru_utime.tv_sec;
+    usage->ru_utime.tv_usec = dru.ru_utime.tv_usec;
+    usage->ru_stime.tv_sec = dru.ru_stime.tv_sec;
+    usage->ru_stime.tv_usec = dru.ru_stime.tv_usec;
+    usage->ru_maxrss = dru.ru_maxrss / 1024;
+    usage->ru_ixrss = dru.ru_ixrss;
+    usage->ru_idrss = dru.ru_idrss;
+    usage->ru_isrss = dru.ru_isrss;
+    usage->ru_minflt = dru.ru_minflt;
+    usage->ru_majflt = dru.ru_majflt;
+    usage->ru_nswap = dru.ru_nswap;
+    usage->ru_inblock = dru.ru_inblock;
+    usage->ru_oublock = dru.ru_oublock;
+    usage->ru_msgsnd = dru.ru_msgsnd;
+    usage->ru_msgrcv = dru.ru_msgrcv;
+    usage->ru_nsignals = dru.ru_nsignals;
+    usage->ru_nvcsw = dru.ru_nvcsw;
+    usage->ru_nivcsw = dru.ru_nivcsw;
+    return 0;
+}
+
+int64_t handle_umask(mode_t mask) {
+    mode_t old = umask(mask & 0777);
+    return (int64_t)(old & 0777);
+}
+
+int64_t handle_readahead(int fd, off_t offset, size_t count) {
+    (void)offset; (void)count;
+    if (fd < 0) return -LINUX_EBADF;
+    if (fcntl(fd, F_GETFL) < 0) return -LINUX_EBADF;
+    return 0;
+}
+
+int64_t handle_madvise(void *addr, size_t length, int advice) {
+    if (!addr || ((uintptr_t)addr & 0x3fff) != 0) return -LINUX_EINVAL;
+    if (advice < 0 || advice > 4) return -LINUX_EINVAL;
+    int ret = madvise(addr, length, advice);
+    if (ret < 0) return darwin_to_linux_errno(errno);
     return 0;
 }
 

@@ -112,6 +112,50 @@ struct linux_termios {
     uint8_t  c_cc[19];
 };
 
+/* Linux Statfs 64 (120 bytes) */
+struct linux_statfs {
+    int64_t  f_type;
+    int64_t  f_bsize;
+    int64_t  f_blocks;
+    int64_t  f_bfree;
+    int64_t  f_bavail;
+    int64_t  f_files;
+    int64_t  f_ffree;
+    struct { int32_t val[2]; } f_fsid;
+    int64_t  f_namelen;
+    int64_t  f_frsize;
+    int64_t  f_flags;
+    int64_t  f_spare[4];
+};
+
+/* Linux Times */
+struct linux_tms {
+    long tms_utime;
+    long tms_stime;
+    long tms_cutime;
+    long tms_cstime;
+};
+
+/* Linux Rusage */
+struct linux_rusage {
+    struct linux_timeval ru_utime;
+    struct linux_timeval ru_stime;
+    long   ru_maxrss;
+    long   ru_ixrss;
+    long   ru_idrss;
+    long   ru_isrss;
+    long   ru_minflt;
+    long   ru_majflt;
+    long   ru_nswap;
+    long   ru_inblock;
+    long   ru_oublock;
+    long   ru_msgsnd;
+    long   ru_msgrcv;
+    long   ru_nsignals;
+    long   ru_nvcsw;
+    long   ru_nivcsw;
+};
+
 /* Syscall Dispatcher Registration & Entry */
 int syscall_dispatcher_init(void);
 int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
@@ -238,5 +282,21 @@ int64_t handle_getitimer(int which, void *curr_val);
 int64_t handle_epoll_create1(int flags);
 int64_t handle_epoll_ctl(int epfd, int op, int fd, void *event);
 int64_t handle_epoll_pwait(int epfd, void *events, int maxevents, int timeout, const void *sigmask);
+
+/* Wave 1 Syscalls */
+int64_t handle_statfs(const char *pathname, struct linux_statfs *buf);
+int64_t handle_fstatfs(int fd, struct linux_statfs *buf);
+int64_t handle_truncate(const char *path, off_t length);
+int64_t handle_ftruncate(int fd, off_t length);
+int64_t handle_fsync(int fd);
+int64_t handle_fdatasync(int fd);
+int64_t handle_sched_yield(void);
+int64_t handle_times(struct linux_tms *buf);
+int64_t handle_getsid(pid_t pid);
+int64_t handle_setsid(void);
+int64_t handle_getrusage(int who, struct linux_rusage *usage);
+int64_t handle_umask(mode_t mask);
+int64_t handle_readahead(int fd, off_t offset, size_t count);
+int64_t handle_madvise(void *addr, size_t length, int advice);
 
 #endif /* SYSCALLS_H */
