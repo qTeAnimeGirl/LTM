@@ -133,6 +133,12 @@ struct linux_rlimit64 {
     uint64_t rlim_max;
 };
 
+/* Linux rlimit */
+struct linux_rlimit {
+    uint64_t rlim_cur;
+    uint64_t rlim_max;
+};
+
 /* Linux winsize */
 struct linux_winsize {
     uint16_t ws_row;
@@ -359,4 +365,37 @@ int64_t handle_openat2(int dirfd, const char *pathname, struct linux_open_how *h
 int64_t handle_faccessat2(int dirfd, const char *pathname, int mode, int flags);
 int64_t handle_kill(pid_t pid, int sig);
 
+/* Wave 3 Syscalls */
+/* Extended Attributes (xattr) */
+int64_t handle_setxattr(const char *path, const char *name, const void *value, size_t size, int flags);
+int64_t handle_lsetxattr(const char *path, const char *name, const void *value, size_t size, int flags);
+int64_t handle_fsetxattr(int fd, const char *name, const void *value, size_t size, int flags);
+int64_t handle_getxattr(const char *path, const char *name, void *value, size_t size);
+int64_t handle_lgetxattr(const char *path, const char *name, void *value, size_t size);
+int64_t handle_fgetxattr(int fd, const char *name, void *value, size_t size);
+int64_t handle_listxattr(const char *path, char *list, size_t size);
+int64_t handle_llistxattr(const char *path, char *list, size_t size);
+int64_t handle_flistxattr(int fd, char *list, size_t size);
+int64_t handle_removexattr(const char *path, const char *name);
+int64_t handle_lremovexattr(const char *path, const char *name);
+int64_t handle_fremovexattr(int fd, const char *name);
+
+/* Event & Advanced I/O */
+int64_t handle_eventfd2(unsigned int initval, int flags);
+int64_t handle_preadv(int fd, const struct linux_iovec *iov, int iovcnt, off_t offset);
+int64_t handle_pwritev(int fd, const struct linux_iovec *iov, int iovcnt, off_t offset);
+int64_t handle_sendfile(int out_fd, int in_fd, off_t *offset, size_t count);
+int64_t handle_splice(int fd_in, off_t *off_in, int fd_out, off_t *off_out, size_t len, unsigned int flags);
+int64_t handle_tee(int fd_in, int fd_out, size_t len, unsigned int flags);
+int64_t handle_sync_file_range(int fd, off_t offset, off_t nbytes, unsigned int flags);
+
+/* Process, Clocks & Personality */
+int64_t handle_personality(unsigned long persona);
+int64_t handle_clock_getres(int clockid, struct linux_timespec *res);
+int64_t handle_getrlimit(int resource, struct linux_rlimit *rlim);
+int64_t handle_setrlimit(int resource, const struct linux_rlimit *rlim);
+int64_t handle_prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5);
+int64_t handle_getcpu(unsigned *cpu, unsigned *node, void *tcache);
+
 #endif /* SYSCALLS_H */
+

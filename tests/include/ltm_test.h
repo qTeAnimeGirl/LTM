@@ -26,7 +26,20 @@ typedef unsigned long uintptr_t;
 typedef enum { false = 0, true = 1 } bool;
 
 /* Linux ARM64 System Call Numbers */
+#define SYS_setxattr        5
+#define SYS_lsetxattr       6
+#define SYS_fsetxattr       7
+#define SYS_getxattr        8
+#define SYS_lgetxattr       9
+#define SYS_fgetxattr       10
+#define SYS_listxattr       11
+#define SYS_llistxattr      12
+#define SYS_flistxattr      13
+#define SYS_removexattr     14
+#define SYS_lremovexattr    15
+#define SYS_fremovexattr    16
 #define SYS_getcwd          17
+#define SYS_eventfd2        19
 #define SYS_dup             23
 #define SYS_dup3            24
 #define SYS_flock           32
@@ -57,18 +70,26 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_write           64
 #define SYS_pread64         67
 #define SYS_pwrite64        68
+#define SYS_preadv          69
+#define SYS_pwritev         70
+#define SYS_sendfile        71
 #define SYS_signalfd4       74
+#define SYS_splice          76
+#define SYS_tee             77
 #define SYS_readlinkat      78
 #define SYS_newfstatat      79
 #define SYS_fstat           80
 #define SYS_sync            81
 #define SYS_fsync           82
 #define SYS_fdatasync       83
+#define SYS_sync_file_range 84
 #define SYS_timerfd_create  85
 #define SYS_timerfd_settime 86
 #define SYS_timerfd_gettime 87
+#define SYS_personality     92
 #define SYS_exit            93
 #define SYS_exit_group      94
+#define SYS_clock_getres    114
 #define SYS_clock_nanosleep 115
 #define SYS_sched_setaffinity 122
 #define SYS_sched_getaffinity 123
@@ -82,8 +103,12 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_getsid          156
 #define SYS_setsid          157
 #define SYS_uname           160
+#define SYS_getrlimit       163
+#define SYS_setrlimit       164
 #define SYS_getrusage       165
 #define SYS_umask           166
+#define SYS_prctl           167
+#define SYS_getcpu          168
 #define SYS_getpid          172
 #define SYS_getppid         173
 #define SYS_getuid          174
@@ -232,6 +257,26 @@ typedef enum { false = 0, true = 1 } bool;
 #define ERANGE          34
 #define ENOSYS          38
 #define ELOOP           40
+#define ENODATA         61
+
+/* Extended attributes flags */
+#define XATTR_CREATE    1
+#define XATTR_REPLACE   2
+
+/* Eventfd flags */
+#define EFD_SEMAPHORE   1
+#define EFD_CLOEXEC     02000000
+#define EFD_NONBLOCK    00004000
+
+/* Prctl options */
+#define PR_SET_NAME         15
+#define PR_GET_NAME         16
+#define PR_GET_DUMPABLE     3
+#define PR_SET_DUMPABLE     4
+#define PR_CAPBSET_READ     23
+#define PR_SET_NO_NEW_PRIVS 38
+#define PR_GET_NO_NEW_PRIVS 39
+
 #define ENOTSOCK        88
 #define EDESTADDRREQ    89
 #define EMSGSIZE        90
@@ -1208,6 +1253,106 @@ static inline int sys_prlimit64(int pid, int resource, const void *new_limit, vo
 
 static inline int sys_rseq(void *rseq, uint32_t rseq_len, int flags, uint32_t sig) {
     return (int)sys_syscall4(SYS_rseq, (long)rseq, rseq_len, flags, sig);
+}
+
+static inline int sys_setxattr(const char *path, const char *name, const void *value, size_t size, int flags) {
+    return (int)sys_syscall5(SYS_setxattr, (long)path, (long)name, (long)value, size, flags);
+}
+
+static inline int sys_lsetxattr(const char *path, const char *name, const void *value, size_t size, int flags) {
+    return (int)sys_syscall5(SYS_lsetxattr, (long)path, (long)name, (long)value, size, flags);
+}
+
+static inline int sys_fsetxattr(int fd, const char *name, const void *value, size_t size, int flags) {
+    return (int)sys_syscall5(SYS_fsetxattr, fd, (long)name, (long)value, size, flags);
+}
+
+static inline ssize_t sys_getxattr(const char *path, const char *name, void *value, size_t size) {
+    return (ssize_t)sys_syscall4(SYS_getxattr, (long)path, (long)name, (long)value, size);
+}
+
+static inline ssize_t sys_lgetxattr(const char *path, const char *name, void *value, size_t size) {
+    return (ssize_t)sys_syscall4(SYS_lgetxattr, (long)path, (long)name, (long)value, size);
+}
+
+static inline ssize_t sys_fgetxattr(int fd, const char *name, void *value, size_t size) {
+    return (ssize_t)sys_syscall4(SYS_fgetxattr, fd, (long)name, (long)value, size);
+}
+
+static inline ssize_t sys_listxattr(const char *path, char *list, size_t size) {
+    return (ssize_t)sys_syscall3(SYS_listxattr, (long)path, (long)list, size);
+}
+
+static inline ssize_t sys_llistxattr(const char *path, char *list, size_t size) {
+    return (ssize_t)sys_syscall3(SYS_llistxattr, (long)path, (long)list, size);
+}
+
+static inline ssize_t sys_flistxattr(int fd, char *list, size_t size) {
+    return (ssize_t)sys_syscall3(SYS_flistxattr, fd, (long)list, size);
+}
+
+static inline int sys_removexattr(const char *path, const char *name) {
+    return (int)sys_syscall2(SYS_removexattr, (long)path, (long)name);
+}
+
+static inline int sys_lremovexattr(const char *path, const char *name) {
+    return (int)sys_syscall2(SYS_lremovexattr, (long)path, (long)name);
+}
+
+static inline int sys_fremovexattr(int fd, const char *name) {
+    return (int)sys_syscall2(SYS_fremovexattr, fd, (long)name);
+}
+
+static inline int sys_eventfd2(unsigned int initval, int flags) {
+    return (int)sys_syscall2(SYS_eventfd2, initval, flags);
+}
+
+static inline ssize_t sys_preadv(int fd, const struct linux_iovec *iov, int iovcnt, off_t offset) {
+    return (ssize_t)sys_syscall4(SYS_preadv, fd, (long)iov, iovcnt, offset);
+}
+
+static inline ssize_t sys_pwritev(int fd, const struct linux_iovec *iov, int iovcnt, off_t offset) {
+    return (ssize_t)sys_syscall4(SYS_pwritev, fd, (long)iov, iovcnt, offset);
+}
+
+static inline ssize_t sys_sendfile(int out_fd, int in_fd, off_t *offset, size_t count) {
+    return (ssize_t)sys_syscall4(SYS_sendfile, out_fd, in_fd, (long)offset, count);
+}
+
+static inline ssize_t sys_splice(int fd_in, off_t *off_in, int fd_out, off_t *off_out, size_t len, unsigned int flags) {
+    return (ssize_t)sys_syscall6(SYS_splice, fd_in, (long)off_in, fd_out, (long)off_out, len, flags);
+}
+
+static inline ssize_t sys_tee(int fd_in, int fd_out, size_t len, unsigned int flags) {
+    return (ssize_t)sys_syscall4(SYS_tee, fd_in, fd_out, len, flags);
+}
+
+static inline int sys_sync_file_range(int fd, off_t offset, off_t nbytes, unsigned int flags) {
+    return (int)sys_syscall4(SYS_sync_file_range, fd, offset, nbytes, flags);
+}
+
+static inline int sys_personality(unsigned long persona) {
+    return (int)sys_syscall1(SYS_personality, persona);
+}
+
+static inline int sys_clock_getres(int clockid, struct linux_timespec *res) {
+    return (int)sys_syscall2(SYS_clock_getres, clockid, (long)res);
+}
+
+static inline int sys_getrlimit(int resource, struct linux_rlimit *rlim) {
+    return (int)sys_syscall2(SYS_getrlimit, resource, (long)rlim);
+}
+
+static inline int sys_setrlimit(int resource, const struct linux_rlimit *rlim) {
+    return (int)sys_syscall2(SYS_setrlimit, resource, (long)rlim);
+}
+
+static inline int sys_prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5) {
+    return (int)sys_syscall5(SYS_prctl, option, arg2, arg3, arg4, arg5);
+}
+
+static inline int sys_getcpu(unsigned *cpu, unsigned *node, void *tcache) {
+    return (int)sys_syscall3(SYS_getcpu, (long)cpu, (long)node, (long)tcache);
 }
 
 /* String / memory utilities */

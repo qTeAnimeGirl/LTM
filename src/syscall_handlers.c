@@ -11,6 +11,7 @@
 #include <sys/select.h>
 #include <sys/file.h>
 #include <dispatch/dispatch.h>
+#include <sys/xattr.h>
 
 /* Futex bucket structure */
 typedef struct {
@@ -38,9 +39,58 @@ static DIR *g_dir_cache[DIR_CACHE_MAX];
 #define MAX_TRACKED_FDS 1024
 static bool g_sock_is_icmp[MAX_TRACKED_FDS];
 
+/* Eventfd Emulation */
+typedef struct {
+    int read_fd;
+    int write_fd;
+    int flags;
+    bool in_use;
+} eventfd_entry_t;
+
+#define MAX_EVENTFDS 64
+static eventfd_entry_t g_eventfds[MAX_EVENTFDS];
+static pthread_mutex_t g_eventfd_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void ltm_eventfd_close(int fd) {
+    if (fd < 0) return;
+    pthread_mutex_lock(&g_eventfd_mutex);
+    for (int i = 0; i < MAX_EVENTFDS; i++) {
+        if (g_eventfds[i].in_use && g_eventfds[i].read_fd == fd) {
+            if (g_eventfds[i].write_fd >= 0) {
+                close(g_eventfds[i].write_fd);
+                g_eventfds[i].write_fd = -1;
+            }
+            g_eventfds[i].in_use = false;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_eventfd_mutex);
+}
+
+static int ltm_eventfd_get_write_fd(int fd) {
+    if (fd < 0) return -1;
+    int wfd = -1;
+    pthread_mutex_lock(&g_eventfd_mutex);
+    for (int i = 0; i < MAX_EVENTFDS; i++) {
+        if (g_eventfds[i].in_use && g_eventfds[i].read_fd == fd) {
+            wfd = g_eventfds[i].write_fd;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_eventfd_mutex);
+    return wfd;
+}
+
+static bool ltm_eventfd_is_eventfd(int fd) {
+    return ltm_eventfd_get_write_fd(fd) >= 0;
+}
+
 /* File I/O */
 int64_t handle_read(int fd, void *buf, size_t count) {
     if (count > 0 && !buf) return -LINUX_EFAULT;
+    if (ltm_eventfd_is_eventfd(fd)) {
+        if (count < sizeof(uint64_t)) return -LINUX_EINVAL;
+    }
     ssize_t ret = read(fd, buf, count);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return ret;
@@ -48,6 +98,15 @@ int64_t handle_read(int fd, void *buf, size_t count) {
 
 int64_t handle_write(int fd, const void *buf, size_t count) {
     if (count > 0 && !buf) return -LINUX_EFAULT;
+    int ev_wfd = ltm_eventfd_get_write_fd(fd);
+    if (ev_wfd >= 0) {
+        if (count < sizeof(uint64_t)) return -LINUX_EINVAL;
+        uint64_t val = *(const uint64_t *)buf;
+        if (val == 0xffffffffffffffffULL) return -LINUX_EINVAL;
+        ssize_t ret = write(ev_wfd, &val, sizeof(val));
+        if (ret < 0) return darwin_to_linux_errno(errno);
+        return sizeof(uint64_t);
+    }
     ssize_t ret = write(fd, buf, count);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return ret;
@@ -186,6 +245,7 @@ int64_t handle_close(int fd) {
     ltm_epoll_close(fd);
     ltm_timerfd_close(fd);
     ltm_signalfd_close(fd);
+    ltm_eventfd_close(fd);
     int ret = close(fd);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return 0;
@@ -3384,4 +3444,404 @@ int64_t handle_faccessat2(int dirfd, const char *pathname, int mode, int flags) 
     if (ret < 0) return darwin_to_linux_errno(errno);
     return 0;
 }
+
+/* ========================================================================= */
+/* Wave 3 System Call Handlers                                               */
+/* ========================================================================= */
+
+/* Extended Attributes (xattr) */
+int64_t handle_setxattr(const char *path, const char *name, const void *value, size_t size, int flags) {
+    if (!path || !name) return -LINUX_EFAULT;
+    if (size > 0 && !value) return -LINUX_EFAULT;
+    char host_path[1024];
+    int res = sandbox_resolve_path(LINUX_AT_FDCWD, path, host_path, sizeof(host_path), 0);
+    if (res < 0) return res;
+
+    int dflags = 0;
+    if (flags & 1 /* XATTR_CREATE */) dflags |= XATTR_CREATE;
+    if (flags & 2 /* XATTR_REPLACE */) dflags |= XATTR_REPLACE;
+
+    int ret = setxattr(host_path, name, value, size, 0, dflags);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_lsetxattr(const char *path, const char *name, const void *value, size_t size, int flags) {
+    if (!path || !name) return -LINUX_EFAULT;
+    if (size > 0 && !value) return -LINUX_EFAULT;
+    char host_path[1024];
+    int res = sandbox_resolve_path(LINUX_AT_FDCWD, path, host_path, sizeof(host_path), AT_SYMLINK_NOFOLLOW);
+    if (res < 0) return res;
+
+    int dflags = XATTR_NOFOLLOW;
+    if (flags & 1) dflags |= XATTR_CREATE;
+    if (flags & 2) dflags |= XATTR_REPLACE;
+
+    int ret = setxattr(host_path, name, value, size, 0, dflags);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_fsetxattr(int fd, const char *name, const void *value, size_t size, int flags) {
+    if (fd < 0) return -LINUX_EBADF;
+    if (!name) return -LINUX_EFAULT;
+    if (size > 0 && !value) return -LINUX_EFAULT;
+
+    int dflags = 0;
+    if (flags & 1) dflags |= XATTR_CREATE;
+    if (flags & 2) dflags |= XATTR_REPLACE;
+
+    int ret = fsetxattr(fd, name, value, size, 0, dflags);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_getxattr(const char *path, const char *name, void *value, size_t size) {
+    if (!path || !name) return -LINUX_EFAULT;
+    if (size > 0 && !value) return -LINUX_EFAULT;
+    char host_path[1024];
+    int res = sandbox_resolve_path(LINUX_AT_FDCWD, path, host_path, sizeof(host_path), 0);
+    if (res < 0) return res;
+
+    ssize_t ret = getxattr(host_path, name, value, size, 0, 0);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return ret;
+}
+
+int64_t handle_lgetxattr(const char *path, const char *name, void *value, size_t size) {
+    if (!path || !name) return -LINUX_EFAULT;
+    if (size > 0 && !value) return -LINUX_EFAULT;
+    char host_path[1024];
+    int res = sandbox_resolve_path(LINUX_AT_FDCWD, path, host_path, sizeof(host_path), AT_SYMLINK_NOFOLLOW);
+    if (res < 0) return res;
+
+    ssize_t ret = getxattr(host_path, name, value, size, 0, XATTR_NOFOLLOW);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return ret;
+}
+
+int64_t handle_fgetxattr(int fd, const char *name, void *value, size_t size) {
+    if (fd < 0) return -LINUX_EBADF;
+    if (!name) return -LINUX_EFAULT;
+    if (size > 0 && !value) return -LINUX_EFAULT;
+
+    ssize_t ret = fgetxattr(fd, name, value, size, 0, 0);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return ret;
+}
+
+int64_t handle_listxattr(const char *path, char *list, size_t size) {
+    if (!path) return -LINUX_EFAULT;
+    if (size > 0 && !list) return -LINUX_EFAULT;
+    char host_path[1024];
+    int res = sandbox_resolve_path(LINUX_AT_FDCWD, path, host_path, sizeof(host_path), 0);
+    if (res < 0) return res;
+
+    ssize_t ret = listxattr(host_path, list, size, 0);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return ret;
+}
+
+int64_t handle_llistxattr(const char *path, char *list, size_t size) {
+    if (!path) return -LINUX_EFAULT;
+    if (size > 0 && !list) return -LINUX_EFAULT;
+    char host_path[1024];
+    int res = sandbox_resolve_path(LINUX_AT_FDCWD, path, host_path, sizeof(host_path), AT_SYMLINK_NOFOLLOW);
+    if (res < 0) return res;
+
+    ssize_t ret = listxattr(host_path, list, size, XATTR_NOFOLLOW);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return ret;
+}
+
+int64_t handle_flistxattr(int fd, char *list, size_t size) {
+    if (fd < 0) return -LINUX_EBADF;
+    if (size > 0 && !list) return -LINUX_EFAULT;
+
+    ssize_t ret = flistxattr(fd, list, size, 0);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return ret;
+}
+
+int64_t handle_removexattr(const char *path, const char *name) {
+    if (!path || !name) return -LINUX_EFAULT;
+    char host_path[1024];
+    int res = sandbox_resolve_path(LINUX_AT_FDCWD, path, host_path, sizeof(host_path), 0);
+    if (res < 0) return res;
+
+    int ret = removexattr(host_path, name, 0);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_lremovexattr(const char *path, const char *name) {
+    if (!path || !name) return -LINUX_EFAULT;
+    char host_path[1024];
+    int res = sandbox_resolve_path(LINUX_AT_FDCWD, path, host_path, sizeof(host_path), AT_SYMLINK_NOFOLLOW);
+    if (res < 0) return res;
+
+    int ret = removexattr(host_path, name, XATTR_NOFOLLOW);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_fremovexattr(int fd, const char *name) {
+    if (fd < 0) return -LINUX_EBADF;
+    if (!name) return -LINUX_EFAULT;
+
+    int ret = fremovexattr(fd, name, 0);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+/* Event & Advanced I/O */
+#define LINUX_EFD_SEMAPHORE 1
+#define LINUX_EFD_CLOEXEC   02000000
+#define LINUX_EFD_NONBLOCK  00004000
+
+int64_t handle_eventfd2(unsigned int initval, int flags) {
+    if (flags & ~(LINUX_EFD_SEMAPHORE | LINUX_EFD_CLOEXEC | LINUX_EFD_NONBLOCK)) {
+        return -LINUX_EINVAL;
+    }
+    int p[2];
+    if (pipe(p) != 0) return darwin_to_linux_errno(errno);
+
+    if (flags & LINUX_EFD_CLOEXEC) {
+        fcntl(p[0], F_SETFD, FD_CLOEXEC);
+        fcntl(p[1], F_SETFD, FD_CLOEXEC);
+    }
+    if (flags & LINUX_EFD_NONBLOCK) {
+        int fl0 = fcntl(p[0], F_GETFL, 0);
+        int fl1 = fcntl(p[1], F_GETFL, 0);
+        fcntl(p[0], F_SETFL, fl0 | O_NONBLOCK);
+        fcntl(p[1], F_SETFL, fl1 | O_NONBLOCK);
+    }
+
+    if (initval > 0) {
+        uint64_t val = initval;
+        write(p[1], &val, sizeof(val));
+    }
+
+    pthread_mutex_lock(&g_eventfd_mutex);
+    for (int i = 0; i < MAX_EVENTFDS; i++) {
+        if (!g_eventfds[i].in_use) {
+            g_eventfds[i].read_fd = p[0];
+            g_eventfds[i].write_fd = p[1];
+            g_eventfds[i].flags = flags;
+            g_eventfds[i].in_use = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_eventfd_mutex);
+
+    return p[0];
+}
+
+int64_t handle_preadv(int fd, const struct linux_iovec *iov, int iovcnt, off_t offset) {
+    if (fd < 0) return -LINUX_EBADF;
+    if (iovcnt < 0 || iovcnt > 1024) return -LINUX_EINVAL;
+    if (offset < 0) return -LINUX_EINVAL;
+    if (iovcnt == 0) return 0;
+    if (!iov) return -LINUX_EFAULT;
+
+    ssize_t total = 0;
+    off_t cur_off = offset;
+    for (int i = 0; i < iovcnt; i++) {
+        if (iov[i].iov_len == 0) continue;
+        if (!iov[i].iov_base) return -LINUX_EFAULT;
+
+        ssize_t nr = pread(fd, (void *)(uintptr_t)iov[i].iov_base, iov[i].iov_len, cur_off);
+        if (nr <= 0) {
+            if (nr < 0 && total == 0) return darwin_to_linux_errno(errno);
+            break;
+        }
+        total += nr;
+        cur_off += nr;
+        if ((size_t)nr < iov[i].iov_len) break;
+    }
+    return total;
+}
+
+int64_t handle_pwritev(int fd, const struct linux_iovec *iov, int iovcnt, off_t offset) {
+    if (fd < 0) return -LINUX_EBADF;
+    if (iovcnt < 0 || iovcnt > 1024) return -LINUX_EINVAL;
+    if (offset < 0) return -LINUX_EINVAL;
+    if (iovcnt == 0) return 0;
+    if (!iov) return -LINUX_EFAULT;
+
+    ssize_t total = 0;
+    off_t cur_off = offset;
+    for (int i = 0; i < iovcnt; i++) {
+        if (iov[i].iov_len == 0) continue;
+        if (!iov[i].iov_base) return -LINUX_EFAULT;
+
+        ssize_t nw = pwrite(fd, (const void *)(uintptr_t)iov[i].iov_base, iov[i].iov_len, cur_off);
+        if (nw <= 0) {
+            if (nw < 0 && total == 0) return darwin_to_linux_errno(errno);
+            break;
+        }
+        total += nw;
+        cur_off += nw;
+        if ((size_t)nw < iov[i].iov_len) break;
+    }
+    return total;
+}
+
+int64_t handle_sendfile(int out_fd, int in_fd, off_t *offset, size_t count) {
+    if (out_fd < 0 || in_fd < 0) return -LINUX_EBADF;
+    if (count == 0) return 0;
+
+    off_t cur_off = offset ? *offset : lseek(in_fd, 0, SEEK_CUR);
+    if (cur_off < 0) return darwin_to_linux_errno(errno);
+
+    char buf[65536];
+    size_t total = 0;
+    while (total < count) {
+        size_t chunk = count - total;
+        if (chunk > sizeof(buf)) chunk = sizeof(buf);
+
+        ssize_t nr = pread(in_fd, buf, chunk, cur_off + total);
+        if (nr <= 0) {
+            if (nr < 0 && total == 0) return darwin_to_linux_errno(errno);
+            break;
+        }
+        ssize_t nw = write(out_fd, buf, nr);
+        if (nw < 0) {
+            if (total == 0) return darwin_to_linux_errno(errno);
+            break;
+        }
+        total += nw;
+        if (nw < nr) break;
+    }
+
+    if (offset) {
+        *offset += total;
+    } else {
+        lseek(in_fd, cur_off + total, SEEK_SET);
+    }
+    return total;
+}
+
+int64_t handle_splice(int fd_in, off_t *off_in, int fd_out, off_t *off_out, size_t len, unsigned int flags) {
+    (void)flags;
+    if (fd_in < 0 || fd_out < 0) return -LINUX_EBADF;
+    if (len == 0) return 0;
+
+    char buf[65536];
+    size_t chunk = len > sizeof(buf) ? sizeof(buf) : len;
+    ssize_t nr;
+    if (off_in) {
+        nr = pread(fd_in, buf, chunk, *off_in);
+    } else {
+        nr = read(fd_in, buf, chunk);
+    }
+    if (nr <= 0) {
+        if (nr < 0) return darwin_to_linux_errno(errno);
+        return 0;
+    }
+
+    ssize_t nw;
+    if (off_out) {
+        nw = pwrite(fd_out, buf, nr, *off_out);
+    } else {
+        nw = write(fd_out, buf, nr);
+    }
+    if (nw < 0) return darwin_to_linux_errno(errno);
+
+    if (off_in) *off_in += nw;
+    if (off_out) *off_out += nw;
+    return nw;
+}
+
+int64_t handle_tee(int fd_in, int fd_out, size_t len, unsigned int flags) {
+    (void)flags;
+    if (fd_in < 0 || fd_out < 0) return -LINUX_EBADF;
+    if (len == 0) return 0;
+
+    char buf[65536];
+    size_t chunk = len > sizeof(buf) ? sizeof(buf) : len;
+    ssize_t nr = read(fd_in, buf, chunk);
+    if (nr <= 0) {
+        if (nr < 0) return darwin_to_linux_errno(errno);
+        return 0;
+    }
+    ssize_t nw = write(fd_out, buf, nr);
+    if (nw < 0) return darwin_to_linux_errno(errno);
+    return nw;
+}
+
+int64_t handle_sync_file_range(int fd, off_t offset, off_t nbytes, unsigned int flags) {
+    (void)flags;
+    if (fd < 0) return -LINUX_EBADF;
+    if (offset < 0 || nbytes < 0) return -LINUX_EINVAL;
+    if (fcntl(fd, F_GETFD) < 0) return -LINUX_EBADF;
+    fsync(fd);
+    return 0;
+}
+
+/* Process, Clocks & Personality */
+int64_t handle_personality(unsigned long persona) {
+    (void)persona;
+    return 0; /* PER_LINUX */
+}
+
+int64_t handle_clock_getres(int clockid, struct linux_timespec *res) {
+    if (clockid < 0 || clockid > 15) return -LINUX_EINVAL;
+    if (res) {
+        res->tv_sec = 0;
+        res->tv_nsec = 1; /* 1ns resolution on Apple Silicon */
+    }
+    return 0;
+}
+
+int64_t handle_getrlimit(int resource, struct linux_rlimit *rlim) {
+    if (resource < 0 || resource > 15) return -LINUX_EINVAL;
+    if (!rlim) return -LINUX_EFAULT;
+    struct linux_rlimit64 l64;
+    int ret = handle_prlimit64(0, resource, NULL, &l64);
+    if (ret < 0) return ret;
+    rlim->rlim_cur = l64.rlim_cur;
+    rlim->rlim_max = l64.rlim_max;
+    return 0;
+}
+
+int64_t handle_setrlimit(int resource, const struct linux_rlimit *rlim) {
+    if (resource < 0 || resource > 15) return -LINUX_EINVAL;
+    if (!rlim) return -LINUX_EFAULT;
+    return 0;
+}
+
+int64_t handle_prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5) {
+    (void)arg3; (void)arg4; (void)arg5;
+    /* PR_SET_NAME = 15 */
+    if (option == 15) {
+        if (!arg2) return -LINUX_EFAULT;
+        pthread_setname_np((const char *)arg2);
+        return 0;
+    }
+    /* PR_GET_NAME = 16 */
+    if (option == 16) {
+        if (!arg2) return -LINUX_EFAULT;
+        pthread_getname_np(pthread_self(), (char *)arg2, 16);
+        return 0;
+    }
+    /* PR_SET_DUMPABLE = 4, PR_GET_DUMPABLE = 3 */
+    if (option == 3) return 1;
+    if (option == 4) return 0;
+    /* PR_SET_NO_NEW_PRIVS = 38, PR_GET_NO_NEW_PRIVS = 39 */
+    if (option == 38) return 0;
+    if (option == 39) return 0;
+    /* PR_CAPBSET_READ = 23 */
+    if (option == 23) return 1;
+
+    return -LINUX_EINVAL;
+}
+
+int64_t handle_getcpu(unsigned *cpu, unsigned *node, void *tcache) {
+    (void)tcache;
+    if (cpu) *cpu = 0;
+    if (node) *node = 0;
+    return 0;
+}
+
 

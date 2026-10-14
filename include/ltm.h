@@ -668,6 +668,9 @@ static inline int64_t darwin_to_linux_errno(int err) {
         case EHOSTUNREACH:    return -LINUX_EHOSTUNREACH;
         case EALREADY:        return -LINUX_EALREADY;
         case EINPROGRESS:     return -LINUX_EINPROGRESS;
+#ifdef ENOATTR
+        case ENOATTR:         return -LINUX_ENODATA;
+#endif
         default:              return -LINUX_EINVAL;
     }
 }

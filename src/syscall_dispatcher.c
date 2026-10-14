@@ -1037,6 +1037,84 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case LINUX_SYS_rseq:
             ret = -LINUX_ENOSYS;
             break;
+
+        /* Wave 3 Syscalls */
+        case LINUX_SYS_setxattr:
+            ret = handle_setxattr((const char *)a0, (const char *)a1, (const void *)a2, (size_t)a3, (int)a4);
+            break;
+        case LINUX_SYS_lsetxattr:
+            ret = handle_lsetxattr((const char *)a0, (const char *)a1, (const void *)a2, (size_t)a3, (int)a4);
+            break;
+        case LINUX_SYS_fsetxattr:
+            ret = handle_fsetxattr((int)a0, (const char *)a1, (const void *)a2, (size_t)a3, (int)a4);
+            break;
+        case LINUX_SYS_getxattr:
+            ret = handle_getxattr((const char *)a0, (const char *)a1, (void *)a2, (size_t)a3);
+            break;
+        case LINUX_SYS_lgetxattr:
+            ret = handle_lgetxattr((const char *)a0, (const char *)a1, (void *)a2, (size_t)a3);
+            break;
+        case LINUX_SYS_fgetxattr:
+            ret = handle_fgetxattr((int)a0, (const char *)a1, (void *)a2, (size_t)a3);
+            break;
+        case LINUX_SYS_listxattr:
+            ret = handle_listxattr((const char *)a0, (char *)a1, (size_t)a2);
+            break;
+        case LINUX_SYS_llistxattr:
+            ret = handle_llistxattr((const char *)a0, (char *)a1, (size_t)a2);
+            break;
+        case LINUX_SYS_flistxattr:
+            ret = handle_flistxattr((int)a0, (char *)a1, (size_t)a2);
+            break;
+        case LINUX_SYS_removexattr:
+            ret = handle_removexattr((const char *)a0, (const char *)a1);
+            break;
+        case LINUX_SYS_lremovexattr:
+            ret = handle_lremovexattr((const char *)a0, (const char *)a1);
+            break;
+        case LINUX_SYS_fremovexattr:
+            ret = handle_fremovexattr((int)a0, (const char *)a1);
+            break;
+        case LINUX_SYS_eventfd2:
+            ret = handle_eventfd2((unsigned int)a0, (int)a1);
+            break;
+        case LINUX_SYS_preadv:
+            ret = handle_preadv((int)a0, (const struct linux_iovec *)a1, (int)a2, (off_t)a3);
+            break;
+        case LINUX_SYS_pwritev:
+            ret = handle_pwritev((int)a0, (const struct linux_iovec *)a1, (int)a2, (off_t)a3);
+            break;
+        case LINUX_SYS_sendfile:
+            ret = handle_sendfile((int)a0, (int)a1, (off_t *)a2, (size_t)a3);
+            break;
+        case LINUX_SYS_splice:
+            ret = handle_splice((int)a0, (off_t *)a1, (int)a2, (off_t *)a3, (size_t)a4, (unsigned int)a5);
+            break;
+        case LINUX_SYS_tee:
+            ret = handle_tee((int)a0, (int)a1, (size_t)a2, (unsigned int)a3);
+            break;
+        case LINUX_SYS_sync_file_range:
+            ret = handle_sync_file_range((int)a0, (off_t)a1, (off_t)a2, (unsigned int)a3);
+            break;
+        case LINUX_SYS_personality:
+            ret = handle_personality((unsigned long)a0);
+            break;
+        case LINUX_SYS_clock_getres:
+            ret = handle_clock_getres((int)a0, (struct linux_timespec *)a1);
+            break;
+        case LINUX_SYS_getrlimit:
+            ret = handle_getrlimit((int)a0, (struct linux_rlimit *)a1);
+            break;
+        case LINUX_SYS_setrlimit:
+            ret = handle_setrlimit((int)a0, (const struct linux_rlimit *)a1);
+            break;
+        case LINUX_SYS_prctl:
+            ret = handle_prctl((int)a0, (unsigned long)a1, (unsigned long)a2, (unsigned long)a3, (unsigned long)a4);
+            break;
+        case LINUX_SYS_getcpu:
+            ret = handle_getcpu((unsigned *)a0, (unsigned *)a1, (void *)a2);
+            break;
+
         default:
             ltm_log_debug("Unhandled Linux syscall: %llu (%s)", (unsigned long long)num, linux_syscall_name((int)num));
             ret = -LINUX_ENOSYS;

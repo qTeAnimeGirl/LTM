@@ -2165,3 +2165,61 @@ Every single `test_sys_<number>_<name>.c` file must strictly implement:
      ALL 144 TESTS PASSED! Translation module validated with 100% accuracy.
      ```
 
+---
+
+## [Sprint 12 Execution Report: Wave 3 Syscall Expansion & Extended Attributes / Advanced I/O Subsystem]
+- **Timestamp**: 2026-10-14 20:00 UTC
+- **Author**: Antigravity & The LTM Engineering Swarm (Architect, Critic, Coder, Tester)
+- **Status**: ALL 169 TESTS PASSED (169 of 169) - 100.0% Pass Rate
+- **Achievements & Metrics**:
+  1. *25 New Linux ARM64 System Calls Implemented & Dispatched*:
+     - **Extended Attributes (`xattr`) Subsystem (12 Syscalls)**:
+       - `setxattr` (5), `lsetxattr` (6), `fsetxattr` (7): Extended attribute writing with Linux flag translation (`XATTR_CREATE`, `XATTR_REPLACE`) mapped to Darwin `<sys/xattr.h>`.
+       - `getxattr` (8), `lgetxattr` (9), `fgetxattr` (10): Extended attribute reading with `size=0` attribute length query support and Darwin `ENOATTR` (93) -> Linux `-LINUX_ENODATA` (-61) errno mapping.
+       - `listxattr` (11), `llistxattr` (12), `flistxattr` (13): Extended attribute name enumeration with `size=0` buffer size probe support.
+       - `removexattr` (14), `lremovexattr` (15), `fremovexattr` (16): Extended attribute deletion with `ENOATTR` translation.
+     - **Event & Advanced IPC Subsystem (1 Syscall)**:
+       - `eventfd2` (19): Built a bidirectional pipe bridge with eventfd table tracking (`g_eventfds`). Guest `write(efd, ...)` writes into the pipe write end, while guest `read(efd, ...)` reads from the pipe read end. Fully compatible with Darwin `kqueue`, `poll`, `select`, and LTM epoll!
+     - **Advanced Vector & Zero-Copy File I/O (6 Syscalls)**:
+       - `preadv` (69) & `pwritev` (70): Vectored positioned I/O iterating over `struct linux_iovec` arrays at specific offsets without modifying file pointers.
+       - `sendfile` (71): In-kernel zero-copy file transfer between descriptors with optional offset updating.
+       - `splice` (76): Direct data streaming between descriptors and pipes.
+       - `tee` (77): Pipe-to-pipe data duplication without data consumption.
+       - `sync_file_range` (84): Data synchronization with disk.
+     - **System, Scheduling & Process Control Subsystem (6 Syscalls)**:
+       - `personality` (92): Linux execution personality domain management (returns `PER_LINUX = 0`).
+       - `clock_getres` (114): Clock resolution reporting (`1ns` nanosecond resolution on Apple Silicon hardware).
+       - `getrlimit` (163) & `setrlimit` (164): Resource limit querying and configuration (`struct linux_rlimit`).
+       - `prctl` (167): Process control handling `PR_SET_NAME` / `PR_GET_NAME` (mapped to `pthread_setname_np` / `pthread_getname_np`), `PR_GET_DUMPABLE`, and `PR_CAPBSET_READ`.
+       - `getcpu` (168): Current CPU core and NUMA node reporting.
+  2. *Strict 3-Way Verification Mandate (25 New Dedicated Standalone Unit Tests)*:
+     - 25 new standalone Linux ARM64 ELF binaries added in `tests/syscalls/`:
+       - `test_sys_005_setxattr.c` .. `test_sys_016_fremovexattr.c`
+       - `test_sys_019_eventfd2.c`
+       - `test_sys_069_preadv.c`, `test_sys_070_pwritev.c`, `test_sys_071_sendfile.c`
+       - `test_sys_076_splice.c`, `test_sys_077_tee.c`, `test_sys_084_sync_file_range.c`
+       - `test_sys_092_personality.c`, `test_sys_114_clock_getres.c`
+       - `test_sys_163_getrlimit.c`, `test_sys_164_setrlimit.c`
+       - `test_sys_167_prctl.c`, `test_sys_168_getcpu.c`
+     - Each test rigorously verifies:
+       - **Case A**: Happy Path (expected parameters, return values, and data integrity).
+       - **Case B**: Boundary / Edge Cases (zero lengths, empty buffers, replace flags, size probing).
+       - **Case C**: Error Handling & Errno Translation (`-EBADF`, `-EFAULT`, `-EINVAL`, `-ENOENT`, `-ENODATA`).
+  3. *Five Golden Architectural Invariants Upheld*:
+     - **16KB Memory Page Rule**: Maintained across all allocators and W^X memory mappings.
+     - **36-Byte Termios Rule**: Linux termios remains strictly isolated from 72-byte Darwin termios.
+     - **Zero Sandbox Breakouts**: Strict sandboxing enforced on all 12 xattr syscalls through `sandbox_resolve_path()`.
+     - **No Hardcoded Hardware Simulation**: Host telemetry queried dynamically via `sysctl` and Mach APIs.
+     - **Signal Frame Cleanliness**: Assembly restorer `_ltm_resume_context` preserves register state.
+  4. *Final Test Verification Matrix*:
+     ```
+     ======================================================
+                        TEST SUITE SUMMARY                 
+     ======================================================
+     Total Tests : 169
+     Passed      : 169
+     Failed      : 0
+     ALL 169 TESTS PASSED! Translation module validated with 100% accuracy.
+     ```
+
+
