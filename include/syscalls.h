@@ -508,11 +508,114 @@ int64_t handle_msgsnd(int msqid, const void *msgp, size_t msgsz, int msgflg);
 int64_t handle_semget(key_t key, int nsems, int semflg);
 int64_t handle_semctl(int semid, int semnum, int cmd, unsigned long arg);
 int64_t handle_semop(int semid, void *sops, size_t nsops);
+int64_t handle_semtimedop(int semid, void *sops, size_t nsops, const struct linux_timespec *timeout);
 int64_t handle_execveat(int dirfd, const char *pathname, char *const argv[], char *const envp[], int flags);
 int64_t handle_preadv2(int fd, const struct linux_iovec *iov, int iovcnt, off_t offset, int flags);
 int64_t handle_pwritev2(int fd, const struct linux_iovec *iov, int iovcnt, off_t offset, int flags);
 int64_t handle_statx(int dirfd, const char *pathname, int flags, unsigned int mask, struct linux_statx *statxbuf);
 int64_t handle_pidfd_open(pid_t pid, unsigned int flags);
+
+/* Wave 6 Structures */
+struct linux_shmid_ds {
+    struct {
+        uint32_t key;
+        uint32_t uid;
+        uint32_t gid;
+        uint32_t cuid;
+        uint32_t cgid;
+        uint32_t mode;
+        uint16_t seq;
+        uint16_t pad;
+        uint64_t unused1;
+        uint64_t unused2;
+    } shm_perm;
+    size_t   shm_segsz;
+    int64_t  shm_atime;
+    int64_t  shm_dtime;
+    int64_t  shm_ctime;
+    int32_t  shm_cpid;
+    int32_t  shm_lpid;
+    uint64_t shm_nattch;
+    uint64_t unused4;
+    uint64_t unused5;
+};
+
+struct linux_mq_attr {
+    long mq_flags;
+    long mq_maxmsg;
+    long mq_msgsize;
+    long mq_curmsgs;
+    long __pad[4];
+};
+
+struct linux_mmsghdr {
+    struct {
+        void *msg_name;
+        socklen_t msg_namelen;
+        int __pad1;
+        struct iovec *msg_iov;
+        size_t msg_iovlen;
+        void *msg_control;
+        size_t msg_controllen;
+        int msg_flags;
+        int __pad2;
+    } msg_hdr;
+    unsigned int msg_len;
+};
+
+struct linux_timex {
+    unsigned int modes;
+    long offset;
+    long freq;
+    long maxerror;
+    long esterror;
+    int status;
+    long constant;
+    long precision;
+    long tolerance;
+    struct {
+        long tv_sec;
+        long tv_usec;
+    } time;
+    long tick;
+    long ppsfreq;
+    long jitter;
+    int shift;
+    long stabil;
+    long jitcnt;
+    long calcnt;
+    long errcnt;
+    long stbcnt;
+    int tai;
+    int pad[11];
+};
+
+/* Wave 6 Syscalls */
+int64_t handle_shmget(key_t key, size_t size, int shmflg);
+int64_t handle_shmctl(int shmid, int cmd, void *buf);
+int64_t handle_shmat(int shmid, const void *shmaddr, int shmflg);
+int64_t handle_shmdt(const void *shmaddr);
+int64_t handle_mq_open(const char *name, int oflag, mode_t mode, struct linux_mq_attr *attr);
+int64_t handle_mq_unlink(const char *name);
+int64_t handle_mq_timedsend(int mqdes, const char *msg_ptr, size_t msg_len, unsigned int msg_prio, const struct linux_timespec *abs_timeout);
+int64_t handle_mq_timedreceive(int mqdes, char *msg_ptr, size_t msg_len, unsigned int *msg_prio, const struct linux_timespec *abs_timeout);
+int64_t handle_mq_notify(int mqdes, const void *notification);
+int64_t handle_mq_getsetattr(int mqdes, const struct linux_mq_attr *newattr, struct linux_mq_attr *oldattr);
+int64_t handle_sendmmsg(int sockfd, struct linux_mmsghdr *msgvec, unsigned int vlen, unsigned int flags);
+int64_t handle_recvmmsg(int sockfd, struct linux_mmsghdr *msgvec, unsigned int vlen, unsigned int flags, struct linux_timespec *timeout);
+int64_t handle_clock_settime(clockid_t clockid, const struct linux_timespec *tp);
+int64_t handle_settimeofday(const struct timeval *tv, const struct timezone *tz);
+int64_t handle_adjtimex(struct linux_timex *buf);
+int64_t handle_clock_adjtime(clockid_t clk_id, struct linux_timex *buf);
+int64_t handle_mlock2(unsigned long addr, size_t len, int flags);
+int64_t handle_membarrier(int cmd, unsigned int flags, int cpu_id);
+int64_t handle_userfaultfd(int flags);
+int64_t handle_rseq(void *rseq, uint32_t rseq_len, int flags, uint32_t sig);
+int64_t handle_sched_setattr(pid_t pid, void *attr, unsigned int flags);
+int64_t handle_sched_getattr(pid_t pid, void *attr, unsigned int size, unsigned int flags);
+int64_t handle_rt_tgsigqueueinfo(pid_t tgid, pid_t tid, int sig, struct linux_siginfo *uinfo);
+int64_t handle_pidfd_send_signal(int pidfd, int sig, struct linux_siginfo *info, unsigned int flags);
+int64_t handle_pidfd_getfd(int pidfd, int targetfd, unsigned int flags);
 
 #endif /* SYSCALLS_H */
 

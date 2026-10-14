@@ -2348,3 +2348,79 @@ Every single `test_sys_<number>_<name>.c` file must strictly implement:
      Failed      : 0
      ALL 219 TESTS PASSED! Translation module validated with 100% accuracy.
      ```
+
+---
+
+## Sprint 15: Wave 6 Syscall Expansion — System V Shared Memory, POSIX Message Queues, Multi-Message Sockets, Modern Time & Schedulers, and Advanced PIDFDs
+
+**Date**: 2026-10-14
+**Author**: Engineering Swarm (Lead Architect, Core Systems Coder, Diligent Tester, Helpful Planner, Systems Critic)
+
+### 1. Architectural Mission & Scope
+In Sprint 15, the swarm undertook **Wave 6** of our comprehensive Linux ARM64 system call roadmap, implementing and certifying 25 advanced system calls covering System V shared memory, POSIX message queues, multi-message datagram socket I/O, advanced time setters/adjtimex, modern memory operations, and Linux PID file descriptor operations (`pidfd_send_signal`, `pidfd_getfd`).
+
+Every newly implemented system call was authored with its own dedicated standalone unit test in `tests/syscalls/`, strictly following the **Strict 3-Way Mandate** (Case A: Standard Happy Path, Case B: Boundary / Edge Cases, Case C: Error / Errno Mapping).
+
+### 2. Syscalls Implemented & Architectural Translation
+1. **System V Shared Memory Subsystem (4 Syscalls)**:
+   - `shmget` (194): System V shared memory segment allocation and key resolution via Darwin `shmget()`.
+   - `shmctl` (195): Shared memory control operations (`IPC_RMID`, `IPC_STAT`, `IPC_SET`).
+   - `shmat` (196): Attaches shared memory segment to process address space with 16KB Apple Silicon page boundary alignment via Darwin `shmat()`.
+   - `shmdt` (197): Detaches shared memory segment from process address space via Darwin `shmdt()`.
+2. **System V Semaphore Timeout (1 Syscall)**:
+   - `semtimedop` (192): Performs atomic semaphore operations with timeout support. Translated Linux semaphore command codes (11..17) to Darwin IPC command codes (3..9: `GETVAL`, `SETVAL`, `GETALL`, `SETALL`).
+3. **POSIX Message Queue Subsystem (6 Syscalls)**:
+   - `mq_open` (180): Full in-memory POSIX message queue subsystem with message priority queues, descriptor tracking table (`g_mq_descs`), and Linux flag translation (`LINUX_O_CREAT`, `LINUX_O_EXCL`, `LINUX_O_NONBLOCK`).
+   - `mq_unlink` (181): Unlinks queue from the POSIX name namespace, preserving open instances until last descriptor closes.
+   - `mq_timedsend` (182): Priority-ordered message insertion (highest priority dequeued first) with nonblocking and timeout handling.
+   - `mq_timedreceive` (183): Receives highest priority message from queue with size checks and nonblocking handling.
+   - `mq_notify` (184): Descriptor notification registration.
+   - `mq_getsetattr` (185): Queries and modifies queue flags (`O_NONBLOCK`) and capacity limits.
+4. **Multi-Message Socket I/O Subsystem (2 Syscalls)**:
+   - `sendmmsg` (269): Vectorized datagram transmission, iterating across `struct linux_mmsghdr` array and invoking `sendmsg()` with per-message byte counters.
+   - `recvmmsg` (243): Vectorized datagram reception across multiple message headers with optional timeout support.
+5. **System Time Setters & Adjustment Subsystem (4 Syscalls)**:
+   - `clock_settime` (112): Sets POSIX clock time via Darwin APIs.
+   - `settimeofday` (170): Updates system time of day via Darwin `settimeofday()`.
+   - `adjtimex` (171): Adjusts system clock frequency/phase with timex struct emulation.
+   - `clock_adjtime` (266): Clock-specific timex adjustment.
+6. **Advanced Memory & Synchronization Subsystem (3 Syscalls)**:
+   - `mlock2` (284): Memory locking with 16KB boundary alignment and `MLOCK_ONFAULT` flags support.
+   - `membarrier` (283): Multi-processor memory barrier synchronization commands (`MEMBARRIER_CMD_QUERY`, `MEMBARRIER_CMD_GLOBAL`).
+   - `userfaultfd` (282): Allocates userland page fault handling file descriptor with cloexec and nonblocking flags.
+7. **Extended Process Scheduling Subsystem (2 Syscalls)**:
+   - `sched_setattr` (274): Extended scheduling policy (`SCHED_DEADLINE`, `SCHED_FIFO`, `SCHED_RR`) and priority configuration.
+   - `sched_getattr` (275): Queries extended scheduling attributes and struct size validation.
+8. **Modern Process Signaling & PIDFD Subsystem (3 Syscalls)**:
+   - `rt_tgsigqueueinfo` (240): Dispatches real-time signal and siginfo payload to target thread within process group.
+   - `pidfd_send_signal` (424): Dispatches signals directly through process file descriptor (`pidfd`).
+   - `pidfd_getfd` (438): Duplicates file descriptor from target process identified by pidfd.
+
+### 3. Engineering Discoveries & Critical Fixes
+1. **Darwin vs. Linux `semctl` Command Constants Divergence**:
+   - Linux and Darwin share System V IPC APIs but define completely different integer constants for `semctl` commands:
+     - Linux: `GETPID`=11, `GETVAL`=12, `GETALL`=13, `GETNCNT`=14, `GETZCNT`=15, `SETVAL`=16, `SETALL`=17.
+     - Darwin: `GETNCNT`=3, `GETPID`=4, `GETVAL`=5, `GETALL`=6, `GETZCNT`=7, `SETVAL`=8, `SETALL`=9.
+   - Invoking `sys_semctl(semid, 0, 16 /* SETVAL */, 1)` on Darwin without command mapping passed command 16, leaving the semaphore value uninitialized and causing `test_sys_192_semtimedop` to block indefinitely.
+   - **Fix**: Added explicit translation switch in `handle_semctl` mapping Linux constants 11..17 to Darwin's `GETVAL`, `SETVAL`, etc.
+2. **Darwin vs. Linux Open Flags Divergence in POSIX Message Queues**:
+   - `O_CREAT`, `O_EXCL`, and `O_NONBLOCK` have different values on Linux (`0x40`, `0x80`, `0x800`) vs. Darwin (`0x200`, `0x800`, `0x004`).
+   - Checking `if (!(oflag & O_CREAT))` with Darwin host constants caused `sys_mq_open` to miss `LINUX_O_CREAT` (0x40), incorrectly rejecting valid queue creation with `-LINUX_ENOENT`.
+   - **Fix**: Updated all message queue flag bitwise checks to use explicit Linux constants (`LINUX_O_CREAT`, `LINUX_O_EXCL`, `LINUX_O_NONBLOCK`).
+3. **PID 1 Signal Probing under macOS Non-Root Execution**:
+   - On Darwin, `/sbin/launchd` is PID 1. Probing existence of PID 1 via `kill(1, 0)` returns `EPERM` when running as an unprivileged host user.
+   - In LTM, PID 1 represents the virtual container init process.
+   - **Fix**: In `handle_kill`, intercept `pid == 1 && sig == 0` and return `0`, ensuring clean existence checks for container init without requiring host root privileges.
+
+### 4. Verification & 100% Pass Rate
+- All 25 new standalone unit tests passed with 100% adherence to the Strict 3-Way Mandate.
+- Executed the full automated test suite:
+  ```
+  ======================================================
+                     TEST SUITE SUMMARY                 
+  ======================================================
+  Total Tests : 244
+  Passed      : 244
+  Failed      : 0
+  ALL 244 TESTS PASSED! Translation module validated with 100% accuracy.
+  ```

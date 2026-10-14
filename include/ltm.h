@@ -328,8 +328,12 @@
 #define LINUX_SYS_pkey_free           290
 #define LINUX_SYS_statx               291
 #define LINUX_SYS_rseq                293
+#define LINUX_SYS_pidfd_send_signal   424
+#define LINUX_SYS_pidfd_open          434
+#define LINUX_SYS_clone3              435
 #define LINUX_SYS_close_range         436
 #define LINUX_SYS_openat2             437
+#define LINUX_SYS_pidfd_getfd         438
 #define LINUX_SYS_faccessat2          439
 
 /* Linux Errno Values */

@@ -238,6 +238,9 @@ static bool signalfd_deliver_signal(int sig, siginfo_t *info) {
     return delivered;
 }
 
+void ltm_pidfd_close(int fd);
+void ltm_mq_close(int fd);
+
 int64_t handle_close(int fd) {
     if (fd >= 0 && fd < DIR_CACHE_MAX && g_dir_cache[fd]) {
         closedir(g_dir_cache[fd]);
@@ -250,6 +253,8 @@ int64_t handle_close(int fd) {
     ltm_timerfd_close(fd);
     ltm_signalfd_close(fd);
     ltm_eventfd_close(fd);
+    ltm_pidfd_close(fd);
+    ltm_mq_close(fd);
     int ret = close(fd);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return 0;
@@ -999,6 +1004,7 @@ int64_t handle_pselect6(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
 
 int64_t handle_kill(pid_t pid, int sig) {
     if (sig < 0 || sig >= LINUX_NSIG) return -LINUX_EINVAL;
+    if (pid == 1 && sig == 0) return 0;
     if (signalfd_deliver_signal(sig, NULL)) {
         return 0;
     }
@@ -4519,7 +4525,19 @@ int64_t handle_semget(key_t key, int nsems, int semflg) {
 
 int64_t handle_semctl(int semid, int semnum, int cmd, unsigned long arg) {
     int dcmd = cmd;
-    if (cmd == 0) dcmd = IPC_RMID;
+    switch (cmd) {
+        case 0: dcmd = IPC_RMID; break;
+        case 1: dcmd = IPC_SET; break;
+        case 2: dcmd = IPC_STAT; break;
+        case 11: dcmd = GETPID; break;
+        case 12: dcmd = GETVAL; break;
+        case 13: dcmd = GETALL; break;
+        case 14: dcmd = GETNCNT; break;
+        case 15: dcmd = GETZCNT; break;
+        case 16: dcmd = SETVAL; break;
+        case 17: dcmd = SETALL; break;
+        default: break;
+    }
     int r = semctl(semid, semnum, dcmd, (void *)arg);
     if (r == -1) return darwin_to_linux_errno(errno);
     return r;
@@ -4528,6 +4546,19 @@ int64_t handle_semctl(int semid, int semnum, int cmd, unsigned long arg) {
 int64_t handle_semop(int semid, void *sops, size_t nsops) {
     if (!sops) return -LINUX_EFAULT;
     if (nsops == 0) return -LINUX_EINVAL;
+    int r = semop(semid, (struct sembuf *)sops, nsops);
+    if (r == -1) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_semtimedop(int semid, void *sops, size_t nsops, const struct linux_timespec *timeout) {
+    if (!sops) return -LINUX_EFAULT;
+    if (nsops == 0) return -LINUX_EINVAL;
+    if (timeout) {
+        if (timeout->tv_sec < 0 || timeout->tv_nsec < 0 || timeout->tv_nsec >= 1000000000L) {
+            return -LINUX_EINVAL;
+        }
+    }
     int r = semop(semid, (struct sembuf *)sops, nsops);
     if (r == -1) return darwin_to_linux_errno(errno);
     return 0;
@@ -4645,7 +4676,536 @@ int64_t handle_execveat(int dirfd, const char *pathname, char *const argv[], cha
     return handle_execve(pathname, argv, envp);
 }
 
-/* Process File Descriptors */
+/* ========================================================================= */
+/* Wave 6: System V Shared Memory Subsystem                                  */
+/* ========================================================================= */
+
+int64_t handle_shmget(key_t key, size_t size, int shmflg) {
+    if (size == 0 && (shmflg & 01000 /* IPC_CREAT */)) {
+        return -LINUX_EINVAL;
+    }
+    int id = shmget(key, size, shmflg);
+    if (id < 0) return darwin_to_linux_errno(errno);
+    return id;
+}
+
+int64_t handle_shmctl(int shmid, int cmd, void *buf) {
+    if (shmid < 0) return -LINUX_EINVAL;
+
+    if (cmd == 0 /* IPC_RMID */) {
+        if (shmctl(shmid, IPC_RMID, NULL) != 0) {
+            return darwin_to_linux_errno(errno);
+        }
+        return 0;
+    } else if (cmd == 2 /* IPC_STAT */) {
+        if (!buf) return -LINUX_EFAULT;
+        struct shmid_ds ds;
+        if (shmctl(shmid, IPC_STAT, &ds) != 0) {
+            return darwin_to_linux_errno(errno);
+        }
+        struct linux_shmid_ds *lbuf = (struct linux_shmid_ds *)buf;
+        memset(lbuf, 0, sizeof(*lbuf));
+        lbuf->shm_perm.key = ds.shm_perm._key;
+        lbuf->shm_perm.uid = 0; /* root container */
+        lbuf->shm_perm.gid = 0;
+        lbuf->shm_perm.cuid = 0;
+        lbuf->shm_perm.cgid = 0;
+        lbuf->shm_perm.mode = ds.shm_perm.mode;
+        lbuf->shm_perm.seq = ds.shm_perm._seq;
+        lbuf->shm_segsz = ds.shm_segsz;
+        lbuf->shm_atime = ds.shm_atime;
+        lbuf->shm_dtime = ds.shm_dtime;
+        lbuf->shm_ctime = ds.shm_ctime;
+        lbuf->shm_cpid = ds.shm_cpid;
+        lbuf->shm_lpid = ds.shm_lpid;
+        lbuf->shm_nattch = ds.shm_nattch;
+        return 0;
+    } else if (cmd == 1 /* IPC_SET */) {
+        if (!buf) return -LINUX_EFAULT;
+        struct shmid_ds ds;
+        if (shmctl(shmid, IPC_STAT, &ds) != 0) {
+            return darwin_to_linux_errno(errno);
+        }
+        struct linux_shmid_ds *lbuf = (struct linux_shmid_ds *)buf;
+        ds.shm_perm.mode = lbuf->shm_perm.mode & 0777;
+        if (shmctl(shmid, IPC_SET, &ds) != 0) {
+            return darwin_to_linux_errno(errno);
+        }
+        return 0;
+    } else if (cmd == 3 /* IPC_INFO */ || cmd == 14 /* SHM_INFO */) {
+        return 0;
+    }
+    return -LINUX_EINVAL;
+}
+
+int64_t handle_shmat(int shmid, const void *shmaddr, int shmflg) {
+    if (shmid < 0) return -LINUX_EINVAL;
+    if (shmaddr != NULL) {
+        if (!(shmflg & 020000 /* SHM_RND */) && ((uintptr_t)shmaddr % PAGE_SIZE_16K != 0)) {
+            return -LINUX_EINVAL;
+        }
+        if (shmflg & 020000 /* SHM_RND */) {
+            shmaddr = (const void *)PAGE_ROUND_DOWN(shmaddr);
+        }
+    }
+    void *addr = shmat(shmid, shmaddr, shmflg);
+    if (addr == (void *)-1) {
+        return darwin_to_linux_errno(errno);
+    }
+    return (int64_t)(uintptr_t)addr;
+}
+
+int64_t handle_shmdt(const void *shmaddr) {
+    if (!shmaddr || ((uintptr_t)shmaddr % PAGE_SIZE_16K != 0)) {
+        return -LINUX_EINVAL;
+    }
+    if (shmdt(shmaddr) != 0) {
+        return darwin_to_linux_errno(errno);
+    }
+    return 0;
+}
+
+/* ========================================================================= */
+/* Wave 6: POSIX Message Queues Emulation                                    */
+/* ========================================================================= */
+
+#define MAX_LTM_MQUEUES 64
+#define MAX_MQ_MESSAGES 32
+#define MAX_MQ_BUFFER 8192
+
+typedef struct {
+    char data[MAX_MQ_BUFFER];
+    size_t len;
+    unsigned int prio;
+} ltm_mq_item_t;
+
+typedef struct {
+    bool active;
+    char name[256];
+    long mq_flags;
+    long mq_maxmsg;
+    long mq_msgsize;
+    long mq_curmsgs;
+    ltm_mq_item_t msgs[MAX_MQ_MESSAGES];
+    pthread_mutex_t lock;
+    pthread_cond_t cond_read;
+    pthread_cond_t cond_write;
+    int refcount;
+} ltm_mqueue_obj_t;
+
+typedef struct {
+    bool open;
+    int mq_idx;
+    int oflag;
+} ltm_mq_fd_t;
+
+#define MAX_MQ_DESCS 256
+static ltm_mqueue_obj_t g_mqueues[MAX_LTM_MQUEUES];
+static ltm_mq_fd_t g_mq_descs[MAX_MQ_DESCS];
+static pthread_mutex_t g_mq_global_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void ltm_mq_close(int fd) {
+    int d = fd - 1000;
+    if (d >= 0 && d < MAX_MQ_DESCS) {
+        pthread_mutex_lock(&g_mq_global_lock);
+        if (g_mq_descs[d].open) {
+            int idx = g_mq_descs[d].mq_idx;
+            g_mq_descs[d].open = false;
+            if (idx >= 0 && idx < MAX_LTM_MQUEUES && g_mqueues[idx].active) {
+                g_mqueues[idx].refcount--;
+                if (g_mqueues[idx].refcount <= 0 && g_mqueues[idx].name[0] == '\0') {
+                    g_mqueues[idx].active = false;
+                }
+            }
+        }
+        pthread_mutex_unlock(&g_mq_global_lock);
+    }
+}
+
+int64_t handle_mq_open(const char *name, int oflag, mode_t mode, struct linux_mq_attr *attr) {
+    (void)mode;
+    if (!name) return -LINUX_EFAULT;
+    if (name[0] != '/') return -LINUX_EINVAL;
+    if (strchr(name + 1, '/') != NULL) return -LINUX_EACCES;
+    if (strlen(name) > 255) return -LINUX_ENAMETOOLONG;
+
+    pthread_mutex_lock(&g_mq_global_lock);
+    int found_idx = -1;
+    for (int i = 0; i < MAX_LTM_MQUEUES; i++) {
+        if (g_mqueues[i].active && strcmp(g_mqueues[i].name, name) == 0) {
+            found_idx = i;
+            break;
+        }
+    }
+
+    if (found_idx >= 0) {
+        if ((oflag & (LINUX_O_CREAT | LINUX_O_EXCL)) == (LINUX_O_CREAT | LINUX_O_EXCL)) {
+            pthread_mutex_unlock(&g_mq_global_lock);
+            return -LINUX_EEXIST;
+        }
+    } else {
+        if (!(oflag & LINUX_O_CREAT)) {
+            pthread_mutex_unlock(&g_mq_global_lock);
+            return -LINUX_ENOENT;
+        }
+        for (int i = 0; i < MAX_LTM_MQUEUES; i++) {
+            if (!g_mqueues[i].active) {
+                found_idx = i;
+                break;
+            }
+        }
+        if (found_idx < 0) {
+            pthread_mutex_unlock(&g_mq_global_lock);
+            return -LINUX_ENOSPC;
+        }
+        ltm_mqueue_obj_t *mq = &g_mqueues[found_idx];
+        memset(mq, 0, sizeof(*mq));
+        mq->active = true;
+        strncpy(mq->name, name, sizeof(mq->name) - 1);
+        mq->mq_flags = (oflag & LINUX_O_NONBLOCK) ? LINUX_O_NONBLOCK : 0;
+        if (attr) {
+            mq->mq_maxmsg = (attr->mq_maxmsg > 0 && attr->mq_maxmsg <= MAX_MQ_MESSAGES) ? attr->mq_maxmsg : 10;
+            mq->mq_msgsize = (attr->mq_msgsize > 0 && attr->mq_msgsize <= MAX_MQ_BUFFER) ? attr->mq_msgsize : MAX_MQ_BUFFER;
+        } else {
+            mq->mq_maxmsg = 10;
+            mq->mq_msgsize = MAX_MQ_BUFFER;
+        }
+        mq->mq_curmsgs = 0;
+        pthread_mutex_init(&mq->lock, NULL);
+        pthread_cond_init(&mq->cond_read, NULL);
+        pthread_cond_init(&mq->cond_write, NULL);
+        mq->refcount = 0;
+    }
+
+    int free_desc = -1;
+    for (int d = 0; d < MAX_MQ_DESCS; d++) {
+        if (!g_mq_descs[d].open) {
+            free_desc = d;
+            break;
+        }
+    }
+    if (free_desc < 0) {
+        pthread_mutex_unlock(&g_mq_global_lock);
+        return -LINUX_EMFILE;
+    }
+
+    g_mq_descs[free_desc].open = true;
+    g_mq_descs[free_desc].mq_idx = found_idx;
+    g_mq_descs[free_desc].oflag = oflag;
+    g_mqueues[found_idx].refcount++;
+
+    pthread_mutex_unlock(&g_mq_global_lock);
+    return free_desc + 1000;
+}
+
+int64_t handle_mq_unlink(const char *name) {
+    if (!name) return -LINUX_EFAULT;
+    if (name[0] != '/') return -LINUX_EINVAL;
+
+    pthread_mutex_lock(&g_mq_global_lock);
+    int found = -1;
+    for (int i = 0; i < MAX_LTM_MQUEUES; i++) {
+        if (g_mqueues[i].active && strcmp(g_mqueues[i].name, name) == 0) {
+            found = i;
+            break;
+        }
+    }
+    if (found < 0) {
+        pthread_mutex_unlock(&g_mq_global_lock);
+        return -LINUX_ENOENT;
+    }
+
+    g_mqueues[found].name[0] = '\0';
+    if (g_mqueues[found].refcount <= 0) {
+        g_mqueues[found].active = false;
+    }
+    pthread_mutex_unlock(&g_mq_global_lock);
+    return 0;
+}
+
+int64_t handle_mq_timedsend(int mqdes, const char *msg_ptr, size_t msg_len, unsigned int msg_prio, const struct linux_timespec *abs_timeout) {
+    (void)abs_timeout;
+    int d = mqdes - 1000;
+    if (d < 0 || d >= MAX_MQ_DESCS || !g_mq_descs[d].open) return -LINUX_EBADF;
+    if (!msg_ptr) return -LINUX_EFAULT;
+
+    int idx = g_mq_descs[d].mq_idx;
+    ltm_mqueue_obj_t *mq = &g_mqueues[idx];
+    if (msg_len > (size_t)mq->mq_msgsize) return -LINUX_EMSGSIZE;
+
+    pthread_mutex_lock(&mq->lock);
+    if (mq->mq_curmsgs >= mq->mq_maxmsg) {
+        if ((g_mq_descs[d].oflag & LINUX_O_NONBLOCK) || (mq->mq_flags & LINUX_O_NONBLOCK)) {
+            pthread_mutex_unlock(&mq->lock);
+            return -LINUX_EAGAIN;
+        }
+    }
+
+    /* Insert ordered by prio descending */
+    int pos = (int)mq->mq_curmsgs;
+    for (int i = 0; i < (int)mq->mq_curmsgs; i++) {
+        if (msg_prio > mq->msgs[i].prio) {
+            pos = i;
+            break;
+        }
+    }
+    for (int i = (int)mq->mq_curmsgs; i > pos; i--) {
+        mq->msgs[i] = mq->msgs[i - 1];
+    }
+    memcpy(mq->msgs[pos].data, msg_ptr, msg_len);
+    mq->msgs[pos].len = msg_len;
+    mq->msgs[pos].prio = msg_prio;
+    mq->mq_curmsgs++;
+
+    pthread_cond_signal(&mq->cond_read);
+    pthread_mutex_unlock(&mq->lock);
+    return 0;
+}
+
+int64_t handle_mq_timedreceive(int mqdes, char *msg_ptr, size_t msg_len, unsigned int *msg_prio, const struct linux_timespec *abs_timeout) {
+    (void)abs_timeout;
+    int d = mqdes - 1000;
+    if (d < 0 || d >= MAX_MQ_DESCS || !g_mq_descs[d].open) return -LINUX_EBADF;
+    if (!msg_ptr) return -LINUX_EFAULT;
+
+    int idx = g_mq_descs[d].mq_idx;
+    ltm_mqueue_obj_t *mq = &g_mqueues[idx];
+    if (msg_len < (size_t)mq->mq_msgsize) return -LINUX_EMSGSIZE;
+
+    pthread_mutex_lock(&mq->lock);
+    if (mq->mq_curmsgs == 0) {
+        if ((g_mq_descs[d].oflag & LINUX_O_NONBLOCK) || (mq->mq_flags & LINUX_O_NONBLOCK)) {
+            pthread_mutex_unlock(&mq->lock);
+            return -LINUX_EAGAIN;
+        }
+    }
+    if (mq->mq_curmsgs == 0) {
+        pthread_mutex_unlock(&mq->lock);
+        return -LINUX_EAGAIN;
+    }
+
+    size_t copy_len = mq->msgs[0].len;
+    memcpy(msg_ptr, mq->msgs[0].data, copy_len);
+    if (msg_prio) *msg_prio = mq->msgs[0].prio;
+
+    for (int i = 0; i < (int)mq->mq_curmsgs - 1; i++) {
+        mq->msgs[i] = mq->msgs[i + 1];
+    }
+    mq->mq_curmsgs--;
+
+    pthread_cond_signal(&mq->cond_write);
+    pthread_mutex_unlock(&mq->lock);
+    return (int64_t)copy_len;
+}
+
+int64_t handle_mq_notify(int mqdes, const void *notification) {
+    (void)notification;
+    int d = mqdes - 1000;
+    if (d < 0 || d >= MAX_MQ_DESCS || !g_mq_descs[d].open) return -LINUX_EBADF;
+    return 0;
+}
+
+int64_t handle_mq_getsetattr(int mqdes, const struct linux_mq_attr *newattr, struct linux_mq_attr *oldattr) {
+    int d = mqdes - 1000;
+    if (d < 0 || d >= MAX_MQ_DESCS || !g_mq_descs[d].open) return -LINUX_EBADF;
+
+    int idx = g_mq_descs[d].mq_idx;
+    ltm_mqueue_obj_t *mq = &g_mqueues[idx];
+    if (oldattr) {
+        oldattr->mq_flags = (g_mq_descs[d].oflag & LINUX_O_NONBLOCK) ? LINUX_O_NONBLOCK : 0;
+        oldattr->mq_maxmsg = mq->mq_maxmsg;
+        oldattr->mq_msgsize = mq->mq_msgsize;
+        oldattr->mq_curmsgs = mq->mq_curmsgs;
+    }
+    if (newattr) {
+        if (newattr->mq_flags & LINUX_O_NONBLOCK) {
+            g_mq_descs[d].oflag |= LINUX_O_NONBLOCK;
+            mq->mq_flags |= LINUX_O_NONBLOCK;
+        } else {
+            g_mq_descs[d].oflag &= ~LINUX_O_NONBLOCK;
+            mq->mq_flags &= ~LINUX_O_NONBLOCK;
+        }
+    }
+    return 0;
+}
+
+/* ========================================================================= */
+/* Wave 6: Multi-Message Socket I/O (sendmmsg / recvmmsg)                    */
+/* ========================================================================= */
+
+int64_t handle_sendmmsg(int sockfd, struct linux_mmsghdr *msgvec, unsigned int vlen, unsigned int flags) {
+    if (vlen > 0 && !msgvec) return -LINUX_EFAULT;
+    if (vlen > 1024) return -LINUX_EINVAL;
+    if (vlen == 0) return 0;
+
+    unsigned int sent = 0;
+    for (unsigned int i = 0; i < vlen; i++) {
+        int64_t ret = handle_sendmsg(sockfd, &msgvec[i].msg_hdr, flags);
+        if (ret < 0) {
+            if (sent > 0) return sent;
+            return ret;
+        }
+        msgvec[i].msg_len = (unsigned int)ret;
+        sent++;
+    }
+    return sent;
+}
+
+int64_t handle_recvmmsg(int sockfd, struct linux_mmsghdr *msgvec, unsigned int vlen, unsigned int flags, struct linux_timespec *timeout) {
+    (void)timeout;
+    if (vlen > 0 && !msgvec) return -LINUX_EFAULT;
+    if (vlen > 1024) return -LINUX_EINVAL;
+    if (vlen == 0) return 0;
+
+    unsigned int recvd = 0;
+    for (unsigned int i = 0; i < vlen; i++) {
+        int64_t ret = handle_recvmsg(sockfd, &msgvec[i].msg_hdr, flags);
+        if (ret < 0) {
+            if (recvd > 0) return recvd;
+            return ret;
+        }
+        msgvec[i].msg_len = (unsigned int)ret;
+        recvd++;
+    }
+    return recvd;
+}
+
+/* ========================================================================= */
+/* Wave 6: Time Adjustment & Setter Syscalls                                 */
+/* ========================================================================= */
+
+int64_t handle_clock_settime(clockid_t clockid, const struct linux_timespec *tp) {
+    if (!tp) return -LINUX_EFAULT;
+    if (tp->tv_nsec < 0 || tp->tv_nsec >= 1000000000L) return -LINUX_EINVAL;
+    if (clockid != 0 /* CLOCK_REALTIME */) return -LINUX_EINVAL;
+    return 0; /* Virtualized container root success */
+}
+
+int64_t handle_settimeofday(const struct timeval *tv, const struct timezone *tz) {
+    (void)tz;
+    if (!tv && !tz) return 0;
+    if (tv) {
+        if (tv->tv_usec < 0 || tv->tv_usec >= 1000000) return -LINUX_EINVAL;
+    }
+    return 0; /* Virtualized container root success */
+}
+
+int64_t handle_adjtimex(struct linux_timex *buf) {
+    if (!buf) return -LINUX_EFAULT;
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    memset(buf, 0, sizeof(*buf));
+    buf->time.tv_sec = tv.tv_sec;
+    buf->time.tv_usec = tv.tv_usec;
+    buf->tick = 10000;
+    buf->maxerror = 500000;
+    buf->esterror = 500000;
+    buf->status = 0;
+    return 0; /* TIME_OK */
+}
+
+int64_t handle_clock_adjtime(clockid_t clk_id, struct linux_timex *buf) {
+    if (clk_id != 0 /* CLOCK_REALTIME */) return -LINUX_EINVAL;
+    if (!buf) return -LINUX_EFAULT;
+    return handle_adjtimex(buf);
+}
+
+/* ========================================================================= */
+/* Wave 6: Advanced Memory & Synchronization Syscalls                        */
+/* ========================================================================= */
+
+int64_t handle_mlock2(unsigned long addr, size_t len, int flags) {
+    if (flags & ~1) return -LINUX_EINVAL; /* MLOCK_ONFAULT is 1 */
+    return handle_mlock(addr, len);
+}
+
+int64_t handle_membarrier(int cmd, unsigned int flags, int cpu_id) {
+    (void)cpu_id;
+    if (flags != 0) return -LINUX_EINVAL;
+    switch (cmd) {
+        case 0: /* MEMBARRIER_CMD_QUERY */
+            return (1 << 0) | (1 << 1) | (1 << 3); /* GLOBAL | GLOBAL_EXPEDITED | PRIVATE_EXPEDITED */
+        case 1: /* MEMBARRIER_CMD_GLOBAL */
+        case 2: /* MEMBARRIER_CMD_GLOBAL_EXPEDITED */
+        case 8: /* MEMBARRIER_CMD_PRIVATE_EXPEDITED */
+            __sync_synchronize();
+            return 0;
+        case 4:  /* MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED */
+        case 16: /* MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED */
+            return 0;
+        default:
+            return -LINUX_EINVAL;
+    }
+}
+
+int64_t handle_userfaultfd(int flags) {
+    if (flags & ~(0x080000 | 0x000800)) return -LINUX_EINVAL; /* UFFD_CLOEXEC | UFFD_NONBLOCK */
+    int p[2];
+    if (pipe(p) != 0) return darwin_to_linux_errno(errno);
+    if (flags & 0x000800) {
+        fcntl(p[0], F_SETFL, fcntl(p[0], F_GETFL) | O_NONBLOCK);
+    }
+    if (flags & 0x080000) {
+        fcntl(p[0], F_SETFD, FD_CLOEXEC);
+        fcntl(p[1], F_SETFD, FD_CLOEXEC);
+    }
+    return p[0];
+}
+
+int64_t handle_rseq(void *rseq, uint32_t rseq_len, int flags, uint32_t sig) {
+    (void)sig;
+    if (!rseq) return -LINUX_EFAULT;
+    if (flags & ~1) return -LINUX_EINVAL; /* RSEQ_FLAG_UNREGISTER = 1 */
+    if (rseq_len != 32) return -LINUX_EINVAL;
+    return 0;
+}
+
+int64_t handle_sched_setattr(pid_t pid, void *attr, unsigned int flags) {
+    (void)pid; (void)flags;
+    if (!attr) return -LINUX_EFAULT;
+    return 0;
+}
+
+int64_t handle_sched_getattr(pid_t pid, void *attr, unsigned int size, unsigned int flags) {
+    (void)pid; (void)flags;
+    if (!attr) return -LINUX_EFAULT;
+    if (size < 48) return -LINUX_EINVAL;
+    memset(attr, 0, size);
+    *(uint32_t *)attr = 48;
+    return 0;
+}
+
+int64_t handle_rt_tgsigqueueinfo(pid_t tgid, pid_t tid, int sig, struct linux_siginfo *uinfo) {
+    (void)tid;
+    if (!uinfo) return -LINUX_EFAULT;
+    if (sig < 0 || sig > 64) return -LINUX_EINVAL;
+    if (tgid <= 0 || tid <= 0) return -LINUX_EINVAL;
+    return handle_kill(tgid, sig);
+}
+
+/* ========================================================================= */
+/* Wave 6: Process File Descriptors (pidfd_open, pidfd_send_signal, pidfd_getfd) */
+/* ========================================================================= */
+
+#define MAX_PIDFDS 256
+static struct {
+    int fd;
+    pid_t pid;
+    bool active;
+} g_pidfds[MAX_PIDFDS];
+static pthread_mutex_t g_pidfd_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void ltm_pidfd_close(int fd) {
+    pthread_mutex_lock(&g_pidfd_lock);
+    for (int i = 0; i < MAX_PIDFDS; i++) {
+        if (g_pidfds[i].active && g_pidfds[i].fd == fd) {
+            g_pidfds[i].active = false;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_pidfd_lock);
+}
+
 int64_t handle_pidfd_open(pid_t pid, unsigned int flags) {
     if (flags & ~0x800) return -LINUX_EINVAL; /* PIDFD_NONBLOCK */
     if (pid <= 0) return -LINUX_EINVAL;
@@ -4663,8 +5223,72 @@ int64_t handle_pidfd_open(pid_t pid, unsigned int flags) {
     fcntl(p[0], F_SETFD, FD_CLOEXEC);
     fcntl(p[1], F_SETFD, FD_CLOEXEC);
 
+    pthread_mutex_lock(&g_pidfd_lock);
+    for (int i = 0; i < MAX_PIDFDS; i++) {
+        if (!g_pidfds[i].active) {
+            g_pidfds[i].fd = p[0];
+            g_pidfds[i].pid = pid;
+            g_pidfds[i].active = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_pidfd_lock);
+
     return p[0];
 }
+
+int64_t handle_pidfd_send_signal(int pidfd, int sig, struct linux_siginfo *info, unsigned int flags) {
+    (void)info;
+    if (flags != 0) return -LINUX_EINVAL;
+    if (pidfd < 0) return -LINUX_EBADF;
+    if (sig < 0 || sig > 64) return -LINUX_EINVAL;
+
+    pid_t target_pid = -1;
+    pthread_mutex_lock(&g_pidfd_lock);
+    for (int i = 0; i < MAX_PIDFDS; i++) {
+        if (g_pidfds[i].active && g_pidfds[i].fd == pidfd) {
+            target_pid = g_pidfds[i].pid;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_pidfd_lock);
+
+    if (target_pid <= 0) {
+        if (fcntl(pidfd, F_GETFL) < 0) return -LINUX_EBADF;
+        return -LINUX_EINVAL;
+    }
+
+    return handle_kill(target_pid, sig);
+}
+
+int64_t handle_pidfd_getfd(int pidfd, int targetfd, unsigned int flags) {
+    if (flags != 0) return -LINUX_EINVAL;
+    if (pidfd < 0 || targetfd < 0) return -LINUX_EBADF;
+
+    pid_t target_pid = -1;
+    pthread_mutex_lock(&g_pidfd_lock);
+    for (int i = 0; i < MAX_PIDFDS; i++) {
+        if (g_pidfds[i].active && g_pidfds[i].fd == pidfd) {
+            target_pid = g_pidfds[i].pid;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_pidfd_lock);
+
+    if (target_pid <= 0) {
+        if (fcntl(pidfd, F_GETFL) < 0) return -LINUX_EBADF;
+        return -LINUX_EINVAL;
+    }
+
+    if (target_pid == getpid() || target_pid == 1) {
+        int newfd = dup(targetfd);
+        if (newfd < 0) return darwin_to_linux_errno(errno);
+        return newfd;
+    }
+
+    return -LINUX_ESRCH;
+}
+
 
 
 

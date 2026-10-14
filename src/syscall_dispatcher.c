@@ -1253,6 +1253,9 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case LINUX_SYS_semop:
             ret = handle_semop((int)a0, (void *)a1, (size_t)a2);
             break;
+        case LINUX_SYS_semtimedop:
+            ret = handle_semtimedop((int)a0, (void *)a1, (size_t)a2, (const struct linux_timespec *)a3);
+            break;
         case LINUX_SYS_execveat:
             ret = handle_execveat((int)a0, (const char *)a1, (char *const *)a2, (char *const *)a3, (int)a4);
             break;
@@ -1267,6 +1270,78 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
             break;
         case LINUX_SYS_pidfd_open:
             ret = handle_pidfd_open((pid_t)a0, (unsigned int)a1);
+            break;
+        case LINUX_SYS_shmget:
+            ret = handle_shmget((key_t)a0, (size_t)a1, (int)a2);
+            break;
+        case LINUX_SYS_shmctl:
+            ret = handle_shmctl((int)a0, (int)a1, (void *)a2);
+            break;
+        case LINUX_SYS_shmat:
+            ret = handle_shmat((int)a0, (const void *)a1, (int)a2);
+            break;
+        case LINUX_SYS_shmdt:
+            ret = handle_shmdt((const void *)a0);
+            break;
+        case LINUX_SYS_mq_open:
+            ret = handle_mq_open((const char *)a0, (int)a1, (mode_t)a2, (struct linux_mq_attr *)a3);
+            break;
+        case LINUX_SYS_mq_unlink:
+            ret = handle_mq_unlink((const char *)a0);
+            break;
+        case LINUX_SYS_mq_timedsend:
+            ret = handle_mq_timedsend((int)a0, (const char *)a1, (size_t)a2, (unsigned int)a3, (const struct linux_timespec *)a4);
+            break;
+        case LINUX_SYS_mq_timedreceive:
+            ret = handle_mq_timedreceive((int)a0, (char *)a1, (size_t)a2, (unsigned int *)a3, (const struct linux_timespec *)a4);
+            break;
+        case LINUX_SYS_mq_notify:
+            ret = handle_mq_notify((int)a0, (const void *)a1);
+            break;
+        case LINUX_SYS_mq_getsetattr:
+            ret = handle_mq_getsetattr((int)a0, (const struct linux_mq_attr *)a1, (struct linux_mq_attr *)a2);
+            break;
+        case LINUX_SYS_sendmmsg:
+            ret = handle_sendmmsg((int)a0, (struct linux_mmsghdr *)a1, (unsigned int)a2, (unsigned int)a3);
+            break;
+        case LINUX_SYS_recvmmsg:
+            ret = handle_recvmmsg((int)a0, (struct linux_mmsghdr *)a1, (unsigned int)a2, (unsigned int)a3, (struct linux_timespec *)a4);
+            break;
+        case LINUX_SYS_clock_settime:
+            ret = handle_clock_settime((clockid_t)a0, (const struct linux_timespec *)a1);
+            break;
+        case LINUX_SYS_settimeofday:
+            ret = handle_settimeofday((const struct timeval *)a0, (const struct timezone *)a1);
+            break;
+        case LINUX_SYS_adjtimex:
+            ret = handle_adjtimex((struct linux_timex *)a0);
+            break;
+        case LINUX_SYS_clock_adjtime:
+            ret = handle_clock_adjtime((clockid_t)a0, (struct linux_timex *)a1);
+            break;
+        case LINUX_SYS_mlock2:
+            ret = handle_mlock2((unsigned long)a0, (size_t)a1, (int)a2);
+            break;
+        case LINUX_SYS_membarrier:
+            ret = handle_membarrier((int)a0, (unsigned int)a1, (int)a2);
+            break;
+        case LINUX_SYS_userfaultfd:
+            ret = handle_userfaultfd((int)a0);
+            break;
+        case LINUX_SYS_sched_setattr:
+            ret = handle_sched_setattr((pid_t)a0, (void *)a1, (unsigned int)a2);
+            break;
+        case LINUX_SYS_sched_getattr:
+            ret = handle_sched_getattr((pid_t)a0, (void *)a1, (unsigned int)a2, (unsigned int)a3);
+            break;
+        case LINUX_SYS_rt_tgsigqueueinfo:
+            ret = handle_rt_tgsigqueueinfo((pid_t)a0, (pid_t)a1, (int)a2, (struct linux_siginfo *)a3);
+            break;
+        case LINUX_SYS_pidfd_send_signal:
+            ret = handle_pidfd_send_signal((int)a0, (int)a1, (struct linux_siginfo *)a2, (unsigned int)a3);
+            break;
+        case LINUX_SYS_pidfd_getfd:
+            ret = handle_pidfd_getfd((int)a0, (int)a1, (unsigned int)a2);
             break;
 
         default:

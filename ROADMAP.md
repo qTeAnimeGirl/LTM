@@ -163,6 +163,22 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 - [x] **219 of 219 Tests Passing (100% Pass Rate)**:
   - 209 standalone unit tests + 10 core integration test suites passing with 100% accuracy.
 
+### Milestone 13: Wave 6 Syscall Expansion & System V Shared Memory, POSIX Message Queues, Multi-Message Sockets, Modern Time & Schedulers, and Advanced PIDFDs (Sprint 15)
+- [x] **25 New Linux ARM64 Syscalls Implemented and Verified with Dedicated Standalone Unit Tests**:
+  - **System V Shared Memory**: `shmget` (194), `shmctl` (195), `shmat` (196), `shmdt` (197).
+  - **System V Semaphore Timeout**: `semtimedop` (192).
+  - **POSIX Message Queues (Full In-Memory Subsystem)**: `mq_open` (180), `mq_unlink` (181), `mq_timedsend` (182), `mq_timedreceive` (183), `mq_notify` (184), `mq_getsetattr` (185).
+  - **Multi-Message Socket I/O**: `sendmmsg` (269), `recvmmsg` (243).
+  - **Time Setters & Adjustment**: `clock_settime` (112), `settimeofday` (170), `adjtimex` (171), `clock_adjtime` (266).
+  - **Advanced Memory & Synchronization**: `mlock2` (284), `membarrier` (283), `userfaultfd` (282).
+  - **Extended Scheduling**: `sched_setattr` (274), `sched_getattr` (275).
+  - **Modern Process Signaling & PIDFDs**: `rt_tgsigqueueinfo` (240), `pidfd_send_signal` (424), `pidfd_getfd` (438).
+- [x] **234 Dedicated Standalone Unit Tests (`tests/syscalls/`)**:
+  - 234 of 234 implemented Linux ARM64 system calls have dedicated standalone unit tests (100.0% 1-to-1 coverage).
+  - Strict 3-Way Mandate (Case A: Happy, Case B: Boundary, Case C: Errno) satisfied on all 234 syscalls.
+- [x] **244 of 244 Tests Passing (100% Pass Rate)**:
+  - 234 standalone unit tests + 10 core integration test suites passing with 100% accuracy.
+
 ---
 
 
@@ -361,17 +377,42 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 260 | `wait4` | Process | **Implemented** | Waits for child process termination with status translation |
 | 261 | `prlimit64` | Resources | **Implemented** | Resource limits query and configuration |
 | 267 | `syncfs` | Filesystem | **Implemented** | Darwin `fsync()` on file descriptor with `-EBADF` validation |
+| 112 | `clock_settime` | Time | **Implemented** | Sets system or POSIX clock time via Darwin APIs |
+| 170 | `settimeofday` | Time | **Implemented** | Sets system time of day via Darwin `settimeofday()` |
+| 171 | `adjtimex` | Time | **Implemented** | Adjusts system clock via Darwin `adjtime()` with tick emulation |
+| 180 | `mq_open` | IPC | **Implemented** | POSIX message queue open/create with priority ordered queue |
+| 181 | `mq_unlink` | IPC | **Implemented** | Unlinks POSIX message queue name from namespace |
+| 182 | `mq_timedsend` | IPC | **Implemented** | Sends message to queue ordered by priority with timeout support |
+| 183 | `mq_timedreceive` | IPC | **Implemented** | Receives highest priority message from queue with timeout support |
+| 184 | `mq_notify` | IPC | **Implemented** | Registers asynchronous notification for queue availability |
+| 185 | `mq_getsetattr` | IPC | **Implemented** | Queries and modifies message queue flags and attributes |
+| 192 | `semtimedop` | IPC | **Implemented** | Performs atomic semaphore operations with timeout |
+| 194 | `shmget` | IPC | **Implemented** | System V shared memory segment allocation via Darwin `shmget()` |
+| 195 | `shmctl` | IPC | **Implemented** | System V shared memory control operations via Darwin `shmctl()` |
+| 196 | `shmat` | IPC | **Implemented** | Attaches System V shared memory segment via Darwin `shmat()` |
+| 197 | `shmdt` | IPC | **Implemented** | Detaches System V shared memory segment via Darwin `shmdt()` |
+| 240 | `rt_tgsigqueueinfo` | Signal | **Implemented** | Delivers real-time signal and siginfo payload to target thread |
+| 243 | `recvmmsg` | Networking | **Implemented** | Receives multiple messages from socket with timeout |
+| 266 | `clock_adjtime` | Time | **Implemented** | Adjusts specific clock with timex specification |
+| 269 | `sendmmsg` | Networking | **Implemented** | Sends multiple messages over socket in a single syscall |
+| 274 | `sched_setattr` | Process | **Implemented** | Extended scheduling policy and priority configuration |
+| 275 | `sched_getattr` | Process | **Implemented** | Extended scheduling attribute query |
 | 276 | `renameat2` | Filesystem | **Implemented** | Atomic file rename with exchange/no-replace support |
 | 278 | `getrandom` | Security | **Implemented** | Cryptographic random entropy via Darwin `arc4random_buf()` |
 | 279 | `memfd_create` | Memory | **Implemented** | Anonymous descriptor via temporary file with immediate `unlink()` |
 | 281 | `execveat` | Process | **Implemented** | Executes binary relative to directory descriptor / path with flags support |
+| 282 | `userfaultfd` | Memory | **Implemented** | Userland page fault handling descriptor allocation |
+| 283 | `membarrier` | Memory | **Implemented** | Multi-processor memory barrier synchronization |
+| 284 | `mlock2` | Memory | **Implemented** | Extended memory locking with `MLOCK_ONFAULT` flags |
 | 285 | `copy_file_range`| File I/O | **Implemented** | High-performance 64KB chunked userland buffer transfer |
 | 286 | `preadv2` | File I/O | **Implemented** | Vectored positional read with flags (`RWF_HIPRI`, `RWF_DSYNC`, `RWF_SYNC`, `RWF_NOWAIT`, `RWF_APPEND`) |
 | 287 | `pwritev2` | File I/O | **Implemented** | Vectored positional write with flags support |
 | 291 | `statx` | Filesystem | **Implemented** | 256-byte extended file status structure with nanosecond timestamps, birthtime, and attributes |
+| 424 | `pidfd_send_signal` | Process | **Implemented** | Delivers signal to process identified by pidfd |
 | 434 | `pidfd_open` | Process | **Implemented** | Allocates process file descriptor for tracking and signal delivery |
 | 436 | `close_range` | File I/O | **Implemented** | Range descriptor closure with `CLOSE_RANGE_CLOEXEC` support |
 | 437 | `openat2` | File I/O | **Implemented** | Modern openat with `RESOLVE_BENEATH` and `RESOLVE_NO_SYMLINKS` |
+| 438 | `pidfd_getfd` | Process | **Implemented** | Duplicates file descriptor from target process via pidfd |
 | 439 | `faccessat2` | Filesystem | **Implemented** | Extended access checks with `AT_EACCESS` and `AT_SYMLINK_NOFOLLOW` |
 
 ---
@@ -389,7 +430,7 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | **`whoami` & `id`** | `aarch64` | Dynamic / Musl | **100% Working** | Correctly outputs `root` and `uid=0(root) gid=0(root) groups=0(root)` |
 | **`uname`** | `aarch64` | Dynamic / Musl | **100% Working** | Outputs `Linux ltm-mac LTM 2026.1A ... aarch64 Linux` |
 | **Standard Coreutils** | `aarch64` | Dynamic / Musl | **100% Working** | `ls`, `cat`, `mkdir`, `rm`, `cp`, `mv`, `head`, `tail`, `grep`, `sleep`, `stat` |
-| **Automated Test Suite** | `aarch64` | Static / Freestanding | **100% Working** | **219 of 219 tests pass cleanly** (100% pass rate) |
+| **Automated Test Suite** | `aarch64` | Static / Freestanding | **100% Working** | **244 of 244 tests pass cleanly** (100% pass rate) |
 
 ---
 
@@ -404,12 +445,12 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 - [x] Memory advising (`madvise`) & prefetching (`readahead`)
 - [x] Process virtualization for `ps` and `ps aux`
 
-### Tier 2: Medium — Advanced Event Multiplexing & IPC (Wave 2)
+### Tier 2: Medium — Advanced Event Multiplexing & IPC
 - [ ] **Native `kqueue` Backend for `epoll`**:
   - Currently `epoll_pwait` delegates to Darwin `poll`. Mapping `epoll_create1` / `epoll_ctl` directly to Darwin `kqueue` / `kevent64_t` will deliver zero-copy, scalable event notifications for high-concurrency servers.
-- [ ] **`timerfd` Subsystem (Syscalls 85 & 86)**:
-  - Implement `timerfd_create`, `timerfd_settime`, `timerfd_gettime` using Darwin `dispatch_source_t` or Mach absolute timers.
-- [ ] **`signalfd4` (Syscall 74)**:
+- [x] **`timerfd` Subsystem (Syscalls 85 & 86)**:
+  - Implemented `timerfd_create`, `timerfd_settime`, `timerfd_gettime` with high-resolution timer tracking and epoll readiness.
+- [x] **`signalfd4` (Syscall 74)**:
   - Deliver signals synchronously via file descriptors for modern Linux event-driven services (systemd, epoll event loops).
 - [ ] **Unix Domain Socket File Descriptor Passing (`SCM_RIGHTS`)**:
   - Translate file descriptor arrays in `cmsg` between Linux and Darwin during `sendmsg` and `recvmsg`.
@@ -437,8 +478,10 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 - [ ] **Glibc Dynamic Loader (`ld-linux-aarch64.so.1`)**:
   - Support Ubuntu / Debian / Arch Linux Glibc dynamic binaries.
   - Implement Glibc-specific initial relocation flags and thread initialization structures.
-- [ ] **Extended Modern Syscalls**:
-  - `pidfd_open` (434), `pidfd_send_signal` (424), `clone3` (435).
+- [x] **Extended Modern PIDFD Syscalls**:
+  - `pidfd_open` (434), `pidfd_send_signal` (424), `pidfd_getfd` (438).
+- [ ] **Modern Concurrency & IO**:
+  - `clone3` (435).
   - Modern `io_uring` stubs (`io_uring_setup`, `io_uring_enter`, `io_uring_register`).
 
 ---

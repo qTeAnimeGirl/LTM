@@ -18,6 +18,14 @@ typedef unsigned long size_t;
 typedef long ssize_t;
 typedef long off_t;
 typedef unsigned long uintptr_t;
+typedef int key_t;
+typedef unsigned int mode_t;
+typedef int pid_t;
+
+struct timeval {
+    int64_t tv_sec;
+    int64_t tv_usec;
+};
 
 #ifndef NULL
 #define NULL ((void *)0)
@@ -240,6 +248,31 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_pwritev2            287
 #define SYS_statx               291
 #define SYS_pidfd_open          434
+#define SYS_clock_settime       112
+#define SYS_settimeofday        170
+#define SYS_adjtimex            171
+#define SYS_mq_open             180
+#define SYS_mq_unlink           181
+#define SYS_mq_timedsend        182
+#define SYS_mq_timedreceive     183
+#define SYS_mq_notify           184
+#define SYS_mq_getsetattr       185
+#define SYS_semtimedop          192
+#define SYS_shmget              194
+#define SYS_shmctl              195
+#define SYS_shmat               196
+#define SYS_shmdt               197
+#define SYS_rt_tgsigqueueinfo   240
+#define SYS_recvmmsg            243
+#define SYS_clock_adjtime       266
+#define SYS_sendmmsg            269
+#define SYS_sched_setattr       274
+#define SYS_sched_getattr       275
+#define SYS_userfaultfd         282
+#define SYS_membarrier          283
+#define SYS_mlock2              284
+#define SYS_pidfd_send_signal   424
+#define SYS_pidfd_getfd         438
 
 /* File open flags */
 #define AT_FDCWD        (-100)
@@ -1730,6 +1763,156 @@ static inline int sys_pidfd_open(int pid, unsigned int flags) {
     return (int)sys_syscall2(SYS_pidfd_open, pid, flags);
 }
 
+/* Wave 6 Structures */
+struct shmid_ds {
+    struct {
+        uint32_t key;
+        uint32_t uid;
+        uint32_t gid;
+        uint32_t cuid;
+        uint32_t cgid;
+        uint32_t mode;
+        uint16_t seq;
+        uint16_t pad;
+        uint64_t unused1;
+        uint64_t unused2;
+    } shm_perm;
+    size_t   shm_segsz;
+    int64_t  shm_atime;
+    int64_t  shm_dtime;
+    int64_t  shm_ctime;
+    int32_t  shm_cpid;
+    int32_t  shm_lpid;
+    uint64_t shm_nattch;
+    uint64_t unused4;
+    uint64_t unused5;
+};
+
+struct mq_attr {
+    long mq_flags;
+    long mq_maxmsg;
+    long mq_msgsize;
+    long mq_curmsgs;
+    long __pad[4];
+};
+
+struct msghdr {
+    void *msg_name;
+    uint32_t msg_namelen;
+    int __pad1;
+    struct iovec *msg_iov;
+    size_t msg_iovlen;
+    void *msg_control;
+    size_t msg_controllen;
+    int msg_flags;
+    int __pad2;
+};
+
+struct mmsghdr {
+    struct msghdr msg_hdr;
+    unsigned int msg_len;
+};
+
+struct timex {
+    unsigned int modes;
+    long offset;
+    long freq;
+    long maxerror;
+    long esterror;
+    int status;
+    long constant;
+    long precision;
+    long tolerance;
+    struct timeval time;
+    long tick;
+    long ppsfreq;
+    long jitter;
+    int shift;
+    long stabil;
+    long jitcnt;
+    long calcnt;
+    long errcnt;
+    long stbcnt;
+    int tai;
+    int pad[11];
+};
+
+/* Wave 6 Wrappers */
+static inline int sys_clock_settime(int clockid, const struct timespec *tp) {
+    return (int)sys_syscall2(SYS_clock_settime, clockid, (long)tp);
+}
+static inline int sys_settimeofday(const struct timeval *tv, const void *tz) {
+    return (int)sys_syscall2(SYS_settimeofday, (long)tv, (long)tz);
+}
+static inline int sys_adjtimex(struct timex *buf) {
+    return (int)sys_syscall1(SYS_adjtimex, (long)buf);
+}
+static inline int sys_clock_adjtime(int clk_id, struct timex *buf) {
+    return (int)sys_syscall2(SYS_clock_adjtime, clk_id, (long)buf);
+}
+static inline int sys_mq_open(const char *name, int oflag, mode_t mode, struct mq_attr *attr) {
+    return (int)sys_syscall4(SYS_mq_open, (long)name, oflag, mode, (long)attr);
+}
+static inline int sys_mq_unlink(const char *name) {
+    return (int)sys_syscall1(SYS_mq_unlink, (long)name);
+}
+static inline int sys_mq_timedsend(int mqdes, const char *msg_ptr, size_t msg_len, unsigned int msg_prio, const struct timespec *abs_timeout) {
+    return (int)sys_syscall5(SYS_mq_timedsend, mqdes, (long)msg_ptr, msg_len, msg_prio, (long)abs_timeout);
+}
+static inline ssize_t sys_mq_timedreceive(int mqdes, char *msg_ptr, size_t msg_len, unsigned int *msg_prio, const struct timespec *abs_timeout) {
+    return (ssize_t)sys_syscall5(SYS_mq_timedreceive, mqdes, (long)msg_ptr, msg_len, (long)msg_prio, (long)abs_timeout);
+}
+static inline int sys_mq_notify(int mqdes, const void *notification) {
+    return (int)sys_syscall2(SYS_mq_notify, mqdes, (long)notification);
+}
+static inline int sys_mq_getsetattr(int mqdes, const struct mq_attr *newattr, struct mq_attr *oldattr) {
+    return (int)sys_syscall3(SYS_mq_getsetattr, mqdes, (long)newattr, (long)oldattr);
+}
+static inline int sys_semtimedop(int semid, struct sembuf *sops, size_t nsops, const struct timespec *timeout) {
+    return (int)sys_syscall4(SYS_semtimedop, semid, (long)sops, nsops, (long)timeout);
+}
+static inline int sys_shmget(key_t key, size_t size, int shmflg) {
+    return (int)sys_syscall3(SYS_shmget, key, size, shmflg);
+}
+static inline int sys_shmctl(int shmid, int cmd, void *buf) {
+    return (int)sys_syscall3(SYS_shmctl, shmid, cmd, (long)buf);
+}
+static inline void *sys_shmat(int shmid, const void *shmaddr, int shmflg) {
+    return (void *)sys_syscall3(SYS_shmat, shmid, (long)shmaddr, shmflg);
+}
+static inline int sys_shmdt(const void *shmaddr) {
+    return (int)sys_syscall1(SYS_shmdt, (long)shmaddr);
+}
+static inline int sys_sendmmsg(int sockfd, struct mmsghdr *msgvec, unsigned int vlen, unsigned int flags) {
+    return (int)sys_syscall4(SYS_sendmmsg, sockfd, (long)msgvec, vlen, flags);
+}
+static inline int sys_recvmmsg(int sockfd, struct mmsghdr *msgvec, unsigned int vlen, unsigned int flags, struct timespec *timeout) {
+    return (int)sys_syscall5(SYS_recvmmsg, sockfd, (long)msgvec, vlen, flags, (long)timeout);
+}
+static inline int sys_sched_setattr(int pid, void *attr, unsigned int flags) {
+    return (int)sys_syscall3(SYS_sched_setattr, pid, (long)attr, flags);
+}
+static inline int sys_sched_getattr(int pid, void *attr, unsigned int size, unsigned int flags) {
+    return (int)sys_syscall4(SYS_sched_getattr, pid, (long)attr, size, flags);
+}
+static inline int sys_mlock2(const void *addr, size_t len, int flags) {
+    return (int)sys_syscall3(SYS_mlock2, (long)addr, len, flags);
+}
+static inline int sys_membarrier(int cmd, unsigned int flags, int cpu_id) {
+    return (int)sys_syscall3(SYS_membarrier, cmd, flags, cpu_id);
+}
+static inline int sys_userfaultfd(int flags) {
+    return (int)sys_syscall1(SYS_userfaultfd, flags);
+}
+static inline int sys_rt_tgsigqueueinfo(int tgid, int tid, int sig, void *uinfo) {
+    return (int)sys_syscall4(SYS_rt_tgsigqueueinfo, tgid, tid, sig, (long)uinfo);
+}
+static inline int sys_pidfd_send_signal(int pidfd, int sig, void *info, unsigned int flags) {
+    return (int)sys_syscall4(SYS_pidfd_send_signal, pidfd, sig, (long)info, flags);
+}
+static inline int sys_pidfd_getfd(int pidfd, int targetfd, unsigned int flags) {
+    return (int)sys_syscall3(SYS_pidfd_getfd, pidfd, targetfd, flags);
+}
 
 /* String / memory utilities */
 static inline size_t ltm_strlen(const char *s) {
