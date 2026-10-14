@@ -32,6 +32,15 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
     }
 
     if (sig == SIGILL) {
+        /* Check if it's mrs Xt, MIDR_EL1 (0xd5380000 | reg) */
+        if ((insn & ~0x1fU) == 0xd5380000U) {
+            uint32_t reg = insn & 0x1fU;
+            if (reg < 31) {
+                state->__x[reg] = 0x610f0300ULL; /* Apple Silicon M-series MIDR */
+            }
+            state->__pc += 4;
+            return;
+        }
         ltm_crash_handler(sig, si, ctx);
         return;
     }

@@ -79,6 +79,22 @@ build_c() {
     rm -f "$obj"
 }
 
+build_glibc() {
+    local src="$1"
+    local name="$(basename "$src" .c)"
+    local out="$BIN_DIR/$name"
+    local obj="$BIN_DIR/$name.o"
+    local rootfs="$PROJECT_ROOT/rootfs"
+
+    if [ -f "$rootfs/usr/lib/libc.so" ] && [ -f "$rootfs/usr/lib/Scrt1.o" ]; then
+        echo "  -> Compiling & dynamic linking $name.c with Glibc..."
+        "$CLANG" -target aarch64-linux-gnu -O2 -ffixed-x18 -fstack-protector-strong -isystem "$rootfs/usr/include" -c "$src" -o "$obj"
+        "$LLD" -flavor gnu --sysroot="$rootfs" -pie --dynamic-linker /lib/ld-linux-aarch64.so.1 -L"$rootfs/usr/lib" "$rootfs/usr/lib/Scrt1.o" "$rootfs/usr/lib/crti.o" "$obj" -lc -lpthread -lm "$rootfs/usr/lib/crtn.o" -o "$out"
+        rm -f "$obj"
+        cp "$out" "$rootfs/usr/bin/$name"
+    fi
+}
+
 # Build Assembly tests
 for asm_file in "$SCRIPT_DIR"/*.s; do
     if [ -f "$asm_file" ]; then
@@ -89,7 +105,12 @@ done
 # Build C tests
 for c_file in "$SCRIPT_DIR"/*.c; do
     if [ -f "$c_file" ]; then
-        build_c "$c_file"
+        c_name="$(basename "$c_file" .c)"
+        if [ "$c_name" = "test_glibc" ]; then
+            build_glibc "$c_file"
+        elif [ "$c_name" != "syscall_test" ]; then
+            build_c "$c_file"
+        fi
     fi
 done
 

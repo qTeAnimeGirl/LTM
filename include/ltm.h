@@ -519,6 +519,37 @@
 #define LINUX_AT_EXECFN       31
 #define LINUX_AT_SYSINFO_EHDR 33
 
+/* Linux ARM64 HWCAP capabilities (asm/hwcap.h) */
+#define LINUX_HWCAP_FP          (1 << 0)
+#define LINUX_HWCAP_ASIMD       (1 << 1)
+#define LINUX_HWCAP_EVTSTRM     (1 << 2)
+#define LINUX_HWCAP_AES         (1 << 3)
+#define LINUX_HWCAP_PMULL       (1 << 4)
+#define LINUX_HWCAP_SHA1        (1 << 5)
+#define LINUX_HWCAP_SHA2        (1 << 6)
+#define LINUX_HWCAP_CRC32       (1 << 7)
+#define LINUX_HWCAP_ATOMICS     (1 << 8)
+#define LINUX_HWCAP_FPHP        (1 << 9)
+#define LINUX_HWCAP_ASIMDHP     (1 << 10)
+#define LINUX_HWCAP_CPUID       (1 << 11)
+#define LINUX_HWCAP_ASIMDRDM    (1 << 12)
+#define LINUX_HWCAP_JSCVT       (1 << 13)
+#define LINUX_HWCAP_FCMA        (1 << 14)
+#define LINUX_HWCAP_LRCPC       (1 << 15)
+#define LINUX_HWCAP_DCPOP       (1 << 16)
+#define LINUX_HWCAP_SHA3        (1 << 17)
+#define LINUX_HWCAP_ASIMDDP     (1 << 20)
+#define LINUX_HWCAP_SHA512      (1 << 21)
+
+#define LINUX_DEFAULT_HWCAP_ARM64 \
+    (LINUX_HWCAP_FP | LINUX_HWCAP_ASIMD | LINUX_HWCAP_EVTSTRM | \
+     LINUX_HWCAP_AES | LINUX_HWCAP_PMULL | LINUX_HWCAP_SHA1 | \
+     LINUX_HWCAP_SHA2 | LINUX_HWCAP_CRC32 | LINUX_HWCAP_ATOMICS | \
+     LINUX_HWCAP_FPHP | LINUX_HWCAP_ASIMDHP | \
+     LINUX_HWCAP_ASIMDRDM | LINUX_HWCAP_JSCVT | LINUX_HWCAP_FCMA | \
+     LINUX_HWCAP_LRCPC | LINUX_HWCAP_DCPOP | LINUX_HWCAP_SHA3 | \
+     LINUX_HWCAP_ASIMDDP | LINUX_HWCAP_SHA512)
+
 /* Linux ARM64 open flags & AT_FDCWD (asm-generic/fcntl.h) */
 #define LINUX_AT_FDCWD        (-100)
 #define LINUX_O_RDONLY        00

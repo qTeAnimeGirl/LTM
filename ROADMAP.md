@@ -239,14 +239,17 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
   - 4 concurrent worker threads sharing memory.
   - Futex barrier start gate and child-TID join synchronization.
   - Per-thread TLS isolation verification.
-  - Strict 3-Way Mandate: Happy path concurrency, boundary tests (NULL stack with `CLONE_VM`), error handling (`-EINVAL`, `-ESRCH`, `-EFAULT`).
-- [x] **327 of 327 Tests Passing (100% Pass Rate)**:
-  - 316 standalone per-syscall unit tests + 11 core integration test suites passing with 100% accuracy.
+### Milestone 18: Step 2 Complete — Full Glibc Dynamic Loader & Runtime Compatibility
+- [x] **Glibc Dynamic Loader (`ld-linux-aarch64.so.1`)**: Fully operational loading of GNU dynamic linkers, resolving complex dependency trees (`libc.so.6`, `libm.so.6`, `libpthread.so.0`, `libcrypto.so.3`, `libz.so.1`, `libcap.so.2`, `libreadline.so.8`, `libncursesw.so.6`).
+- [x] **Apple Silicon 16KB Page Boundary Alignment for 4KB-aligned Glibc Binaries**: Seamlessly maps Position-Independent Executables (`ET_DYN`) and shared objects across 16KB page spans with dedicated RX and RW permissions.
+- [x] **Auxiliary Vector Completeness**: Extended `LINUX_AT_HWCAP` with Apple Silicon hardware capabilities (FP, ASIMD, AES, PMULL, SHA1, SHA2, CRC32, ATOMICS, FPHP, ASIMDHP, ASIMDRDM, JSCVT, FCMA, LRCPC, DCPOP, SHA3, ASIMDDP, SHA512), `AT_RANDOM`, and `AT_EXECFN`.
+- [x] **EL0 System Register Emulation (`MIDR_EL1`)**: Intercepts and emulates `mrs Xt, MIDR_EL1` (`0xd5380000`) in `SIGILL` handler, returning Apple Silicon M-series identification without Darwin kernel panics.
+- [x] **GNU Bash 5.3 & GNU Coreutils 9.12**: Verified live execution of GNU Coreutils (`gnu-ls`, `gnu-cat`, `sha256sum`, `head`, `tail`, `wc`, `uname`, `date`, `getconf`, `getent`, `iconv`, `gencat`) and full interactive GNU Bash 5.3 linked with Glibc.
+- [x] **Glibc Dynamic Loader Test Suite (`tests/test_glibc.c`)**: Verified math (`libm`), heap (`malloc`/`realloc`/`free`), stdio streams, stack canary (`-fstack-protector-strong`), and multithreaded `pthreads` with TLS across concurrent threads.
+- [x] **328 of 328 Tests Passing (100% Pass Rate)**:
+  - 316 standalone per-syscall unit tests + 12 core integration test suites passing with 100% accuracy.
 
 ---
-
-
-
 
 ## 3. Comprehensive Syscall Implementation Matrix
 
@@ -618,20 +621,19 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
   - Linux package managers and networking utilities query IP addresses and interfaces via Netlink (`AF_NETLINK`). Return synthetic route and interface lists.
 
 ### Tier 4: Very Hard — Multi-Threading (`pthreads`) & Full Concurrency
-- [ ] **Thread Creation via `clone()`**:
-  - Currently, `clone` supports process forks (`flags == SIGCHLD`).
-  - Add support for `CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_THREAD | CLONE_SIGHAND`.
-  - Map guest threads to host Darwin POSIX threads (`pthread_create`).
-  - Allocate distinct 16KB-aligned thread stacks and initialize private thread-local storage (`tpidr_el0`).
-- [ ] **Robust Multi-Threaded Futexes**:
-  - Expand `futex` to handle concurrent contention across threads using Mach semaphores or condition variables.
-- [ ] **Thread-Local Storage (TLS) Architecture**:
-  - Leverage native userland `msr tpidr_el0` on Apple Silicon for zero-overhead per-thread pointers.
+- [x] **Thread Creation via `clone()`**:
+  - Full support for `CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_THREAD | CLONE_SIGHAND`.
+  - Mapped guest threads to host Darwin POSIX threads (`pthread_create`).
+  - Allocated distinct 16KB-aligned thread stacks and virtualized thread-local storage (`tpidr_el0`).
+- [x] **Robust Multi-Threaded Futexes**:
+  - Implemented `futex` with atomic barriers, futex wait/wake, bitset support, and child clearing on exit.
+- [x] **Thread-Local Storage (TLS) Architecture**:
+  - Virtualized per-thread `tpidr_el0` pointers with JIT instruction traps and thread-local state.
 
 ### Tier 5: Frontier — Full Glibc Compatibility & Modern Linux Innovations
-- [ ] **Glibc Dynamic Loader (`ld-linux-aarch64.so.1`)**:
+- [x] **Glibc Dynamic Loader (`ld-linux-aarch64.so.1`)**:
   - Support Ubuntu / Debian / Arch Linux Glibc dynamic binaries.
-  - Implement Glibc-specific initial relocation flags and thread initialization structures.
+  - Implemented Glibc-specific initial relocation flags, auxiliary vector (`AT_HWCAP`, `AT_RANDOM`, `AT_EXECFN`), and thread initialization structures.
 - [x] **Extended Modern PIDFD Syscalls**:
   - `pidfd_open` (434), `pidfd_send_signal` (424), `pidfd_getfd` (438).
 - [x] **Modern Concurrency & IO**:

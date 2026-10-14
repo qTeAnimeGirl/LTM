@@ -2737,3 +2737,39 @@ Multi-Core Scaling (Single-Core vs 8-Core Parallelism):
    - An ideal 8-core homogeneous CPU achieves up to ~7.5x - 7.8x speedup. On a 4P+4E heterogeneous topology where E-cores have ~35-40% the compute throughput of P-cores, the theoretical maximum scaling is ~5.4x - 6.0x.
    - Both macOS Native (5.35x) and Linux LTM (5.79x) achieved near-theoretical maximum parallel speedup, proving Darwin XNU schedules LTM's guest threads across all 8 cores simultaneously.
 
+---
+
+## Sprint 21: Step 2 Complete — Full Glibc Dynamic Loader & Runtime Compatibility
+
+**Date**: 2026-10-14  
+**Author**: Engineering Swarm (Lead Architect, Core Systems Coder, Diligent Tester, Systems Critic)  
+**Status**: Step 2 Complete & Certified (328 of 328 Tests Passing, 100% Pass Rate)
+
+### 1. Architectural Mission & Invariants
+Step 2 of the Grand Roadmap requires 100% native userspace execution of dynamic Linux ARM64 binaries linked against the **GNU C Library (`glibc`)** using the GNU dynamic linker (`ld-linux-aarch64.so.1`):
+1. **Dynamic Linker Coexistence**:
+   - Both `/lib/ld-musl-aarch64.so.1` (Musl) and `/lib/ld-linux-aarch64.so.1` (Glibc) coexist harmoniously inside `rootfs` with zero naming conflicts.
+   - Dynamic loader resolution cleanly handles symlinks between `/lib/ld-linux-aarch64.so.1`, `/usr/lib/ld-linux-aarch64.so.1`, and `/lib64/`.
+2. **16KB Apple Silicon Page Alignment for Glibc Binaries**:
+   - Modern Linux distributions (Arch Linux ARM, Debian, Ubuntu) compile all binaries as Position-Independent Executables (`ET_DYN` / PIE) aligned to 64KB (`0x10000`) or 16KB boundaries.
+   - LTM maps PIE binaries at dedicated high bases above 4GB (`0x400000000` for main binary, `0x500000000` for interpreter), completely bypassing macOS Apple Silicon's 4GB `PAGEZERO`.
+   - Distinct 16KB page protections for RX executable code and RW data segments avoid Darwin W^X violations.
+3. **Auxiliary Vector (`auxv`) Completeness**:
+   - Added `LINUX_AT_HWCAP` passing hardware capabilities (FP, ASIMD, AES, PMULL, SHA1, SHA2, CRC32, ATOMICS, FPHP, ASIMDHP, ASIMDRDM, JSCVT, FCMA, LRCPC, DCPOP, SHA3, ASIMDDP, SHA512).
+   - Omitted `LINUX_HWCAP_CPUID` to prevent Glibc from executing privileged EL1 instructions in user space.
+   - Provided `AT_RANDOM` (16 bytes of entropy for stack canary `__stack_chk_guard`) and `AT_EXECFN`.
+4. **Privileged Register Emulation in User Space (`MIDR_EL1`)**:
+   - When Glibc attempts to query processor architecture via `mrs Xt, MIDR_EL1` (`0xd5380000`), Darwin XNU delivers `SIGILL`.
+   - LTM intercepts `0xd5380000` in `ltm_sig_handler` and emulates the read by returning Apple Silicon identification (`0x610f0300ULL`), advancing PC by 4 bytes.
+5. **Verified Live Glibc Software Ecosystem**:
+   - Arch Linux ARM Glibc 2.43 core runtime (`libc.so.6`, `libm.so.6`, `libpthread.so.0`, `libcrypto.so.3`, `libz.so.1`, `libcap.so.2`, `libreadline.so.8`, `libncursesw.so.6`).
+   - GNU Coreutils 9.12 (`gnu-ls`, `gnu-cat`, `sha256sum`, `head`, `tail`, `wc`, `uname`, `date`, `getconf`, `getent`, `iconv`, `gencat`).
+   - Full interactive GNU Bash 5.3 linked with Glibc.
+
+### 2. Comprehensive Test Suite Verification
+- **Automated Regression Suite Expansion**:
+  - Authored `tests/test_glibc.c` covering Glibc libm math, dynamic heap allocation, `pthreads` concurrency with per-thread TLS, stdio file streams, and stack canaries.
+  - Added Test #12 to `run_tests.sh`.
+  - Re-ran test harness: **328 of 328 tests passing (100.0% pass rate, 0 failures)**.
+
+

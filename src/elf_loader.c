@@ -434,7 +434,7 @@ int elf_setup_stack(ltm_runtime_t *rt) {
         { LINUX_AT_EGID,     0 },
         { LINUX_AT_CLKTCK,   100 },
         { LINUX_AT_PLATFORM, platform_ptr },
-        { LINUX_AT_HWCAP,    0xff },
+        { LINUX_AT_HWCAP,    LINUX_DEFAULT_HWCAP_ARM64 },
         { LINUX_AT_HWCAP2,   0 },
         { LINUX_AT_RANDOM,   random_ptr },
         { LINUX_AT_SECURE,   0 },
