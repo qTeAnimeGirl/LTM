@@ -76,6 +76,45 @@ struct linux_timespec {
     int64_t tv_nsec;
 };
 
+/* Linux itimerspec */
+struct linux_itimerspec {
+    struct linux_timespec it_interval;
+    struct linux_timespec it_value;
+};
+
+/* Linux open_how (openat2) */
+struct linux_open_how {
+    uint64_t flags;
+    uint64_t mode;
+    uint64_t resolve;
+};
+
+/* Linux signalfd_siginfo (128 bytes) */
+struct linux_signalfd_siginfo {
+    uint32_t ssi_signo;
+    int32_t  ssi_errno;
+    int32_t  ssi_code;
+    uint32_t ssi_pid;
+    uint32_t ssi_uid;
+    int32_t  ssi_fd;
+    uint32_t ssi_tid;
+    uint32_t ssi_band;
+    uint32_t ssi_overrun;
+    uint32_t ssi_trapno;
+    int32_t  ssi_status;
+    int32_t  ssi_int;
+    uint64_t ssi_ptr;
+    uint64_t ssi_utime;
+    uint64_t ssi_stime;
+    uint64_t ssi_addr;
+    uint16_t ssi_addr_lsb;
+    uint16_t __pad2;
+    int32_t  ssi_syscall;
+    uint64_t ssi_call_addr;
+    uint32_t ssi_arch;
+    uint8_t  __pad[28];
+};
+
 /* Linux timeval */
 struct linux_timeval {
     int64_t tv_sec;
@@ -298,5 +337,25 @@ int64_t handle_getrusage(int who, struct linux_rusage *usage);
 int64_t handle_umask(mode_t mask);
 int64_t handle_readahead(int fd, off_t offset, size_t count);
 int64_t handle_madvise(void *addr, size_t length, int advice);
+
+/* Wave 2 Syscalls */
+int64_t handle_flock(int fd, int operation);
+int64_t handle_fallocate(int fd, int mode, off_t offset, off_t len);
+int64_t handle_chroot(const char *path);
+int64_t handle_pread64(int fd, void *buf, size_t count, off_t offset);
+int64_t handle_pwrite64(int fd, const void *buf, size_t count, off_t offset);
+int64_t handle_signalfd4(int ufd, const uint64_t *mask, size_t sizemask, int flags);
+int64_t handle_sync(void);
+int64_t handle_syncfs(int fd);
+int64_t handle_timerfd_create(int clockid, int flags);
+int64_t handle_timerfd_settime(int fd, int flags, const struct linux_itimerspec *new_value, struct linux_itimerspec *old_value);
+int64_t handle_timerfd_gettime(int fd, struct linux_itimerspec *curr_value);
+int64_t handle_clock_nanosleep(int clockid, int flags, const struct linux_timespec *req, struct linux_timespec *rem);
+int64_t handle_memfd_create(const char *name, unsigned int flags);
+int64_t handle_copy_file_range(int fd_in, off_t *off_in, int fd_out, off_t *off_out, size_t len, unsigned int flags);
+int64_t handle_close_range(unsigned int first, unsigned int last, unsigned int flags);
+int64_t handle_openat2(int dirfd, const char *pathname, struct linux_open_how *how, size_t size);
+int64_t handle_faccessat2(int dirfd, const char *pathname, int mode, int flags);
+int64_t handle_kill(pid_t pid, int sig);
 
 #endif /* SYSCALLS_H */

@@ -81,6 +81,35 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
   - `madvise` (233)
 - [x] **Automated Regression Suite Expansion**: Expanded from 6 to 9 test suites with 100% pass rate (`test_ps_procfs`, `test_wave1_syscalls`, `busybox ps`).
 
+### Milestone 8: Advanced Filesystem, Event Descriptors & Modern Linux Primitives (Sprint 9 / Wave 2)
+- [x] **Signals & Event Descriptors (`signalfd4`, Syscall 74)**:
+  - Thread-safe self-pipe bridge registering active signalfd instances.
+  - Signal routing in `handle_kill`, `handle_tkill`, and `handle_tgkill` (`signalfd_deliver_signal`) pushing 128-byte `struct linux_signalfd_siginfo` records into the pipe.
+  - Enforced strict Linux ABI semantics: `ufd == -1` creates a new descriptor; `ufd < 0 && ufd != -1` returns `-LINUX_EBADF`.
+- [x] **Grand Central Dispatch Timers (`timerfd_*`, Syscalls 85, 86, 87)**:
+  - Emulated Linux timer file descriptors using Darwin libdispatch timer sources (`dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, ...)`).
+  - Self-pipe endpoints writing 8-byte `uint64_t` expiration counts directly to monitored descriptors.
+  - Supports relative delays and `TFD_TIMER_ABSTIME` with immediate expiration for past timestamps.
+  - Automatic timer cancellation and descriptor purging on `handle_close`.
+- [x] **In-Jail Chroot Virtualization (`chroot`, Syscall 51)**:
+  - Avoided invoking Darwin's host `chroot(2)` (which requires root and breaks userland execution).
+  - Virtualized root switching by mutating `g_ltm.host_rootfs` after verifying the canonical target directory remains within the container root jail.
+  - Automatically provisions `<host_rootfs>/proc` mount point within the new root directory.
+- [x] **Modern Linux Extensions (`openat2`, `close_range`, `memfd_create`, `copy_file_range`, `faccessat2`)**:
+  - `openat2` (437): Full `struct linux_open_how` parser with `RESOLVE_BENEATH` (preventing upward traversal escapes) and `RESOLVE_NO_SYMLINKS` (returning `-LINUX_ELOOP` on symlinks).
+  - `close_range` (436): Iterative range closure supporting `CLOSE_RANGE_CLOEXEC` while safeguarding standard I/O (0..2) and internal runtime tables.
+  - `memfd_create` (279): Anonymous file creation using `mkstemp("/tmp/ltm_memfd_XXXXXX")` with immediate `unlink()`, preventing host disk leaks and respecting Apple Silicon 16KB boundaries.
+  - `copy_file_range` (285): High-performance 64KB chunked userland buffer transfer using `pread` and `pwrite`, validating regular file types, append-only descriptor status (`-LINUX_EBADF`), and pointer addresses.
+  - `faccessat2` (439): Extended file accessibility with `AT_EACCESS`, `AT_SYMLINK_NOFOLLOW`, and virtual procfs permission checking.
+- [x] **Filesystem, Locks & Sockets (`fallocate`, `flock`, `pread64`, `pwrite64`, `sync`, `syncfs`, `clock_nanosleep`, `accept4`)**:
+  - `fallocate` (47): Validated write access and regular file mode; used Darwin `fcntl(fd, F_PREALLOCATE, &fst)` and `ftruncate` for space allocation.
+  - `flock` (32): Delegated to Darwin `flock()` with operation mask validation; converted `EWOULDBLOCK` to `-LINUX_EAGAIN`.
+  - `pread64` (67) & `pwrite64` (68): Direct positional I/O without modifying file seek positions.
+  - `accept4` (242): Validated socket flags (`SOCK_NONBLOCK`, `SOCK_CLOEXEC`) and pointers upfront to prevent descriptor leaks and race conditions.
+  - `sync` (81) & `syncfs` (267): Darwin `sync()` and `fsync()`, handling directory descriptors and `-LINUX_EBADF`.
+  - `clock_nanosleep` (115): High-resolution relative and absolute sleep (`TIMER_ABSTIME`).
+- [x] **Automated Regression Suite Expansion**: Expanded to 10 automated test suites with 100% pass rate (`test_wave2_syscalls` with 96 unit test assertions).
+
 ---
 
 ## 3. Comprehensive Syscall Implementation Matrix
@@ -96,6 +125,7 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 24 | `dup3` | File I/O | **Implemented** | `dup2` with `O_CLOEXEC` flag support |
 | 25 | `fcntl` | File I/O | **Implemented** | Command translation (`F_GETFD`, `F_SETFD`, `F_GETFL`, `F_SETFL`, `F_DUPFD`) |
 | 29 | `ioctl` | Terminal/I/O | **Implemented** | `TIOCGWINSZ`, `TIOCSWINSZ`, `TCGETS`, `TCSETS`, `TIOCSCTTY`, `TIOCGPGRP`, `TIOCSPGRP`, `FIONREAD` |
+| 32 | `flock` | File I/O | **Implemented** | Advisory file locking via Darwin `flock()`, translates `EWOULDBLOCK` to `-EAGAIN` |
 | 34 | `mkdirat` | Filesystem | **Implemented** | Sandboxed directory creation with `-EFAULT` pointer check |
 | 35 | `unlinkat` | Filesystem | **Implemented** | Sandboxed file unlinking with `-EFAULT` pointer check |
 | 36 | `symlinkat` | Filesystem | **Implemented** | Sandboxed symlink creation with `-EFAULT` pointer check |
@@ -105,7 +135,11 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 44 | `fstatfs` | Filesystem | **Implemented** | Translates Darwin `fstatfs` to Linux `struct linux_statfs64` |
 | 45 | `truncate` | File I/O | **Implemented** | Sandboxed path resolution + Darwin `truncate()`, validates `length >= 0` |
 | 46 | `ftruncate` | File I/O | **Implemented** | Darwin `ftruncate()`, validates `fd >= 0` and `length >= 0` |
+| 47 | `fallocate` | File I/O | **Implemented** | Darwin `fcntl(fd, F_PREALLOCATE)` and `ftruncate()`, validates regular file |
 | 48 | `faccessat` | Filesystem | **Implemented** | Permissions verification within sandbox with `-EFAULT` check |
+| 49 | `chdir` | Filesystem | **Implemented** | Changes guest current working directory within sandbox |
+| 50 | `fchdir` | Filesystem | **Implemented** | Changes current working directory using open directory descriptor |
+| 51 | `chroot` | Security | **Implemented** | Sandboxed root directory virtualization modifying `host_rootfs` |
 | 52 | `fchmod` | Filesystem | **Implemented** | Changes open fd permissions, validates `fd >= 0` |
 | 53 | `fchmodat` | Filesystem | **Implemented** | Sandboxed path permissions change with symlink flag handling |
 | 54 | `fchown` | Filesystem | **Implemented** | Validates `fd >= 0` via `fstat()`, returns 0 in root container |
@@ -119,14 +153,22 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 64 | `write` | File I/O | **Implemented** | Writes to file descriptor with error translation |
 | 65 | `readv` | File I/O | **Implemented** | Vectored I/O read with count validation |
 | 66 | `writev` | File I/O | **Implemented** | Vectored I/O write with count validation |
+| 67 | `pread64` | File I/O | **Implemented** | Positional read via Darwin `pread()` without altering file offset |
+| 68 | `pwrite64` | File I/O | **Implemented** | Positional write via Darwin `pwrite()` without altering file offset |
 | 71 | `sendfile` | File I/O | **Implemented** | Kernel-space data transfer between descriptors |
 | 72 | `pselect6` | Event Loop | **Implemented** | Synchronous I/O multiplexing with timespec timeout |
 | 73 | `ppoll` | Event Loop | **Implemented** | Polls file descriptors with nanosecond timeout |
+| 74 | `signalfd4` | Signals | **Implemented** | Thread-safe pipe bridge delivering 128-byte `struct linux_signalfd_siginfo` |
 | 78 | `readlinkat` | Filesystem | **Implemented** | Sandboxed readlink with virtual proc/self/exe support, `-EFAULT` check |
 | 79 | `newfstatat` | Filesystem | **Implemented** | Translates Darwin `struct stat` to Linux `linux_stat` (32-bit dev, 64-bit ino) |
 | 80 | `fstat` | Filesystem | **Implemented** | Translates open fd stat to `linux_stat` with root ownership |
+| 81 | `sync` | Filesystem | **Implemented** | Darwin `sync()` committing cached filesystem writes |
 | 82 | `fsync` | File I/O | **Implemented** | Flushes modified file data to disk via Darwin `fsync()` |
 | 83 | `fdatasync` | File I/O | **Implemented** | Flushes file data to disk via Darwin `fsync()` |
+| 85 | `timerfd_create` | Timers | **Implemented** | Timer file descriptor using libdispatch timer and non-blocking pipe |
+| 86 | `timerfd_settime`| Timers | **Implemented** | Arms/disarms timer with relative or `TFD_TIMER_ABSTIME` interval |
+| 87 | `timerfd_gettime`| Timers | **Implemented** | Reads remaining duration and interval of timer descriptor |
+| 88 | `utimensat` | Filesystem | **Implemented** | Updates nanosecond timestamps with `UTIME_NOW` / `UTIME_OMIT` |
 | 90 | `capget` | Security | **Implemented** | Reports full effective/permitted capabilities (`0xffffffff`) |
 | 91 | `capset` | Security | **Implemented** | Virtualized superuser privilege setter (returns 0) |
 | 93 | `exit` | Process | **Implemented** | Terminates calling thread |
@@ -139,6 +181,7 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 104 | `getitimer` | Timers | **Implemented** | Reads remaining timer duration |
 | 113 | `clock_gettime` | Time | **Implemented** | Maps `CLOCK_REALTIME`, `CLOCK_MONOTONIC`, `CLOCK_BOOTTIME` |
 | 114 | `clock_getres` | Time | **Implemented** | Returns clock resolution |
+| 115 | `clock_nanosleep`| Time | **Implemented** | High-resolution relative and absolute sleep (`TIMER_ABSTIME`) |
 | 122 | `sched_setaffinity` | Scheduling | **Implemented** | Validates mask and length, benign success |
 | 123 | `sched_getaffinity` | Scheduling | **Implemented** | Populates CPU affinity bitmask from Darwin `hw.ncpu` |
 | 124 | `sched_yield` | Scheduling | **Implemented** | Yields processor execution via Darwin `sched_yield()` |
@@ -194,8 +237,17 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
 | 222 | `mmap` | Memory | **Implemented** | 16KB-aligned memory allocation, MAP_ANONYMOUS, MAP_JIT |
 | 226 | `mprotect` | Memory | **Implemented** | Modifies page protections, re-patches executable ranges |
 | 233 | `madvise` | Memory | **Implemented** | Validates 16KB page alignment, delegates to Darwin `madvise()` |
+| 242 | `accept4` | Networking | **Implemented** | Accepts connection with `SOCK_NONBLOCK` and `SOCK_CLOEXEC` flags |
 | 260 | `wait4` | Process | **Implemented** | Waits for child process termination with status translation |
 | 261 | `prlimit64` | Resources | **Implemented** | Resource limits query and configuration |
+| 267 | `syncfs` | Filesystem | **Implemented** | Darwin `fsync()` on file descriptor with `-EBADF` validation |
+| 276 | `renameat2` | Filesystem | **Implemented** | Atomic file rename with exchange/no-replace support |
+| 278 | `getrandom` | Security | **Implemented** | Cryptographic random entropy via Darwin `arc4random_buf()` |
+| 279 | `memfd_create` | Memory | **Implemented** | Anonymous descriptor via temporary file with immediate `unlink()` |
+| 285 | `copy_file_range`| File I/O | **Implemented** | High-performance 64KB chunked userland buffer transfer |
+| 436 | `close_range` | File I/O | **Implemented** | Range descriptor closure with `CLOSE_RANGE_CLOEXEC` support |
+| 437 | `openat2` | File I/O | **Implemented** | Modern openat with `RESOLVE_BENEATH` and `RESOLVE_NO_SYMLINKS` |
+| 439 | `faccessat2` | Filesystem | **Implemented** | Extended access checks with `AT_EACCESS` and `AT_SYMLINK_NOFOLLOW` |
 
 ---
 

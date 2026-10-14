@@ -11,9 +11,9 @@
 
 | Status Category | Count | Percentage |
 |:---|:---:|:---:|
-| ✅ **Implemented & Verified (Wave 1 & Baseline)** | 110 | 34.8% |
-| 🚀 **Wave 2 In-Progress** | 18 | 5.7% |
-| 📋 **Planned (Wave 3+)** | 188 | 59.5% |
+| ✅ **Implemented & Verified (Wave 1, Wave 2 & Baseline)** | 131 | 41.5% |
+| 🚀 **Wave 3 In-Progress** | 24 | 7.6% |
+| 📋 **Planned (Wave 4+)** | 161 | 50.9% |
 | **Total Official Linux ARM64 Syscalls** | **316** | **100.0%** |
 
 ---
@@ -54,7 +54,7 @@
 | 29 | `ioctl` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 30 | `ioprio_set` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 31 | `ioprio_get` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
-| 32 | `flock` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
+| 32 | `flock` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 33 | `mknodat` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 34 | `mkdirat` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 35 | `unlinkat` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
@@ -69,11 +69,11 @@
 | 44 | `fstatfs` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 45 | `truncate` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 46 | `ftruncate` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
-| 47 | `fallocate` | 🚀 Wave 2 In-Progress | Scheduled for immediate implementation & 3-way verification |
+| 47 | `fallocate` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 48 | `faccessat` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
-| 49 | `chdir` | 🚀 Wave 2 In-Progress | Scheduled for immediate implementation & 3-way verification |
-| 50 | `fchdir` | 🚀 Wave 2 In-Progress | Scheduled for immediate implementation & 3-way verification |
-| 51 | `chroot` | 🚀 Wave 2 In-Progress | Scheduled for immediate implementation & 3-way verification |
+| 49 | `chdir` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
+| 50 | `fchdir` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
+| 51 | `chroot` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 52 | `fchmod` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 53 | `fchmodat` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 54 | `fchownat` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
@@ -89,28 +89,28 @@
 | 64 | `write` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 65 | `readv` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 66 | `writev` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
-| 67 | `pread64` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
-| 68 | `pwrite64` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
+| 67 | `pread64` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
+| 68 | `pwrite64` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 69 | `preadv` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 70 | `pwritev` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 71 | `sendfile` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 72 | `pselect6` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 73 | `ppoll` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
-| 74 | `signalfd4` | 🚀 Wave 2 In-Progress | Scheduled for immediate implementation & 3-way verification |
+| 74 | `signalfd4` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 75 | `vmsplice` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 76 | `splice` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 77 | `tee` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 78 | `readlinkat` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 79 | `newfstatat` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 80 | `fstat` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
-| 81 | `sync` | 🚀 Wave 2 In-Progress | Scheduled for immediate implementation & 3-way verification |
+| 81 | `sync` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 82 | `fsync` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 83 | `fdatasync` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 84 | `sync_file_range` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
-| 85 | `timerfd_create` | 🚀 Wave 2 In-Progress | Scheduled for immediate implementation & 3-way verification |
-| 86 | `timerfd_settime` | 🚀 Wave 2 In-Progress | Scheduled for immediate implementation & 3-way verification |
-| 87 | `timerfd_gettime` | 🚀 Wave 2 In-Progress | Scheduled for immediate implementation & 3-way verification |
-| 88 | `utimensat` | 🚀 Wave 2 In-Progress | Scheduled for immediate implementation & 3-way verification |
+| 85 | `timerfd_create` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
+| 86 | `timerfd_settime` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
+| 87 | `timerfd_gettime` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
+| 88 | `utimensat` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 89 | `acct` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 90 | `capget` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 91 | `capset` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
@@ -137,7 +137,7 @@
 | 112 | `clock_settime` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 113 | `clock_gettime` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 114 | `clock_getres` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
-| 115 | `clock_nanosleep` | 🚀 Wave 2 In-Progress | Scheduled for immediate implementation & 3-way verification |
+| 115 | `clock_nanosleep` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 116 | `syslog` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 117 | `ptrace` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 118 | `sched_setparam` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
@@ -264,7 +264,7 @@
 | 239 | `move_pages` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 240 | `rt_tgsigqueueinfo` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 241 | `perf_event_open` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
-| 242 | `accept4` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
+| 242 | `accept4` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 243 | `recvmmsg` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 260 | `wait4` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 261 | `prlimit64` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
@@ -273,7 +273,7 @@
 | 264 | `name_to_handle_at` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 265 | `open_by_handle_at` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 266 | `clock_adjtime` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
-| 267 | `syncfs` | 🚀 Wave 2 In-Progress | Scheduled for immediate implementation & 3-way verification |
+| 267 | `syncfs` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 268 | `setns` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 269 | `sendmmsg` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 270 | `process_vm_readv` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
@@ -284,14 +284,14 @@
 | 275 | `sched_getattr` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 276 | `renameat2` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 277 | `seccomp` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
-| 278 | `getrandom` | 🚀 Wave 2 In-Progress | Scheduled for immediate implementation & 3-way verification |
-| 279 | `memfd_create` | 🚀 Wave 2 In-Progress | Scheduled for immediate implementation & 3-way verification |
+| 278 | `getrandom` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
+| 279 | `memfd_create` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 280 | `bpf` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 281 | `execveat` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 282 | `userfaultfd` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 283 | `membarrier` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 284 | `mlock2` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
-| 285 | `copy_file_range` | 🚀 Wave 2 In-Progress | Scheduled for immediate implementation & 3-way verification |
+| 285 | `copy_file_range` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 286 | `preadv2` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 287 | `pwritev2` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 288 | `pkey_mprotect` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
@@ -311,10 +311,10 @@
 | 433 | `fspick` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 434 | `pidfd_open` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 435 | `clone3` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
-| 436 | `close_range` | 🚀 Wave 2 In-Progress | Scheduled for immediate implementation & 3-way verification |
-| 437 | `openat2` | 🚀 Wave 2 In-Progress | Scheduled for immediate implementation & 3-way verification |
+| 436 | `close_range` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
+| 437 | `openat2` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 438 | `pidfd_getfd` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
-| 439 | `faccessat2` | 🚀 Wave 2 In-Progress | Scheduled for immediate implementation & 3-way verification |
+| 439 | `faccessat2` | ✅ Implemented | Native Darwin Mach/BSD translation + 3-way test suite |
 | 440 | `process_madvise` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 441 | `epoll_pwait2` | 📋 Planned | Mapped to Darwin API or benign emulation stub |
 | 442 | `mount_setattr` | 📋 Planned | Mapped to Darwin API or benign emulation stub |

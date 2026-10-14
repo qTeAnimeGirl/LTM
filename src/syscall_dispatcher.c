@@ -974,6 +974,60 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case LINUX_SYS_readahead:
             ret = handle_readahead((int)a0, (off_t)a1, (size_t)a2);
             break;
+        case LINUX_SYS_kill:
+            ret = handle_kill((pid_t)a0, (int)a1);
+            break;
+        case LINUX_SYS_flock:
+            ret = handle_flock((int)a0, (int)a1);
+            break;
+        case LINUX_SYS_fallocate:
+            ret = handle_fallocate((int)a0, (int)a1, (off_t)a2, (off_t)a3);
+            break;
+        case LINUX_SYS_chroot:
+            ret = handle_chroot((const char *)a0);
+            break;
+        case LINUX_SYS_pread64:
+            ret = handle_pread64((int)a0, (void *)a1, (size_t)a2, (off_t)a3);
+            break;
+        case LINUX_SYS_pwrite64:
+            ret = handle_pwrite64((int)a0, (const void *)a1, (size_t)a2, (off_t)a3);
+            break;
+        case LINUX_SYS_signalfd4:
+            ret = handle_signalfd4((int)a0, (const uint64_t *)a1, (size_t)a2, (int)a3);
+            break;
+        case LINUX_SYS_sync:
+            ret = handle_sync();
+            break;
+        case LINUX_SYS_syncfs:
+            ret = handle_syncfs((int)a0);
+            break;
+        case LINUX_SYS_timerfd_create:
+            ret = handle_timerfd_create((int)a0, (int)a1);
+            break;
+        case LINUX_SYS_timerfd_settime:
+            ret = handle_timerfd_settime((int)a0, (int)a1, (const struct linux_itimerspec *)a2, (struct linux_itimerspec *)a3);
+            break;
+        case LINUX_SYS_timerfd_gettime:
+            ret = handle_timerfd_gettime((int)a0, (struct linux_itimerspec *)a1);
+            break;
+        case LINUX_SYS_clock_nanosleep:
+            ret = handle_clock_nanosleep((int)a0, (int)a1, (const struct linux_timespec *)a2, (struct linux_timespec *)a3);
+            break;
+        case LINUX_SYS_memfd_create:
+            ret = handle_memfd_create((const char *)a0, (unsigned int)a1);
+            break;
+        case LINUX_SYS_copy_file_range:
+            ret = handle_copy_file_range((int)a0, (off_t *)a1, (int)a2, (off_t *)a3, (size_t)a4, (unsigned int)a5);
+            break;
+        case LINUX_SYS_close_range:
+            ret = handle_close_range((unsigned int)a0, (unsigned int)a1, (unsigned int)a2);
+            break;
+        case LINUX_SYS_openat2:
+            ret = handle_openat2((int)a0, (const char *)a1, (struct linux_open_how *)a2, (size_t)a3);
+            break;
+        case LINUX_SYS_faccessat2:
+            ret = handle_faccessat2((int)a0, (const char *)a1, (int)a2, (int)a3);
+            break;
         case LINUX_SYS_rseq:
             ret = -LINUX_ENOSYS;
             break;

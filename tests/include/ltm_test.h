@@ -26,10 +26,13 @@ typedef unsigned long uintptr_t;
 typedef enum { false = 0, true = 1 } bool;
 
 /* Linux ARM64 System Call Numbers */
+#define SYS_flock           32
 #define SYS_statfs          43
 #define SYS_fstatfs         44
 #define SYS_truncate        45
 #define SYS_ftruncate       46
+#define SYS_fallocate       47
+#define SYS_chroot          51
 #define SYS_fchmod          52
 #define SYS_fchmodat        53
 #define SYS_fchownat        54
@@ -40,11 +43,19 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_lseek           62
 #define SYS_read            63
 #define SYS_write           64
+#define SYS_pread64         67
+#define SYS_pwrite64        68
+#define SYS_signalfd4       74
 #define SYS_newfstatat      79
+#define SYS_sync            81
 #define SYS_fsync           82
 #define SYS_fdatasync       83
+#define SYS_timerfd_create  85
+#define SYS_timerfd_settime 86
+#define SYS_timerfd_gettime 87
 #define SYS_exit            93
 #define SYS_exit_group      94
+#define SYS_clock_nanosleep 115
 #define SYS_sched_setaffinity 122
 #define SYS_sched_getaffinity 123
 #define SYS_sched_yield     124
@@ -67,6 +78,13 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_munmap          215
 #define SYS_mmap            222
 #define SYS_madvise         233
+#define SYS_accept4         242
+#define SYS_syncfs          267
+#define SYS_memfd_create    279
+#define SYS_copy_file_range 285
+#define SYS_close_range     436
+#define SYS_openat2         437
+#define SYS_faccessat2      439
 
 /* File open flags */
 #define AT_FDCWD        (-100)
@@ -101,14 +119,84 @@ typedef enum { false = 0, true = 1 } bool;
 #define ENOENT          2
 #define ESRCH           3
 #define EBADF           9
+#define EAGAIN          11
+#define EWOULDBLOCK     11
 #define ENOMEM          12
 #define EACCES          13
 #define EFAULT          14
 #define EEXIST          17
+#define ENODEV          19
 #define ENOTDIR         20
 #define EISDIR          21
 #define EINVAL          22
+#define EFBIG           27
+#define ESPIPE          29
 #define ENOSYS          38
+#define ENOTSOCK        88
+
+/* Flock Operations */
+#define LOCK_SH         1
+#define LOCK_EX         2
+#define LOCK_NB         4
+#define LOCK_UN         8
+
+/* Fallocate Flags */
+#define FALLOC_FL_KEEP_SIZE     0x01
+#define FALLOC_FL_PUNCH_HOLE    0x02
+
+/* Signalfd / Timerfd / Socket Flags */
+#define SFD_CLOEXEC     02000000
+#define SFD_NONBLOCK    00004000
+#define TFD_CLOEXEC     02000000
+#define TFD_NONBLOCK    00004000
+#define TFD_TIMER_ABSTIME 1
+#define CLOCK_REALTIME  0
+#define CLOCK_MONOTONIC 1
+#define SOCK_CLOEXEC    02000000
+#define SOCK_NONBLOCK   00004000
+
+/* Memfd Flags */
+#define MFD_CLOEXEC         0x0001U
+#define MFD_ALLOW_SEALING   0x0002U
+
+/* Close Range Flags */
+#define CLOSE_RANGE_UNSHARE (1U << 1)
+#define CLOSE_RANGE_CLOEXEC (1U << 2)
+
+/* Openat2 Flags and Struct */
+#define RESOLVE_NO_XDEV         0x01
+#define RESOLVE_NO_MAGICLINKS   0x02
+#define RESOLVE_NO_SYMLINKS     0x04
+#define RESOLVE_BENEATH         0x08
+#define RESOLVE_IN_ROOT         0x10
+#define RESOLVE_CACHED          0x20
+
+struct linux_open_how {
+    uint64_t flags;
+    uint64_t mode;
+    uint64_t resolve;
+};
+
+/* Faccessat2 Flags */
+#define AT_SYMLINK_NOFOLLOW 0x100
+#define AT_EACCESS          0x200
+#ifndef F_OK
+#define F_OK 0
+#define X_OK 1
+#define W_OK 2
+#define R_OK 4
+#endif
+
+/* Timespec & Itimerspec */
+struct linux_timespec {
+    long tv_sec;
+    long tv_nsec;
+};
+
+struct linux_itimerspec {
+    struct linux_timespec it_interval;
+    struct linux_timespec it_value;
+};
 
 /* Madvise Advice */
 #define MADV_NORMAL     0
@@ -423,6 +511,78 @@ static inline int sys_getdents64(int fd, void *dirp, size_t count) {
 
 static inline int sys_getpid(void) {
     return (int)sys_syscall0(SYS_getpid);
+}
+
+static inline int sys_flock(int fd, int operation) {
+    return (int)sys_syscall2(SYS_flock, fd, operation);
+}
+
+static inline int sys_fallocate(int fd, int mode, off_t offset, off_t len) {
+    return (int)sys_syscall4(SYS_fallocate, fd, mode, offset, len);
+}
+
+static inline int sys_chroot(const char *path) {
+    return (int)sys_syscall1(SYS_chroot, (long)path);
+}
+
+static inline ssize_t sys_pread64(int fd, void *buf, size_t count, off_t offset) {
+    return (ssize_t)sys_syscall4(SYS_pread64, fd, (long)buf, count, offset);
+}
+
+static inline ssize_t sys_pwrite64(int fd, const void *buf, size_t count, off_t offset) {
+    return (ssize_t)sys_syscall4(SYS_pwrite64, fd, (long)buf, count, offset);
+}
+
+static inline int sys_signalfd4(int ufd, const void *mask, size_t sizemask, int flags) {
+    return (int)sys_syscall4(SYS_signalfd4, ufd, (long)mask, sizemask, flags);
+}
+
+static inline void sys_sync(void) {
+    sys_syscall0(SYS_sync);
+}
+
+static inline int sys_timerfd_create(int clockid, int flags) {
+    return (int)sys_syscall2(SYS_timerfd_create, clockid, flags);
+}
+
+static inline int sys_timerfd_settime(int fd, int flags, const struct linux_itimerspec *new_val, struct linux_itimerspec *old_val) {
+    return (int)sys_syscall4(SYS_timerfd_settime, fd, flags, (long)new_val, (long)old_val);
+}
+
+static inline int sys_timerfd_gettime(int fd, struct linux_itimerspec *curr_val) {
+    return (int)sys_syscall2(SYS_timerfd_gettime, fd, (long)curr_val);
+}
+
+static inline int sys_clock_nanosleep(int clockid, int flags, const struct linux_timespec *req, struct linux_timespec *rem) {
+    return (int)sys_syscall4(SYS_clock_nanosleep, clockid, flags, (long)req, (long)rem);
+}
+
+static inline int sys_accept4(int sockfd, void *addr, void *addrlen, int flags) {
+    return (int)sys_syscall4(SYS_accept4, sockfd, (long)addr, (long)addrlen, flags);
+}
+
+static inline int sys_syncfs(int fd) {
+    return (int)sys_syscall1(SYS_syncfs, fd);
+}
+
+static inline int sys_memfd_create(const char *name, unsigned int flags) {
+    return (int)sys_syscall2(SYS_memfd_create, (long)name, flags);
+}
+
+static inline ssize_t sys_copy_file_range(int fd_in, off_t *off_in, int fd_out, off_t *off_out, size_t len, unsigned int flags) {
+    return (ssize_t)sys_syscall6(SYS_copy_file_range, fd_in, (long)off_in, fd_out, (long)off_out, len, flags);
+}
+
+static inline int sys_close_range(unsigned int first, unsigned int last, unsigned int flags) {
+    return (int)sys_syscall3(SYS_close_range, first, last, flags);
+}
+
+static inline int sys_openat2(int dirfd, const char *pathname, struct linux_open_how *how, size_t size) {
+    return (int)sys_syscall4(SYS_openat2, dirfd, (long)pathname, (long)how, size);
+}
+
+static inline int sys_faccessat2(int dirfd, const char *pathname, int mode, int flags) {
+    return (int)sys_syscall4(SYS_faccessat2, dirfd, (long)pathname, mode, flags);
 }
 
 /* String / memory utilities */

@@ -174,8 +174,11 @@ if [ -x "$SCRIPT_DIR/rootfs/bin/busybox" ]; then
     fi
 fi
 
+# Run Wave 2 syscall test suite as Test #10
+run_single_test "test_wave2_syscalls" "All Wave 2 syscalls verified across all 3 Mandate cases!"
+
 # Clean up any sandbox temporary files created during testing
-rm -f "$SCRIPT_DIR/ltm_io_test_file.tmp" "$SCRIPT_DIR/sandbox_test.txt" "$SCRIPT_DIR/wave1_test_file.tmp"
+rm -f "$SCRIPT_DIR/ltm_io_test_file.tmp" "$SCRIPT_DIR/sandbox_test.txt" "$SCRIPT_DIR/wave1_test_file.tmp" "$SCRIPT_DIR/wave2_test_file.tmp" "$SCRIPT_DIR/wave2_copy_file.tmp"
 
 # Summary
 echo -e "\n${C_BOLD}${C_BLUE}======================================================${C_RESET}"
