@@ -732,5 +732,60 @@ int64_t handle_pkey_alloc(unsigned int flags, unsigned int access_rights);
 int64_t handle_pkey_free(int pkey);
 int64_t handle_clone3(struct linux_clone_args *cl_args, size_t size, void *state);
 
+/* Wave 9 (Linux 6.12 Modern Syscalls 425-433, 440-462) Structures & Prototypes */
+struct linux_cachestat_range {
+    uint64_t off;
+    uint64_t len;
+};
+
+struct linux_cachestat {
+    uint64_t nr_cache;
+    uint64_t nr_dirty;
+    uint64_t nr_writeback;
+    uint64_t nr_evicted;
+    uint64_t nr_recently_evicted;
+};
+
+struct linux_futex_waitv {
+    uint64_t val;
+    uint64_t uaddr;
+    uint32_t flags;
+    uint32_t __reserved;
+};
+
+int64_t handle_io_uring_setup(uint32_t entries, void *params);
+int64_t handle_io_uring_enter(unsigned int fd, unsigned int to_submit, unsigned int min_complete, unsigned int flags, void *sig);
+int64_t handle_io_uring_register(unsigned int fd, unsigned int opcode, void *arg, unsigned int nr_args);
+int64_t handle_open_tree(int dfd, const char *filename, unsigned int flags);
+int64_t handle_move_mount(int from_dfd, const char *from_path, int to_dfd, const char *to_path, unsigned int flags);
+int64_t handle_fsopen(const char *fs_name, unsigned int flags);
+int64_t handle_fsconfig(int fd, unsigned int cmd, const char *key, const void *value, int aux);
+int64_t handle_fsmount(int fs_fd, unsigned int flags, unsigned int attr_flags);
+int64_t handle_fspick(int dfd, const char *path, unsigned int flags);
+
+int64_t handle_process_madvise(int pidfd, const struct iovec *iovec, size_t vlen, int advice, unsigned int flags);
+int64_t handle_epoll_pwait2(int epfd, void *events, int maxevents, const void *timeout, const void *sigmask);
+int64_t handle_mount_setattr(int dfd, const char *path, unsigned int flags, void *uattr, size_t usize);
+int64_t handle_quotactl_fd(int fd, unsigned int cmd, int id, void *addr);
+int64_t handle_landlock_create_ruleset(const void *attr, size_t size, uint32_t flags);
+int64_t handle_landlock_add_rule(int ruleset_fd, int rule_type, const void *rule_attr, uint32_t flags);
+int64_t handle_landlock_restrict_self(int ruleset_fd, uint32_t flags);
+int64_t handle_memfd_secret(unsigned int flags);
+int64_t handle_process_mrelease(int pidfd, unsigned int flags);
+int64_t handle_futex_waitv(struct linux_futex_waitv *waiters, unsigned int nr_futexes, unsigned int flags, const void *timeout, clockid_t clockid);
+int64_t handle_set_mempolicy_home_node(unsigned long start, unsigned long len, unsigned long home_node, unsigned long flags);
+int64_t handle_cachestat(unsigned int fd, struct linux_cachestat_range *cstat_range, struct linux_cachestat *cstat, unsigned int flags);
+int64_t handle_fchmodat2(int dirfd, const char *pathname, mode_t mode, int flags);
+int64_t handle_map_shadow_stack(unsigned long addr, unsigned long size, unsigned int flags);
+int64_t handle_futex_wake(volatile uint32_t *uaddr, unsigned long mask, int nr_wake);
+int64_t handle_futex_wait(volatile uint32_t *uaddr, unsigned long mask, uint32_t val, const void *timeout);
+int64_t handle_futex_requeue(volatile uint32_t *uaddr, unsigned long mask, int nr_wake, volatile uint32_t *uaddr2, int nr_requeue);
+int64_t handle_statmount(const void *req, void *buf, size_t bufsize, unsigned int flags);
+int64_t handle_listmount(const void *req, uint64_t *mnt_ids, size_t nr_mnt_ids, unsigned int flags);
+int64_t handle_lsm_get_self_attr(unsigned int attr, void *ctx, size_t *size, uint32_t flags);
+int64_t handle_lsm_set_self_attr(unsigned int attr, const void *ctx, size_t size, uint32_t flags);
+int64_t handle_lsm_list_modules(uint64_t *ids, size_t *size, uint32_t flags);
+int64_t handle_mseal(unsigned long start, size_t len, unsigned long flags);
+
 #endif /* SYSCALLS_H */
 

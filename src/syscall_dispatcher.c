@@ -1497,6 +1497,102 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case LINUX_SYS_clone3:
             ret = handle_clone3((struct linux_clone_args *)a0, (size_t)a1, state);
             break;
+        case LINUX_SYS_io_uring_setup:
+            ret = handle_io_uring_setup((uint32_t)a0, (void *)a1);
+            break;
+        case LINUX_SYS_io_uring_enter:
+            ret = handle_io_uring_enter((unsigned int)a0, (unsigned int)a1, (unsigned int)a2, (unsigned int)a3, (void *)a4);
+            break;
+        case LINUX_SYS_io_uring_register:
+            ret = handle_io_uring_register((unsigned int)a0, (unsigned int)a1, (void *)a2, (unsigned int)a3);
+            break;
+        case LINUX_SYS_open_tree:
+            ret = handle_open_tree((int)a0, (const char *)a1, (unsigned int)a2);
+            break;
+        case LINUX_SYS_move_mount:
+            ret = handle_move_mount((int)a0, (const char *)a1, (int)a2, (const char *)a3, (unsigned int)a4);
+            break;
+        case LINUX_SYS_fsopen:
+            ret = handle_fsopen((const char *)a0, (unsigned int)a1);
+            break;
+        case LINUX_SYS_fsconfig:
+            ret = handle_fsconfig((int)a0, (unsigned int)a1, (const char *)a2, (const void *)a3, (int)a4);
+            break;
+        case LINUX_SYS_fsmount:
+            ret = handle_fsmount((int)a0, (unsigned int)a1, (unsigned int)a2);
+            break;
+        case LINUX_SYS_fspick:
+            ret = handle_fspick((int)a0, (const char *)a1, (unsigned int)a2);
+            break;
+        case LINUX_SYS_process_madvise:
+            ret = handle_process_madvise((int)a0, (const struct iovec *)a1, (size_t)a2, (int)a3, (unsigned int)a4);
+            break;
+        case LINUX_SYS_epoll_pwait2:
+            ret = handle_epoll_pwait2((int)a0, (struct linux_epoll_event *)a1, (int)a2, (const struct timespec *)a3, (const void *)a4);
+            break;
+        case LINUX_SYS_mount_setattr:
+            ret = handle_mount_setattr((int)a0, (const char *)a1, (unsigned int)a2, (void *)a3, (size_t)a4);
+            break;
+        case LINUX_SYS_quotactl_fd:
+            ret = handle_quotactl_fd((int)a0, (unsigned int)a1, (int)a2, (void *)a3);
+            break;
+        case LINUX_SYS_landlock_create_ruleset:
+            ret = handle_landlock_create_ruleset((const void *)a0, (size_t)a1, (uint32_t)a2);
+            break;
+        case LINUX_SYS_landlock_add_rule:
+            ret = handle_landlock_add_rule((int)a0, (int)a1, (const void *)a2, (uint32_t)a3);
+            break;
+        case LINUX_SYS_landlock_restrict_self:
+            ret = handle_landlock_restrict_self((int)a0, (uint32_t)a1);
+            break;
+        case LINUX_SYS_memfd_secret:
+            ret = handle_memfd_secret((unsigned int)a0);
+            break;
+        case LINUX_SYS_process_mrelease:
+            ret = handle_process_mrelease((int)a0, (unsigned int)a1);
+            break;
+        case LINUX_SYS_futex_waitv:
+            ret = handle_futex_waitv((struct linux_futex_waitv *)a0, (unsigned int)a1, (unsigned int)a2, (struct timespec *)a3, (clockid_t)a4);
+            break;
+        case LINUX_SYS_set_mempolicy_home_node:
+            ret = handle_set_mempolicy_home_node((unsigned long)a0, (unsigned long)a1, (unsigned long)a2, (unsigned long)a3);
+            break;
+        case LINUX_SYS_cachestat:
+            ret = handle_cachestat((unsigned int)a0, (struct linux_cachestat_range *)a1, (struct linux_cachestat *)a2, (unsigned int)a3);
+            break;
+        case LINUX_SYS_fchmodat2:
+            ret = handle_fchmodat2((int)a0, (const char *)a1, (mode_t)a2, (int)a3);
+            break;
+        case LINUX_SYS_map_shadow_stack:
+            ret = handle_map_shadow_stack((unsigned long)a0, (unsigned long)a1, (unsigned int)a2);
+            break;
+        case LINUX_SYS_futex_wake:
+            ret = handle_futex_wake((volatile uint32_t *)a0, (unsigned long)a1, (int)a2);
+            break;
+        case LINUX_SYS_futex_wait:
+            ret = handle_futex_wait((volatile uint32_t *)a0, (unsigned long)a1, (uint32_t)a2, (struct timespec *)a3);
+            break;
+        case LINUX_SYS_futex_requeue:
+            ret = handle_futex_requeue((volatile uint32_t *)a0, (unsigned long)a1, (int)a2, (volatile uint32_t *)a3, (int)a4);
+            break;
+        case LINUX_SYS_statmount:
+            ret = handle_statmount((const void *)a0, (void *)a1, (size_t)a2, (unsigned int)a3);
+            break;
+        case LINUX_SYS_listmount:
+            ret = handle_listmount((const void *)a0, (uint64_t *)a1, (size_t)a2, (unsigned int)a3);
+            break;
+        case LINUX_SYS_lsm_get_self_attr:
+            ret = handle_lsm_get_self_attr((unsigned int)a0, (void *)a1, (size_t *)a2, (uint32_t)a3);
+            break;
+        case LINUX_SYS_lsm_set_self_attr:
+            ret = handle_lsm_set_self_attr((unsigned int)a0, (const void *)a1, (size_t)a2, (uint32_t)a3);
+            break;
+        case LINUX_SYS_lsm_list_modules:
+            ret = handle_lsm_list_modules((uint64_t *)a0, (size_t *)a1, (uint32_t)a2);
+            break;
+        case LINUX_SYS_mseal:
+            ret = handle_mseal((unsigned long)a0, (size_t)a1, (unsigned long)a2);
+            break;
 
         default:
             ltm_log_debug("Unhandled Linux syscall: %llu (%s)", (unsigned long long)num, linux_syscall_name((int)num));

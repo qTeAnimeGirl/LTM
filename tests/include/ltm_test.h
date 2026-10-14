@@ -169,6 +169,38 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_close_range     436
 #define SYS_openat2         437
 #define SYS_faccessat2      439
+#define SYS_io_uring_setup      425
+#define SYS_io_uring_enter      426
+#define SYS_io_uring_register   427
+#define SYS_open_tree           428
+#define SYS_move_mount          429
+#define SYS_fsopen              430
+#define SYS_fsconfig            431
+#define SYS_fsmount             432
+#define SYS_fspick              433
+#define SYS_process_madvise     440
+#define SYS_epoll_pwait2        441
+#define SYS_mount_setattr       442
+#define SYS_quotactl_fd         443
+#define SYS_landlock_create_ruleset 444
+#define SYS_landlock_add_rule   445
+#define SYS_landlock_restrict_self 446
+#define SYS_memfd_secret        447
+#define SYS_process_mrelease    448
+#define SYS_futex_waitv         449
+#define SYS_set_mempolicy_home_node 450
+#define SYS_cachestat           451
+#define SYS_fchmodat2           452
+#define SYS_map_shadow_stack    453
+#define SYS_futex_wake          454
+#define SYS_futex_wait          455
+#define SYS_futex_requeue       456
+#define SYS_statmount           457
+#define SYS_listmount           458
+#define SYS_lsm_get_self_attr   459
+#define SYS_lsm_set_self_attr   460
+#define SYS_lsm_list_modules    461
+#define SYS_mseal               462
 
 #define SYS_epoll_create1   20
 #define SYS_epoll_ctl       21
@@ -2181,6 +2213,142 @@ static inline int sys_pkey_free(int pkey) {
 }
 static inline int sys_clone3(struct clone_args *cl_args, size_t size) {
     return (int)sys_syscall2(SYS_clone3, (long)cl_args, size);
+}
+
+/* Wave 9 Structures & Wrappers (Linux 6.12 Modern Syscalls 425-433, 440-462) */
+struct io_uring_params {
+    uint32_t sq_entries;
+    uint32_t cq_entries;
+    uint32_t flags;
+    uint32_t sq_thread_cpu;
+    uint32_t sq_thread_idle;
+    uint32_t features;
+    uint32_t wq_fd;
+    uint32_t resv[3];
+    uint8_t sq_off[40];
+    uint8_t cq_off[40];
+};
+
+struct cachestat_range {
+    uint64_t off;
+    uint64_t len;
+};
+
+struct cachestat {
+    uint64_t nr_cache;
+    uint64_t nr_dirty;
+    uint64_t nr_writeback;
+    uint64_t nr_evicted;
+    uint64_t nr_recently_evicted;
+};
+
+struct futex_waitv {
+    uint64_t val;
+    uint64_t uaddr;
+    uint32_t flags;
+    uint32_t __reserved;
+};
+
+struct landlock_ruleset_attr {
+    uint64_t handled_access_fs;
+    uint64_t handled_access_net;
+};
+
+static inline int sys_io_uring_setup(uint32_t entries, struct io_uring_params *p) {
+    return (int)sys_syscall2(SYS_io_uring_setup, entries, (long)p);
+}
+static inline int sys_io_uring_enter(unsigned int fd, unsigned int to_submit, unsigned int min_complete, unsigned int flags, void *sig) {
+    return (int)sys_syscall5(SYS_io_uring_enter, fd, to_submit, min_complete, flags, (long)sig);
+}
+static inline int sys_io_uring_register(unsigned int fd, unsigned int opcode, void *arg, unsigned int nr_args) {
+    return (int)sys_syscall4(SYS_io_uring_register, fd, opcode, (long)arg, nr_args);
+}
+static inline int sys_open_tree(int dfd, const char *filename, unsigned int flags) {
+    return (int)sys_syscall3(SYS_open_tree, dfd, (long)filename, flags);
+}
+static inline int sys_move_mount(int from_dfd, const char *from_path, int to_dfd, const char *to_path, unsigned int flags) {
+    return (int)sys_syscall5(SYS_move_mount, from_dfd, (long)from_path, to_dfd, (long)to_path, flags);
+}
+static inline int sys_fsopen(const char *fs_name, unsigned int flags) {
+    return (int)sys_syscall2(SYS_fsopen, (long)fs_name, flags);
+}
+static inline int sys_fsconfig(int fd, unsigned int cmd, const char *key, const void *value, int aux) {
+    return (int)sys_syscall5(SYS_fsconfig, fd, cmd, (long)key, (long)value, aux);
+}
+static inline int sys_fsmount(int fs_fd, unsigned int flags, unsigned int attr_flags) {
+    return (int)sys_syscall3(SYS_fsmount, fs_fd, flags, attr_flags);
+}
+static inline int sys_fspick(int dfd, const char *path, unsigned int flags) {
+    return (int)sys_syscall3(SYS_fspick, dfd, (long)path, flags);
+}
+static inline int sys_process_madvise(int pidfd, const struct iovec *iovec, size_t vlen, int advice, unsigned int flags) {
+    return (int)sys_syscall5(SYS_process_madvise, pidfd, (long)iovec, vlen, advice, flags);
+}
+static inline int sys_epoll_pwait2(int epfd, void *events, int maxevents, const void *timeout, const void *sigmask) {
+    return (int)sys_syscall5(SYS_epoll_pwait2, epfd, (long)events, maxevents, (long)timeout, (long)sigmask);
+}
+static inline int sys_mount_setattr(int dfd, const char *path, unsigned int flags, void *uattr, size_t usize) {
+    return (int)sys_syscall5(SYS_mount_setattr, dfd, (long)path, flags, (long)uattr, usize);
+}
+static inline int sys_quotactl_fd(int fd, unsigned int cmd, int id, void *addr) {
+    return (int)sys_syscall4(SYS_quotactl_fd, fd, cmd, id, (long)addr);
+}
+static inline int sys_landlock_create_ruleset(const struct landlock_ruleset_attr *attr, size_t size, uint32_t flags) {
+    return (int)sys_syscall3(SYS_landlock_create_ruleset, (long)attr, size, flags);
+}
+static inline int sys_landlock_add_rule(int ruleset_fd, int rule_type, const void *rule_attr, uint32_t flags) {
+    return (int)sys_syscall4(SYS_landlock_add_rule, ruleset_fd, rule_type, (long)rule_attr, flags);
+}
+static inline int sys_landlock_restrict_self(int ruleset_fd, uint32_t flags) {
+    return (int)sys_syscall2(SYS_landlock_restrict_self, ruleset_fd, flags);
+}
+static inline int sys_memfd_secret(unsigned int flags) {
+    return (int)sys_syscall1(SYS_memfd_secret, flags);
+}
+static inline int sys_process_mrelease(int pidfd, unsigned int flags) {
+    return (int)sys_syscall2(SYS_process_mrelease, pidfd, flags);
+}
+static inline int sys_futex_waitv(struct futex_waitv *waiters, unsigned int nr_futexes, unsigned int flags, const void *timeout, int clockid) {
+    return (int)sys_syscall5(SYS_futex_waitv, (long)waiters, nr_futexes, flags, (long)timeout, clockid);
+}
+static inline int sys_set_mempolicy_home_node(unsigned long start, unsigned long len, unsigned long home_node, unsigned long flags) {
+    return (int)sys_syscall4(SYS_set_mempolicy_home_node, start, len, home_node, flags);
+}
+static inline int sys_cachestat(unsigned int fd, struct cachestat_range *cstat_range, struct cachestat *cstat, unsigned int flags) {
+    return (int)sys_syscall4(SYS_cachestat, fd, (long)cstat_range, (long)cstat, flags);
+}
+static inline int sys_fchmodat2(int dirfd, const char *pathname, mode_t mode, int flags) {
+    return (int)sys_syscall4(SYS_fchmodat2, dirfd, (long)pathname, mode, flags);
+}
+static inline int sys_map_shadow_stack(unsigned long addr, unsigned long size, unsigned int flags) {
+    return (int)sys_syscall3(SYS_map_shadow_stack, addr, size, flags);
+}
+static inline int sys_futex_wake(volatile uint32_t *uaddr, unsigned long mask, int nr_wake) {
+    return (int)sys_syscall3(SYS_futex_wake, (long)uaddr, mask, nr_wake);
+}
+static inline int sys_futex_wait(volatile uint32_t *uaddr, unsigned long mask, uint32_t val, const void *timeout) {
+    return (int)sys_syscall4(SYS_futex_wait, (long)uaddr, mask, val, (long)timeout);
+}
+static inline int sys_futex_requeue(volatile uint32_t *uaddr, unsigned long mask, int nr_wake, volatile uint32_t *uaddr2, int nr_requeue) {
+    return (int)sys_syscall5(SYS_futex_requeue, (long)uaddr, mask, nr_wake, (long)uaddr2, nr_requeue);
+}
+static inline int sys_statmount(const void *req, void *buf, size_t bufsize, unsigned int flags) {
+    return (int)sys_syscall4(SYS_statmount, (long)req, (long)buf, bufsize, flags);
+}
+static inline int sys_listmount(const void *req, uint64_t *mnt_ids, size_t nr_mnt_ids, unsigned int flags) {
+    return (int)sys_syscall4(SYS_listmount, (long)req, (long)mnt_ids, nr_mnt_ids, flags);
+}
+static inline int sys_lsm_get_self_attr(unsigned int attr, void *ctx, size_t *size, uint32_t flags) {
+    return (int)sys_syscall4(SYS_lsm_get_self_attr, attr, (long)ctx, (long)size, flags);
+}
+static inline int sys_lsm_set_self_attr(unsigned int attr, const void *ctx, size_t size, uint32_t flags) {
+    return (int)sys_syscall4(SYS_lsm_set_self_attr, attr, (long)ctx, size, flags);
+}
+static inline int sys_lsm_list_modules(uint64_t *ids, size_t *size, uint32_t flags) {
+    return (int)sys_syscall3(SYS_lsm_list_modules, (long)ids, (long)size, flags);
+}
+static inline int sys_mseal(unsigned long start, size_t len, unsigned long flags) {
+    return (int)sys_syscall3(SYS_mseal, start, len, flags);
 }
 
 

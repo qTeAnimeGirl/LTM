@@ -5735,6 +5735,252 @@ int64_t handle_clone3(struct linux_clone_args *cl_args, size_t size, void *state
                         state);
 }
 
+/* ========================================================================= */
+/* Wave 9: Linux 6.12 Modern Syscalls (425-433, 440-462)                      */
+/* ========================================================================= */
+
+int64_t handle_io_uring_setup(uint32_t entries, void *params) {
+    if (!params) return -LINUX_EFAULT;
+    if (entries == 0 || entries > 4096) return -LINUX_EINVAL;
+    return -LINUX_ENOSYS;
+}
+
+int64_t handle_io_uring_enter(unsigned int fd, unsigned int to_submit, unsigned int min_complete, unsigned int flags, void *sig) {
+    (void)to_submit; (void)min_complete; (void)sig;
+    if ((int)fd < 0) return -LINUX_EBADF;
+    if (flags & ~0x1f) return -LINUX_EINVAL;
+    return -LINUX_EBADF;
+}
+
+int64_t handle_io_uring_register(unsigned int fd, unsigned int opcode, void *arg, unsigned int nr_args) {
+    (void)arg; (void)nr_args;
+    if ((int)fd < 0) return -LINUX_EBADF;
+    if (opcode > 64) return -LINUX_EINVAL;
+    return -LINUX_EBADF;
+}
+
+int64_t handle_open_tree(int dfd, const char *filename, unsigned int flags) {
+    (void)flags;
+    if (!filename) return -LINUX_EFAULT;
+    char host_path[PATH_MAX];
+    int res = sandbox_resolve_path(dfd, filename, host_path, sizeof(host_path), 0);
+    if (res < 0) return res;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_move_mount(int from_dfd, const char *from_path, int to_dfd, const char *to_path, unsigned int flags) {
+    (void)from_dfd; (void)to_dfd; (void)flags;
+    if (!from_path || !to_path) return -LINUX_EFAULT;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_fsopen(const char *fs_name, unsigned int flags) {
+    (void)flags;
+    if (!fs_name) return -LINUX_EFAULT;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_fsconfig(int fd, unsigned int cmd, const char *key, const void *value, int aux) {
+    (void)cmd; (void)key; (void)value; (void)aux;
+    if (fd < 0) return -LINUX_EBADF;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_fsmount(int fs_fd, unsigned int flags, unsigned int attr_flags) {
+    (void)flags; (void)attr_flags;
+    if (fs_fd < 0) return -LINUX_EBADF;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_fspick(int dfd, const char *path, unsigned int flags) {
+    (void)flags;
+    if (!path) return -LINUX_EFAULT;
+    char host_path[PATH_MAX];
+    int res = sandbox_resolve_path(dfd, path, host_path, sizeof(host_path), 0);
+    if (res < 0) return res;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_process_madvise(int pidfd, const struct iovec *iovec, size_t vlen, int advice, unsigned int flags) {
+    (void)advice;
+    if (!iovec) return -LINUX_EFAULT;
+    if (vlen == 0 || vlen > 1024) return -LINUX_EINVAL;
+    if (flags != 0) return -LINUX_EINVAL;
+    if (pidfd < 0) return -LINUX_EBADF;
+    return 0;
+}
+
+int64_t handle_epoll_pwait2(int epfd, void *events, int maxevents, const void *timeout_ptr, const void *sigmask) {
+    int ms_timeout = -1;
+    if (timeout_ptr) {
+        const struct timespec *timeout = (const struct timespec *)timeout_ptr;
+        if (timeout->tv_nsec < 0 || timeout->tv_nsec >= 1000000000L || timeout->tv_sec < 0) {
+            return -LINUX_EINVAL;
+        }
+        ms_timeout = (int)(timeout->tv_sec * 1000 + timeout->tv_nsec / 1000000);
+    }
+    return handle_epoll_pwait(epfd, events, maxevents, ms_timeout, sigmask);
+}
+
+int64_t handle_mount_setattr(int dfd, const char *path, unsigned int flags, void *uattr, size_t usize) {
+    (void)dfd; (void)flags;
+    if (!path || !uattr) return -LINUX_EFAULT;
+    if (usize < 32) return -LINUX_EINVAL;
+    return -LINUX_EPERM;
+}
+
+int64_t handle_quotactl_fd(int fd, unsigned int cmd, int id, void *addr) {
+    (void)cmd; (void)id; (void)addr;
+    if (fd < 0) return -LINUX_EBADF;
+    return -LINUX_ENOSYS;
+}
+
+int64_t handle_landlock_create_ruleset(const void *attr, size_t size, uint32_t flags) {
+    if (!attr) return -LINUX_EFAULT;
+    if (size < 8) return -LINUX_EINVAL;
+    if (flags != 0) return -LINUX_EINVAL;
+    return -LINUX_ENOSYS;
+}
+
+int64_t handle_landlock_add_rule(int ruleset_fd, int rule_type, const void *rule_attr, uint32_t flags) {
+    (void)rule_type; (void)flags;
+    if (ruleset_fd < 0) return -LINUX_EBADF;
+    if (!rule_attr) return -LINUX_EFAULT;
+    return -LINUX_EBADF;
+}
+
+int64_t handle_landlock_restrict_self(int ruleset_fd, uint32_t flags) {
+    if (ruleset_fd < 0) return -LINUX_EBADF;
+    if (flags != 0) return -LINUX_EINVAL;
+    return -LINUX_EBADF;
+}
+
+int64_t handle_memfd_secret(unsigned int flags) {
+    if (flags & ~0x80000 /* O_CLOEXEC */) return -LINUX_EINVAL;
+    return handle_memfd_create("secret", (flags & 0x80000) ? LINUX_MFD_CLOEXEC : 0);
+}
+
+int64_t handle_process_mrelease(int pidfd, unsigned int flags) {
+    if (pidfd < 0) return -LINUX_EBADF;
+    if (flags != 0) return -LINUX_EINVAL;
+    return -LINUX_EBADF;
+}
+
+int64_t handle_futex_waitv(struct linux_futex_waitv *waiters, unsigned int nr_futexes, unsigned int flags, const void *timeout, clockid_t clockid) {
+    (void)timeout; (void)clockid;
+    if (!waiters) return -LINUX_EFAULT;
+    if (nr_futexes == 0 || nr_futexes > 128) return -LINUX_EINVAL;
+    if (flags != 0) return -LINUX_EINVAL;
+    for (unsigned int i = 0; i < nr_futexes; i++) {
+        if (!waiters[i].uaddr) return -LINUX_EFAULT;
+        volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)waiters[i].uaddr;
+        if (*p != (uint32_t)waiters[i].val) {
+            return -LINUX_EAGAIN;
+        }
+    }
+    return 0;
+}
+
+int64_t handle_set_mempolicy_home_node(unsigned long start, unsigned long len, unsigned long home_node, unsigned long flags) {
+    (void)start; (void)len;
+    if (flags != 0) return -LINUX_EINVAL;
+    if (home_node > 0) return -LINUX_EINVAL;
+    return 0;
+}
+
+int64_t handle_cachestat(unsigned int fd, struct linux_cachestat_range *cstat_range, struct linux_cachestat *cstat, unsigned int flags) {
+    if ((int)fd < 0) return -LINUX_EBADF;
+    if (!cstat_range || !cstat) return -LINUX_EFAULT;
+    if (flags != 0) return -LINUX_EINVAL;
+    struct stat st;
+    if (fstat((int)fd, &st) != 0) return darwin_to_linux_errno(errno);
+    uint64_t total_pages = (st.st_size + 16383) / 16384;
+    cstat->nr_cache = total_pages;
+    cstat->nr_dirty = 0;
+    cstat->nr_writeback = 0;
+    cstat->nr_evicted = 0;
+    cstat->nr_recently_evicted = 0;
+    return 0;
+}
+
+int64_t handle_fchmodat2(int dirfd, const char *pathname, mode_t mode, int flags) {
+    return handle_fchmodat(dirfd, pathname, mode, flags);
+}
+
+int64_t handle_map_shadow_stack(unsigned long addr, unsigned long size, unsigned int flags) {
+    (void)addr; (void)size; (void)flags;
+    return -LINUX_ENOSYS;
+}
+
+int64_t handle_futex_wake(volatile uint32_t *uaddr, unsigned long mask, int nr_wake) {
+    (void)mask;
+    if (!uaddr) return -LINUX_EFAULT;
+    if (nr_wake < 0) return -LINUX_EINVAL;
+    return handle_futex((void *)uaddr, 1 /* FUTEX_WAKE */, nr_wake, NULL, NULL, 0);
+}
+
+int64_t handle_futex_wait(volatile uint32_t *uaddr, unsigned long mask, uint32_t val, const void *timeout) {
+    (void)mask;
+    if (!uaddr) return -LINUX_EFAULT;
+    return handle_futex((void *)uaddr, 0 /* FUTEX_WAIT */, (int)val, (const struct linux_timespec *)timeout, NULL, 0);
+}
+
+int64_t handle_futex_requeue(volatile uint32_t *uaddr, unsigned long mask, int nr_wake, volatile uint32_t *uaddr2, int nr_requeue) {
+    (void)mask;
+    if (!uaddr || !uaddr2) return -LINUX_EFAULT;
+    if (nr_wake < 0 || nr_requeue < 0) return -LINUX_EINVAL;
+    uint32_t bucket_idx = ((uintptr_t)uaddr >> 2) % FUTEX_BUCKETS;
+    futex_bucket_t *b = &g_futex_table[bucket_idx];
+    init_futex_bucket(b);
+    pthread_mutex_lock(&b->mutex);
+    pthread_cond_broadcast(&b->cond);
+    pthread_mutex_unlock(&b->mutex);
+    return (int64_t)nr_wake;
+}
+
+int64_t handle_statmount(const void *req, void *buf, size_t bufsize, unsigned int flags) {
+    (void)flags;
+    if (!req || !buf) return -LINUX_EFAULT;
+    if (bufsize == 0) return -LINUX_EINVAL;
+    return -LINUX_ENOENT;
+}
+
+int64_t handle_listmount(const void *req, uint64_t *mnt_ids, size_t nr_mnt_ids, unsigned int flags) {
+    (void)flags;
+    if (!req || !mnt_ids) return -LINUX_EFAULT;
+    if (nr_mnt_ids == 0) return -LINUX_EINVAL;
+    return -LINUX_ENOENT;
+}
+
+int64_t handle_lsm_get_self_attr(unsigned int attr, void *ctx, size_t *size, uint32_t flags) {
+    (void)attr; (void)ctx;
+    if (!size) return -LINUX_EFAULT;
+    if (flags != 0) return -LINUX_EINVAL;
+    return -LINUX_EOPNOTSUPP;
+}
+
+int64_t handle_lsm_set_self_attr(unsigned int attr, const void *ctx, size_t size, uint32_t flags) {
+    (void)attr; (void)size;
+    if (!ctx) return -LINUX_EFAULT;
+    if (flags != 0) return -LINUX_EINVAL;
+    return -LINUX_EOPNOTSUPP;
+}
+
+int64_t handle_lsm_list_modules(uint64_t *ids, size_t *size, uint32_t flags) {
+    (void)ids;
+    if (!size) return -LINUX_EFAULT;
+    if (flags != 0) return -LINUX_EINVAL;
+    *size = 0;
+    return 0;
+}
+
+int64_t handle_mseal(unsigned long start, size_t len, unsigned long flags) {
+    if (flags != 0) return -LINUX_EINVAL;
+    if (!start || len == 0) return -LINUX_EINVAL;
+    if (start & 0x3FFF) return -LINUX_EINVAL;
+    return 0;
+}
+
 
 
 
