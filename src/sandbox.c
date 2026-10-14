@@ -195,7 +195,7 @@ static int open_proc_cpuinfo(void) {
 }
 
 static int open_proc_version(void) {
-    const char *ver = "Linux version 6.6.0-ltm (ltm@apple-silicon) (gcc (Ubuntu 11.4.0) 11.4.0) #1 SMP PREEMPT_DYNAMIC Wed Oct 14 00:00:00 UTC 2026\n";
+    const char *ver = LTM_KERNEL_FULL_VERSION;
     return create_mem_fd(ver, strlen(ver));
 }
 
@@ -453,7 +453,7 @@ int sandbox_open_virtual(const char *path, int flags, mode_t mode) {
     if (strcmp(path, "/proc/self/status") == 0) return open_proc_self_status();
     if (strcmp(path, "/proc/self/stat") == 0) return open_proc_self_stat();
     if (strcmp(path, "/proc/sys/kernel/osrelease") == 0) {
-        const char *rel = "6.6.0-ltm\n";
+        const char *rel = LTM_KERNEL_VERSION_NAME "\n";
         return create_mem_fd(rel, strlen(rel));
     }
     if (strcmp(path, "/proc/self/cmdline") == 0) return open_proc_cmdline();

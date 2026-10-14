@@ -1048,7 +1048,7 @@ int64_t handle_uname(struct linux_utsname *buf) {
 
     strncpy(buf->sysname, "Linux", sizeof(buf->sysname) - 1);
     strncpy(buf->nodename, "ltm-mac", sizeof(buf->nodename) - 1);
-    strncpy(buf->release, "6.6.0-ltm", sizeof(buf->release) - 1);
+    strncpy(buf->release, LTM_KERNEL_VERSION_NAME, sizeof(buf->release) - 1);
     strncpy(buf->version, "#1 SMP PREEMPT_DYNAMIC Wed Oct 14 00:00:00 UTC 2026", sizeof(buf->version) - 1);
     strncpy(buf->machine, "aarch64", sizeof(buf->machine) - 1);
     strncpy(buf->domainname, "(none)", sizeof(buf->domainname) - 1);

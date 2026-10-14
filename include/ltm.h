@@ -29,6 +29,12 @@
 #include <sys/sysctl.h>
 #include <limits.h>
 
+/* LTM (Linux To Mac) Project Metadata */
+#define LTM_PROJECT_NAME          "LTM (Linux To Mac)"
+#define LTM_KERNEL_VERSION_NAME   "LTM 2026.1A"
+#define LTM_KERNEL_RELEASE        "LTM 2026.1A"
+#define LTM_KERNEL_FULL_VERSION   "Linux version LTM 2026.1A (ltm@apple-silicon) (clang 21.0.0) #1 SMP PREEMPT_DYNAMIC Wed Oct 14 00:00:00 UTC 2026\n"
+
 /* Page definitions for Apple Silicon (16KB) */
 #define PAGE_SIZE_16K     0x4000ULL
 #define PAGE_MASK_16K     (~(0x4000ULL - 1))

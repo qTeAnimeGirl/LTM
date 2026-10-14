@@ -3,7 +3,7 @@
 
 /*
  * LTM Test Support Library (Freestanding Linux ARM64)
- * For use in testing the LTM (Linux Translation Module) translation runtime.
+ * For use in testing the LTM (Linux To Mac) translation runtime.
  */
 
 typedef unsigned long uint64_t;

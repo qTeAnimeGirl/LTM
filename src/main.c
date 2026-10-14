@@ -24,7 +24,7 @@ static void ltm_terminal_sig_handler(int sig) {
 
 static void print_usage(const char *progname) {
     fprintf(stderr,
-        "LTM (Linux Translation Module) for macOS Apple Silicon ARM64\n"
+        "LTM (Linux To Mac) for macOS Apple Silicon ARM64 [Kernel: " LTM_KERNEL_VERSION_NAME "]\n"
         "Usage: %s [options] <elf-binary> [guest args...]\n\n"
         "Options:\n"
         "  -i, --install-rootfs [dir] Automatically download & install Alpine Linux rootfs (with Fastfetch & Bash)\n"
