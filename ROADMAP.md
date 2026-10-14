@@ -110,7 +110,19 @@ LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 
   - `clock_nanosleep` (115): High-resolution relative and absolute sleep (`TIMER_ABSTIME`).
 - [x] **Automated Regression Suite Expansion**: Expanded to 10 automated test suites with 100% pass rate (`test_wave2_syscalls` with 96 unit test assertions).
 
+### Milestone 9: 100% Standalone Per-Syscall Test Coverage & Strict 3-Way Mandate (Sprint 11)
+- [x] **134 Dedicated Standalone Unit Tests (`tests/syscalls/`)**:
+  - Exactly 1 unit test per implemented Linux ARM64 system call (134 of 134, 100.0% coverage).
+  - Every test implements Case A (Happy Path), Case B (Boundary/Edge Cases), Case C (Error & Errno Translation).
+- [x] **Zero-Libc Freestanding Harness (`tests/include/ltm_test.h`)**:
+  - Uses direct `svc #0` assembly instructions, freestanding entrypoint `_c_entry`, and custom assertions.
+- [x] **Interactive & CI Test Runner (`run_tests.sh`)**:
+  - 1-to-1 ANSI summary table with per-case verification (Case A, B, C) and duration.
+- [x] **144 of 144 Tests Passing (100% Pass Rate)**:
+  - 134 standalone per-syscall unit tests + 10 core integration test suites.
+
 ---
+
 
 ## 3. Comprehensive Syscall Implementation Matrix
 

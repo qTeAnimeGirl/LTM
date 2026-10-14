@@ -2119,10 +2119,49 @@ Every single `test_sys_<number>_<name>.c` file must strictly implement:
 
 ---
 
-## [Sprint 11 Proposal: Full Granular Coverage for Core I/O, IPC, and Socket Syscalls]
-- **Target**: Expand granular per-syscall test suite from 55 to all 134 implemented Linux system calls.
-- **Batches**:
-  - *Batch 1 (Filesystem & Path Navigation)*: `sys_017_getcwd`, `sys_023_dup`, `sys_024_dup3`, `sys_025_fcntl`, `sys_034_mkdirat`, `sys_035_unlinkat`, `sys_036_symlinkat`, `sys_037_linkat`, `sys_038_renameat`, `sys_048_faccessat`, `sys_049_chdir`, `sys_050_fchdir`, `sys_059_pipe2`, `sys_061_getdents64`, `sys_065_readv`, `sys_066_writev`, `sys_078_readlinkat`, `sys_080_fstat`, `sys_088_utimensat`, `sys_276_renameat2`.
-  - *Batch 2 (Process, Credentials, & Signals)*: `sys_096_set_tid_address`, `sys_129_kill`, `sys_130_tkill`, `sys_131_tgkill`, `sys_132_sigaltstack`, `sys_134_rt_sigaction`, `sys_135_rt_sigprocmask`, `sys_143_setregid`, `sys_144_setgid`, `sys_145_setreuid`, `sys_146_setuid`, `sys_147_setresuid`, `sys_148_getresuid`, `sys_149_setresgid`, `sys_150_getresgid`, `sys_158_getgroups`, `sys_159_setgroups`, `sys_173_getppid`, `sys_175_geteuid`, `sys_177_getegid`, `sys_178_gettid`, `sys_179_sysinfo`, `sys_260_wait4`, `sys_261_prlimit64`.
-  - *Batch 3 (Networking & Sockets)*: `sys_198_socket`, `sys_199_socketpair`, `sys_200_bind`, `sys_201_listen`, `sys_202_accept`, `sys_203_connect`, `sys_204_getsockname`, `sys_205_getpeername`, `sys_206_sendto`, `sys_207_recvfrom`, `sys_208_setsockopt`, `sys_209_getsockopt`, `sys_210_shutdown`, `sys_211_sendmsg`, `sys_212_recvmsg`.
-  - *Batch 4 (Events, Timers, & Advanced)*: `sys_020_epoll_create1`, `sys_021_epoll_ctl`, `sys_022_epoll_pwait`, `sys_029_ioctl`, `sys_072_pselect6`, `sys_073_ppoll`, `sys_098_futex`, `sys_101_nanosleep`, `sys_102_getitimer`, `sys_103_setitimer`, `sys_113_clock_gettime`, `sys_169_gettimeofday`, `sys_226_mprotect`.
+## [Sprint 11 Execution Report: 100% Standalone Per-Syscall Coverage & ABI Hardening]
+- **Timestamp**: 2026-10-14 19:40 UTC
+- **Author**: Antigravity & The LTM Engineering Swarm (Architect, Critic, Coder, Tester)
+- **Status**: ALL 144 TESTS PASSED (144 of 144) - 100.0% Pass Rate
+- **Achievements & Metrics**:
+  1. *Complete 1-to-1 Syscall Test Coverage (134 of 134 Implemented Syscalls)*:
+     - 134 dedicated standalone Linux ARM64 ELF test programs compiled into `tests/bin/syscalls/`.
+     - 10 core integration test suites (`test_hello`, `test_args_env`, `test_file_io`, `test_sandbox_defense`, `test_procfs`, `test_memory`, `test_ps_procfs`, `busybox ps`, `test_wave1_syscalls`, `test_wave2_syscalls`).
+     - Total: 144 test targets executed and verified via `./run_tests.sh`.
+     - Strict 3-Way Mandate enforced on all 134 syscall tests:
+       - **Case A**: Standard Happy Path (valid parameters, expected return semantics)
+       - **Case B**: Boundary / Edge Cases (zero lengths, empty buffers, flag combinations, repeated calls)
+       - **Case C**: Error Handling & Errno Translation (invalid fds -> `-EBADF`, invalid pointers -> `-EFAULT`, invalid arguments/flags -> `-EINVAL`, nonexistent items -> `-ENOENT`/`-ESRCH`).
+  2. *Defects Uncovered & Hardened in the Kernel Translation Layer*:
+     - **`handle_kill` (129)**: Removed unconditional bypass on `sig == 0`, ensuring Darwin `kill(pid, 0)` executes and correctly validates process existence, returning `-LINUX_ESRCH` when the PID does not exist.
+     - **`handle_tkill` (130) & `handle_tgkill` (131)**: Added strict validation for `sig < 0 || sig >= LINUX_NSIG` (`-EINVAL`) and `tid <= 0` (`-ESRCH`).
+     - **`handle_sigaltstack` (132)**: Implemented `ss` validation enforcing `ss_flags & ~SS_DISABLE` (`-EINVAL`) and `ss_size < 2048` (`-ENOMEM`).
+     - **`handle_rt_sigaction` (134)**: Enforced strict Linux ARM64 requirement `sigsetsize == 8` (`-EINVAL`).
+     - **`handle_rt_sigprocmask` (135)**: Replaced inline stub with complete implementation verifying `sigsetsize == 8`, validating `how` parameter, translating Linux signal masks to Darwin `sigset_t`, and populating `oldset`.
+     - **Identity Syscalls (`setuid`, `setgid`, `setreuid`, `setregid`, `setresuid`, `setresgid`)**: Added argument validation returning `-LINUX_EINVAL` on invalid negative IDs while preserving `-1` (leave unchanged) semantics.
+     - **`handle_getresuid` (148) & `handle_getresgid` (150)**: Added NULL pointer validation returning `-LINUX_EFAULT`.
+     - **`handle_setgroups` (159)**: Added size bounds checking and NULL list validation returning `-LINUX_EFAULT`.
+     - **`handle_prlimit64` (261)**: Added resource bounds checking (`resource < 0 || resource > 15` -> `-EINVAL`) and process existence validation (`pid < 0` -> `-ESRCH`).
+     - **`handle_ppoll` (73) & `handle_pselect6` (72)**: Added NULL buffer and nanosecond bounds checking (`tv_nsec >= 1e9` -> `-EINVAL`).
+     - **`handle_epoll_create1` (20)**: Added flag validation (`flags & ~EPOLL_CLOEXEC` -> `-EINVAL`).
+     - **`handle_epoll_pwait` (22)**: Fixed `struct linux_epoll_event` layout in `ltm_test.h`, removing x86_64-specific `packed` attribute so event data aligns at 8-byte boundary per standard Linux ARM64 ABI.
+     - **`handle_setsockopt` (208) & `handle_getsockopt` (209)**: Added bad fd and NULL pointer validation.
+     - **`handle_shutdown` (210)**: Added bad fd and invalid `how` argument validation (`how < 0 || how > 2` -> `-EINVAL`).
+     - **`handle_sendto` (206) & `handle_recvfrom` (207)**: Added bad fd and NULL buffer validation returning `-LINUX_EFAULT`.
+  3. *Five Golden Architectural Invariants Maintained*:
+     - **16KB Memory Pages**: All memory allocations, mmap, mprotect, and stack segment bounds strictly aligned to 16KB Apple Silicon hardware pages (`0x4000`).
+     - **36-Byte Termios**: Linux 36-byte termios correctly isolated from Darwin 72-byte termios in `handle_ioctl`.
+     - **Zero Sandbox Breakouts**: All path resolutions verified through `sandbox_resolve_path`.
+     - **Real Mac Hardware**: Telemetry continues to query Darwin Mach VM and `sysctl` APIs directly.
+     - **Signal Frame Cleanliness**: Restorations via `_ltm_resume_context` avoiding Darwin signal cookie panics.
+  4. *Final Test Verification Matrix*:
+     ```
+     ======================================================
+                        TEST SUITE SUMMARY                 
+     ======================================================
+     Total Tests : 144
+     Passed      : 144
+     Failed      : 0
+     ALL 144 TESTS PASSED! Translation module validated with 100% accuracy.
+     ```
+

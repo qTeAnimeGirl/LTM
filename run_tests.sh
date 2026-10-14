@@ -262,7 +262,7 @@ echo -e "Passed      : ${C_GREEN}${C_BOLD}$PASSED${C_RESET}"
 echo -e "Failed      : ${C_RED}${C_BOLD}$FAILED${C_RESET}"
 
 if [ $FAILED -eq 0 ]; then
-    echo -e "${C_GREEN}${C_BOLD}ALL 65 TESTS PASSED! Translation module validated with 100% accuracy.${C_RESET}\n"
+    echo -e "${C_GREEN}${C_BOLD}ALL $TOTAL TESTS PASSED! Translation module validated with 100% accuracy.${C_RESET}\n"
     exit 0
 else
     echo -e "${C_RED}${C_BOLD}SOME TESTS FAILED! Inspect diagnostic output above.${C_RESET}\n"

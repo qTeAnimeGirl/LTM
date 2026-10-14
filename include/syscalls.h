@@ -233,6 +233,7 @@ struct linux_sigaction {
 void ltm_sigreturn_stub(void);
 int64_t handle_rt_sigaction(int signum, const struct linux_sigaction *act, struct linux_sigaction *oldact, size_t sigsetsize);
 int64_t handle_rt_sigreturn(void *state);
+int64_t handle_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, size_t sigsetsize);
 
 int64_t handle_brk(uintptr_t brk_addr);
 int64_t handle_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);

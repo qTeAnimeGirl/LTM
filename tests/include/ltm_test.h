@@ -112,6 +112,58 @@ typedef enum { false = 0, true = 1 } bool;
 #define SYS_openat2         437
 #define SYS_faccessat2      439
 
+#define SYS_epoll_create1   20
+#define SYS_epoll_ctl       21
+#define SYS_epoll_pwait     22
+#define SYS_fcntl           25
+#define SYS_ioctl           29
+#define SYS_readv           65
+#define SYS_writev          66
+#define SYS_pselect6        72
+#define SYS_ppoll           73
+#define SYS_utimensat       88
+#define SYS_capget          90
+#define SYS_capset          91
+#define SYS_set_tid_address 96
+#define SYS_futex           98
+#define SYS_nanosleep       101
+#define SYS_getitimer       102
+#define SYS_setitimer       103
+#define SYS_clock_gettime   113
+#define SYS_sigaltstack     132
+#define SYS_rt_sigaction    134
+#define SYS_rt_sigprocmask  135
+#define SYS_rt_sigreturn    139
+#define SYS_setregid        143
+#define SYS_setgid          144
+#define SYS_setreuid        145
+#define SYS_setuid          146
+#define SYS_setresuid       147
+#define SYS_getresuid       148
+#define SYS_setresgid       149
+#define SYS_getresgid       150
+#define SYS_getgroups       158
+#define SYS_setgroups       159
+#define SYS_gettimeofday    169
+#define SYS_geteuid         175
+#define SYS_getegid         177
+#define SYS_gettid          178
+#define SYS_getsockname     204
+#define SYS_getpeername     205
+#define SYS_sendto          206
+#define SYS_recvfrom        207
+#define SYS_setsockopt      208
+#define SYS_getsockopt      209
+#define SYS_shutdown        210
+#define SYS_sendmsg         211
+#define SYS_recvmsg         212
+#define SYS_clone           220
+#define SYS_execve          221
+#define SYS_mprotect        226
+#define SYS_wait4           260
+#define SYS_prlimit64       261
+#define SYS_rseq            293
+
 /* File open flags */
 #define AT_FDCWD        (-100)
 #define O_RDONLY        00000000
@@ -148,21 +200,87 @@ typedef enum { false = 0, true = 1 } bool;
 #define EPERM           1
 #define ENOENT          2
 #define ESRCH           3
+#define EINTR           4
+#define EIO             5
+#define ENXIO           6
+#define E2BIG           7
+#define ENOEXEC         8
 #define EBADF           9
+#define ECHILD          10
 #define EAGAIN          11
 #define EWOULDBLOCK     11
 #define ENOMEM          12
 #define EACCES          13
 #define EFAULT          14
+#define EBUSY           16
 #define EEXIST          17
+#define EXDEV           18
 #define ENODEV          19
 #define ENOTDIR         20
 #define EISDIR          21
 #define EINVAL          22
+#define ENFILE          23
+#define EMFILE          24
+#define ENOTTY          25
 #define EFBIG           27
+#define ENOSPC          28
 #define ESPIPE          29
+#define EROFS           30
+#define EMLINK          31
+#define EPIPE           32
+#define EDOM            33
+#define ERANGE          34
 #define ENOSYS          38
+#define ELOOP           40
 #define ENOTSOCK        88
+#define EDESTADDRREQ    89
+#define EMSGSIZE        90
+#define EPROTOTYPE      91
+#define ENOPROTOOPT     92
+#define EPROTONOSUPPORT 93
+#define ESOCKTNOSUPPORT 94
+#define EOPNOTSUPP      95
+#define EPFNOSUPPORT    96
+#define EAFNOSUPPORT    97
+#define EADDRINUSE      98
+#define EADDRNOTAVAIL   99
+#define ENETDOWN        100
+#define ENETUNREACH     101
+#define ENETRESET       102
+#define ECONNABORTED    103
+#define ECONNRESET      104
+#define ENOBUFS         105
+#define EISCONN         106
+#define ENOTCONN        107
+#define ESHUTDOWN       108
+#define ETIMEDOUT       110
+#define ECONNREFUSED    111
+#define EHOSTUNREACH    113
+#define EALREADY        114
+#define EINPROGRESS     115
+
+/* Socket Domains and Types */
+#define AF_UNSPEC       0
+#define AF_UNIX         1
+#define AF_LOCAL        1
+#define AF_INET         2
+#define AF_INET6        10
+#define SOCK_STREAM     1
+#define SOCK_DGRAM      2
+#define SOCK_RAW        3
+#define SOL_SOCKET      1
+#define SO_DEBUG        1
+#define SO_REUSEADDR    2
+#define SO_TYPE         3
+#define SO_ERROR        4
+#define SO_DONTROUTE    5
+#define SO_BROADCAST    6
+#define SO_SNDBUF       7
+#define SO_RCVBUF       8
+#define SO_KEEPALIVE    9
+#define SHUT_RD         0
+#define SHUT_WR         1
+#define SHUT_RDWR       2
 
 /* Flock Operations */
 #define LOCK_SH         1
@@ -390,6 +508,12 @@ struct linux_rusage {
     long   ru_nsignals;
     long   ru_nvcsw;
     long   ru_nivcsw;
+};
+
+/* Rlimit struct */
+struct linux_rlimit {
+    uint64_t rlim_cur;
+    uint64_t rlim_max;
 };
 
 /* Linux Auxiliary Vector Types */
@@ -830,6 +954,262 @@ static inline int sys_connect(int fd, const void *addr, unsigned int len) {
     return (int)sys_syscall3(SYS_connect, fd, (long)addr, len);
 }
 
+
+struct linux_iovec {
+    void *iov_base;
+    size_t iov_len;
+};
+
+struct linux_itimerval {
+    struct linux_timeval it_interval;
+    struct linux_timeval it_value;
+};
+
+struct linux_epoll_event {
+    uint32_t events;
+    uint32_t __pad;
+    uint64_t data;
+};
+
+
+struct linux_pollfd {
+    int fd;
+    short events;
+    short revents;
+};
+
+typedef struct {
+    void *ss_sp;
+    int ss_flags;
+    size_t ss_size;
+} linux_stack_t;
+
+struct linux_sockaddr {
+    uint16_t sa_family;
+    char sa_data[14];
+};
+
+struct linux_sockaddr_in {
+    uint16_t sin_family;
+    uint16_t sin_port;
+    uint32_t sin_addr;
+    char sin_zero[8];
+};
+
+struct linux_sockaddr_un {
+    uint16_t sun_family;
+    char sun_path[108];
+};
+
+struct linux_msghdr {
+    void *msg_name;
+    uint32_t msg_namelen;
+    struct linux_iovec *msg_iov;
+    size_t msg_iovlen;
+    void *msg_control;
+    size_t msg_controllen;
+    int msg_flags;
+};
+
+struct linux_sigaction {
+    void (*sa_handler)(int);
+    unsigned long sa_flags;
+    void (*sa_restorer)(void);
+    unsigned long sa_mask;
+};
+
+static inline int sys_fcntl(int fd, int cmd, long arg) {
+    return (int)sys_syscall3(SYS_fcntl, fd, cmd, arg);
+}
+
+static inline int sys_ioctl(int fd, unsigned long req, void *arg) {
+    return (int)sys_syscall3(SYS_ioctl, fd, req, (long)arg);
+}
+
+static inline ssize_t sys_readv(int fd, const struct linux_iovec *iov, int iovcnt) {
+    return (ssize_t)sys_syscall3(SYS_readv, fd, (long)iov, iovcnt);
+}
+
+static inline ssize_t sys_writev(int fd, const struct linux_iovec *iov, int iovcnt) {
+    return (ssize_t)sys_syscall3(SYS_writev, fd, (long)iov, iovcnt);
+}
+
+static inline int sys_epoll_create1(int flags) {
+    return (int)sys_syscall1(SYS_epoll_create1, flags);
+}
+
+static inline int sys_epoll_ctl(int epfd, int op, int fd, struct linux_epoll_event *event) {
+    return (int)sys_syscall4(SYS_epoll_ctl, epfd, op, fd, (long)event);
+}
+
+static inline int sys_epoll_pwait(int epfd, struct linux_epoll_event *events, int maxevents, int timeout, const void *sigmask) {
+    return (int)sys_syscall5(SYS_epoll_pwait, epfd, (long)events, maxevents, timeout, (long)sigmask);
+}
+
+static inline int sys_ppoll(struct linux_pollfd *fds, unsigned int nfds, const struct linux_timespec *tmo_p, const void *sigmask) {
+    return (int)sys_syscall4(SYS_ppoll, (long)fds, nfds, (long)tmo_p, (long)sigmask);
+}
+
+static inline int sys_pselect6(int n, void *inp, void *outp, void *exp, const struct linux_timespec *tsp, const void *sig) {
+    return (int)sys_syscall6(SYS_pselect6, n, (long)inp, (long)outp, (long)exp, (long)tsp, (long)sig);
+}
+
+static inline int sys_utimensat(int dirfd, const char *pathname, const struct linux_timespec times[2], int flags) {
+    return (int)sys_syscall4(SYS_utimensat, dirfd, (long)pathname, (long)times, flags);
+}
+
+static inline int sys_capget(void *hdrp, void *datap) {
+    return (int)sys_syscall2(SYS_capget, (long)hdrp, (long)datap);
+}
+
+static inline int sys_capset(void *hdrp, const void *datap) {
+    return (int)sys_syscall2(SYS_capset, (long)hdrp, (long)datap);
+}
+
+static inline int sys_set_tid_address(int *tidptr) {
+    return (int)sys_syscall1(SYS_set_tid_address, (long)tidptr);
+}
+
+static inline int sys_futex(int *uaddr, int op, int val, const void *timeout, int *uaddr2, int val3) {
+    return (int)sys_syscall6(SYS_futex, (long)uaddr, op, val, (long)timeout, (long)uaddr2, val3);
+}
+
+static inline int sys_nanosleep(const struct linux_timespec *req, struct linux_timespec *rem) {
+    return (int)sys_syscall2(SYS_nanosleep, (long)req, (long)rem);
+}
+
+static inline int sys_getitimer(int which, struct linux_itimerval *curr_value) {
+    return (int)sys_syscall2(SYS_getitimer, which, (long)curr_value);
+}
+
+static inline int sys_setitimer(int which, const struct linux_itimerval *new_value, struct linux_itimerval *old_value) {
+    return (int)sys_syscall3(SYS_setitimer, which, (long)new_value, (long)old_value);
+}
+
+static inline int sys_clock_gettime(int clk_id, struct linux_timespec *tp) {
+    return (int)sys_syscall2(SYS_clock_gettime, clk_id, (long)tp);
+}
+
+static inline int sys_gettimeofday(struct linux_timeval *tv, void *tz) {
+    return (int)sys_syscall2(SYS_gettimeofday, (long)tv, (long)tz);
+}
+
+static inline int sys_sigaltstack(const void *ss, void *old_ss) {
+    return (int)sys_syscall2(SYS_sigaltstack, (long)ss, (long)old_ss);
+}
+
+static inline int sys_rt_sigaction(int signum, const void *act, void *oldact, size_t sigsetsize) {
+    return (int)sys_syscall4(SYS_rt_sigaction, signum, (long)act, (long)oldact, sigsetsize);
+}
+
+static inline int sys_rt_sigprocmask(int how, const void *set, void *oldset, size_t sigsetsize) {
+    return (int)sys_syscall4(SYS_rt_sigprocmask, how, (long)set, (long)oldset, sigsetsize);
+}
+
+static inline int sys_setregid(int rgid, int egid) {
+    return (int)sys_syscall2(SYS_setregid, rgid, egid);
+}
+
+static inline int sys_setgid(int gid) {
+    return (int)sys_syscall1(SYS_setgid, gid);
+}
+
+static inline int sys_setreuid(int ruid, int euid) {
+    return (int)sys_syscall2(SYS_setreuid, ruid, euid);
+}
+
+static inline int sys_setuid(int uid) {
+    return (int)sys_syscall1(SYS_setuid, uid);
+}
+
+static inline int sys_setresuid(int ruid, int euid, int suid) {
+    return (int)sys_syscall3(SYS_setresuid, ruid, euid, suid);
+}
+
+static inline int sys_getresuid(int *ruid, int *euid, int *suid) {
+    return (int)sys_syscall3(SYS_getresuid, (long)ruid, (long)euid, (long)suid);
+}
+
+static inline int sys_setresgid(int rgid, int egid, int sgid) {
+    return (int)sys_syscall3(SYS_setresgid, rgid, egid, sgid);
+}
+
+static inline int sys_getresgid(int *rgid, int *egid, int *sgid) {
+    return (int)sys_syscall3(SYS_getresgid, (long)rgid, (long)egid, (long)sgid);
+}
+
+static inline int sys_getgroups(int size, int *list) {
+    return (int)sys_syscall2(SYS_getgroups, size, (long)list);
+}
+
+static inline int sys_setgroups(int size, const int *list) {
+    return (int)sys_syscall2(SYS_setgroups, size, (long)list);
+}
+
+static inline int sys_gettid(void) {
+    return (int)sys_syscall0(SYS_gettid);
+}
+
+static inline int sys_getsockname(int fd, void *addr, void *addrlen) {
+    return (int)sys_syscall3(SYS_getsockname, fd, (long)addr, (long)addrlen);
+}
+
+static inline int sys_getpeername(int fd, void *addr, void *addrlen) {
+    return (int)sys_syscall3(SYS_getpeername, fd, (long)addr, (long)addrlen);
+}
+
+static inline ssize_t sys_sendto(int fd, const void *buf, size_t len, int flags, const void *dest_addr, unsigned int addrlen) {
+    return (ssize_t)sys_syscall6(SYS_sendto, fd, (long)buf, len, flags, (long)dest_addr, addrlen);
+}
+
+static inline ssize_t sys_recvfrom(int fd, void *buf, size_t len, int flags, void *src_addr, void *addrlen) {
+    return (ssize_t)sys_syscall6(SYS_recvfrom, fd, (long)buf, len, flags, (long)src_addr, (long)addrlen);
+}
+
+static inline int sys_setsockopt(int fd, int level, int optname, const void *optval, unsigned int optlen) {
+    return (int)sys_syscall5(SYS_setsockopt, fd, level, optname, (long)optval, optlen);
+}
+
+static inline int sys_getsockopt(int fd, int level, int optname, void *optval, void *optlen) {
+    return (int)sys_syscall5(SYS_getsockopt, fd, level, optname, (long)optval, (long)optlen);
+}
+
+static inline int sys_shutdown(int fd, int how) {
+    return (int)sys_syscall2(SYS_shutdown, fd, how);
+}
+
+static inline ssize_t sys_sendmsg(int fd, const struct linux_msghdr *msg, int flags) {
+    return (ssize_t)sys_syscall3(SYS_sendmsg, fd, (long)msg, flags);
+}
+
+static inline ssize_t sys_recvmsg(int fd, struct linux_msghdr *msg, int flags) {
+    return (ssize_t)sys_syscall3(SYS_recvmsg, fd, (long)msg, flags);
+}
+
+static inline long sys_clone(unsigned long flags, void *child_stack, void *parent_tid, void *tls, void *child_tid) {
+    return sys_syscall5(SYS_clone, flags, (long)child_stack, (long)parent_tid, (long)tls, (long)child_tid);
+}
+
+static inline int sys_execve(const char *filename, char *const argv[], char *const envp[]) {
+    return (int)sys_syscall3(SYS_execve, (long)filename, (long)argv, (long)envp);
+}
+
+static inline int sys_mprotect(void *addr, size_t len, int prot) {
+    return (int)sys_syscall3(SYS_mprotect, (long)addr, len, prot);
+}
+
+static inline int sys_wait4(int pid, int *wstatus, int options, void *rusage) {
+    return (int)sys_syscall4(SYS_wait4, pid, (long)wstatus, options, (long)rusage);
+}
+
+static inline int sys_prlimit64(int pid, int resource, const void *new_limit, void *old_limit) {
+    return (int)sys_syscall4(SYS_prlimit64, pid, resource, (long)new_limit, (long)old_limit);
+}
+
+static inline int sys_rseq(void *rseq, uint32_t rseq_len, int flags, uint32_t sig) {
+    return (int)sys_syscall4(SYS_rseq, (long)rseq, rseq_len, flags, sig);
+}
+
 /* String / memory utilities */
 static inline size_t ltm_strlen(const char *s) {
     size_t len = 0;
@@ -902,6 +1282,11 @@ static inline int ltm_memcmp(const void *s1, const void *s2, size_t n) {
     }
     return 0;
 }
+
+#define memset ltm_memset
+#define memcpy ltm_memcpy
+#define memcmp ltm_memcmp
+
 
 /* Printing utilities */
 static inline void ltm_print(const char *s) {

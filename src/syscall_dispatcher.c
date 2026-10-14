@@ -819,8 +819,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
             ret = handle_rt_sigreturn(state);
             break;
         case LINUX_SYS_rt_sigprocmask:
-            /* Stubs for libc initialization */
-            ret = 0;
+            ret = handle_rt_sigprocmask((int)a0, (const uint64_t *)a1, (uint64_t *)a2, (size_t)a3);
             break;
         case LINUX_SYS_sigaltstack:
             ret = handle_sigaltstack((const void *)a0, (void *)a1);
@@ -866,11 +865,18 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
             break;
         case LINUX_SYS_setuid:
         case LINUX_SYS_setgid:
+            if ((int)a0 < 0) return -LINUX_EINVAL;
+            ret = 0;
+            break;
         case LINUX_SYS_setreuid:
         case LINUX_SYS_setregid:
+            if (((int)a0 < 0 && (int)a0 != -1) || ((int)a1 < 0 && (int)a1 != -1)) return -LINUX_EINVAL;
+            ret = 0;
+            break;
         case LINUX_SYS_setresuid:
         case LINUX_SYS_setresgid:
-            ret = 0; /* Benign no-op inside container */
+            if (((int)a0 < 0 && (int)a0 != -1) || ((int)a1 < 0 && (int)a1 != -1) || ((int)a2 < 0 && (int)a2 != -1)) return -LINUX_EINVAL;
+            ret = 0;
             break;
         case LINUX_SYS_unlinkat:
             ret = handle_unlinkat((int)a0, (const char *)a1, (int)a2);

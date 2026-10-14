@@ -646,7 +646,9 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
 }
 
 int64_t handle_readv(int fd, const struct linux_iovec *iov, int iovcnt) {
-    if (!iov || iovcnt < 0 || iovcnt > 1024) return -LINUX_EINVAL;
+    if (iovcnt == 0) return 0;
+    if (iovcnt < 0 || iovcnt > 1024) return -LINUX_EINVAL;
+    if (!iov) return -LINUX_EFAULT;
 
     struct iovec diov[iovcnt];
     for (int i = 0; i < iovcnt; i++) {
@@ -660,7 +662,9 @@ int64_t handle_readv(int fd, const struct linux_iovec *iov, int iovcnt) {
 }
 
 int64_t handle_writev(int fd, const struct linux_iovec *iov, int iovcnt) {
-    if (!iov || iovcnt < 0 || iovcnt > 1024) return -LINUX_EINVAL;
+    if (iovcnt == 0) return 0;
+    if (iovcnt < 0 || iovcnt > 1024) return -LINUX_EINVAL;
+    if (!iov) return -LINUX_EFAULT;
 
     struct iovec diov[iovcnt];
     for (int i = 0; i < iovcnt; i++) {
@@ -704,7 +708,11 @@ int64_t handle_fcntl(int fd, int cmd, unsigned long arg) {
     }
 
     int ret = fcntl(fd, dcmd, arg);
-    if (ret < 0) return darwin_to_linux_errno(errno);
+    if (ret < 0) {
+        int err = errno;
+        if (err == 0 || err == ENOTTY) err = EINVAL;
+        return darwin_to_linux_errno(err);
+    }
 
     if ((cmd == F_DUPFD || cmd == 1030) && ret >= 0 && ret < MAX_TRACKED_FDS && fd >= 0 && fd < MAX_TRACKED_FDS) {
         g_sock_is_icmp[ret] = g_sock_is_icmp[fd];
@@ -877,6 +885,8 @@ int64_t handle_getdents64(int fd, void *dirp, size_t count) {
 
 int64_t handle_ppoll(struct pollfd *fds, nfds_t nfds, const struct linux_timespec *tmo_p, const void *sigmask) {
     (void)sigmask;
+    if (nfds > 0 && !fds) return -LINUX_EFAULT;
+    if (tmo_p && (tmo_p->tv_nsec < 0 || tmo_p->tv_nsec >= 1000000000L)) return -LINUX_EINVAL;
     int timeout_ms = -1;
     if (tmo_p) {
         timeout_ms = (int)(tmo_p->tv_sec * 1000 + tmo_p->tv_nsec / 1000000);
@@ -889,6 +899,8 @@ int64_t handle_ppoll(struct pollfd *fds, nfds_t nfds, const struct linux_timespe
 int64_t handle_pselect6(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
                         const struct linux_timespec *timeout, const void *sig) {
     (void)sig;
+    if (nfds < 0 || nfds > 1024) return -LINUX_EINVAL;
+    if (timeout && (timeout->tv_nsec < 0 || timeout->tv_nsec >= 1000000000L)) return -LINUX_EINVAL;
     struct timespec ts;
     struct timespec *pts = NULL;
     if (timeout) {
@@ -896,6 +908,7 @@ int64_t handle_pselect6(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
         ts.tv_nsec = timeout->tv_nsec;
         pts = &ts;
     }
+
 
     fd_set rfds, wfds, efds;
     if (readfds) memcpy(&rfds, readfds, sizeof(rfds));
@@ -918,8 +931,10 @@ int64_t handle_pselect6(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exc
     return ret;
 }
 
+#define LINUX_NSIG 65
+
 int64_t handle_kill(pid_t pid, int sig) {
-    if (sig == 0) return 0;
+    if (sig < 0 || sig >= LINUX_NSIG) return -LINUX_EINVAL;
     if (signalfd_deliver_signal(sig, NULL)) {
         return 0;
     }
@@ -929,7 +944,12 @@ int64_t handle_kill(pid_t pid, int sig) {
 }
 
 int64_t handle_tkill(int tid, int sig) {
-    (void)tid;
+    if (sig < 0 || sig >= LINUX_NSIG) return -LINUX_EINVAL;
+    if (tid <= 0) return -LINUX_ESRCH;
+    if (tid != getpid()) {
+        int r = kill(tid, 0);
+        if (r < 0) return darwin_to_linux_errno(errno);
+    }
     if (sig == 0) return 0;
     if (signalfd_deliver_signal(sig, NULL)) {
         return 0;
@@ -940,12 +960,16 @@ int64_t handle_tkill(int tid, int sig) {
 }
 
 int64_t handle_tgkill(int tgid, int tid, int sig) {
-    (void)tgid;
+    if (sig < 0 || sig >= LINUX_NSIG) return -LINUX_EINVAL;
+    if (tgid <= 0 || tid <= 0) return -LINUX_ESRCH;
+    if (tgid != getpid()) {
+        int r = kill(tgid, 0);
+        if (r < 0) return darwin_to_linux_errno(errno);
+    }
     return handle_tkill(tid, sig);
 }
 
 int64_t handle_sigaltstack(const void *ss, void *oss) {
-    (void)ss;
     if (oss) {
         /* Linux stack_t: void *ss_sp (0), int ss_flags (8), size_t ss_size (16) */
         struct {
@@ -958,10 +982,23 @@ int64_t handle_sigaltstack(const void *ss, void *oss) {
         out->ss_flags = 2; /* SS_DISABLE */
         out->ss_size = 0;
     }
+    if (ss) {
+        const struct {
+            void *ss_sp;
+            int ss_flags;
+            int __pad;
+            size_t ss_size;
+        } *in = (const void *)ss;
+        if (in->ss_flags & ~2 /* SS_DISABLE */) {
+            return -LINUX_EINVAL;
+        }
+        if (!(in->ss_flags & 2) && in->ss_size < 2048) {
+            return -LINUX_ENOMEM;
+        }
+    }
     return 0;
 }
 
-#define LINUX_NSIG 65
 static struct linux_sigaction g_guest_sigactions[LINUX_NSIG];
 
 struct ltm_sigframe {
@@ -1012,7 +1049,7 @@ static void ltm_host_signal_handler(int sig, siginfo_t *info, void *ucontext) {
 }
 
 int64_t handle_rt_sigaction(int signum, const struct linux_sigaction *act, struct linux_sigaction *oldact, size_t sigsetsize) {
-    (void)sigsetsize;
+    if (sigsetsize != 8) return -LINUX_EINVAL;
     if (signum <= 0 || signum >= LINUX_NSIG) return -LINUX_EINVAL;
     if (signum == SIGKILL || signum == SIGSTOP) return -LINUX_EINVAL;
     if (signum == SIGTRAP) return 0; /* Keep SIGTRAP for LTM dispatcher */
@@ -1062,6 +1099,32 @@ int64_t handle_rt_sigreturn(void *state_ptr) {
     ltm_resume_context(&frame->saved_state);
     return 0; /* Unreachable */
 }
+
+int64_t handle_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, size_t sigsetsize) {
+    if (sigsetsize != 8) return -LINUX_EINVAL;
+    if (oldset) {
+        sigset_t cur;
+        sigemptyset(&cur);
+        pthread_sigmask(SIG_SETMASK, NULL, &cur);
+        *oldset = (uint64_t)(unsigned int)cur;
+    }
+    if (set) {
+        if (how != 0 /* SIG_BLOCK */ && how != 1 /* SIG_UNBLOCK */ && how != 2 /* SIG_SETMASK */) {
+            return -LINUX_EINVAL;
+        }
+        sigset_t d_set;
+        sigemptyset(&d_set);
+        for (int i = 1; i < 32; i++) {
+            if (*set & (1ULL << (i - 1))) {
+                sigaddset(&d_set, i);
+            }
+        }
+        int d_how = (how == 0) ? SIG_BLOCK : (how == 1 ? SIG_UNBLOCK : SIG_SETMASK);
+        pthread_sigmask(d_how, &d_set, NULL);
+    }
+    return 0;
+}
+
 
 /* Memory Management */
 int64_t handle_brk(uintptr_t brk_addr) {
@@ -1209,16 +1272,18 @@ int64_t handle_getegid(void) {
 }
 
 int64_t handle_getresuid(uid_t *ruid, uid_t *euid, uid_t *suid) {
-    if (ruid) *ruid = 0;
-    if (euid) *euid = 0;
-    if (suid) *suid = 0;
+    if (!ruid || !euid || !suid) return -LINUX_EFAULT;
+    *ruid = 0;
+    *euid = 0;
+    *suid = 0;
     return 0;
 }
 
 int64_t handle_getresgid(gid_t *rgid, gid_t *egid, gid_t *sgid) {
-    if (rgid) *rgid = 0;
-    if (egid) *egid = 0;
-    if (sgid) *sgid = 0;
+    if (!rgid || !egid || !sgid) return -LINUX_EFAULT;
+    *rgid = 0;
+    *egid = 0;
+    *sgid = 0;
     return 0;
 }
 
@@ -1231,10 +1296,11 @@ int64_t handle_getgroups(int size, gid_t list[]) {
 }
 
 int64_t handle_setgroups(size_t size, const gid_t *list) {
-    (void)size;
-    (void)list;
+    if ((long)size < 0 || size > 65536) return -LINUX_EINVAL;
+    if (size > 0 && !list) return -LINUX_EFAULT;
     return 0;
 }
+
 
 int64_t handle_capget(void *hdr, void *data) {
     if (hdr) {
@@ -1297,6 +1363,7 @@ int64_t handle_sysinfo(struct linux_sysinfo *info) {
 /* Time */
 int64_t handle_clock_gettime(int clock_id, struct linux_timespec *tp) {
     if (!tp) return -LINUX_EFAULT;
+    if (clock_id < 0 || clock_id > 15) return -LINUX_EINVAL;
 
     clockid_t dclk = CLOCK_REALTIME;
     if (clock_id == 1 || clock_id == 4) { /* CLOCK_MONOTONIC / CLOCK_MONOTONIC_RAW */
@@ -1481,7 +1548,11 @@ int64_t handle_readlinkat(int dirfd, const char *pathname, char *buf, size_t buf
 }
 
 int64_t handle_prlimit64(int pid, int resource, const struct linux_rlimit64 *new_limit, struct linux_rlimit64 *old_limit) {
-    (void)pid;
+    if (resource < 0 || resource > 15) return -LINUX_EINVAL;
+    if (pid < 0) return -LINUX_ESRCH;
+    if (pid > 0 && pid != getpid()) {
+        if (kill(pid, 0) < 0) return -LINUX_ESRCH;
+    }
     (void)new_limit;
     if (old_limit) {
         if (resource == 3) { /* RLIMIT_STACK */
@@ -1494,6 +1565,7 @@ int64_t handle_prlimit64(int pid, int resource, const struct linux_rlimit64 *new
     }
     return 0;
 }
+
 
 int64_t handle_getrandom(void *buf, size_t buflen, unsigned int flags) {
     if (flags & ~(1U | 2U | 4U)) return -LINUX_EINVAL;
@@ -1702,7 +1774,17 @@ int64_t handle_renameat(int olddirfd, const char *oldpath, int newdirfd, const c
 }
 
 int64_t handle_renameat2(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, unsigned int flags) {
-    (void)flags;
+    if (!oldpath || !newpath) return -LINUX_EFAULT;
+    if (flags & 1 /* RENAME_NOREPLACE */) {
+        char new_host[1024];
+        int res = sandbox_resolve_path(newdirfd, newpath, new_host, sizeof(new_host), 0);
+        if (res == 0) {
+            struct stat st;
+            if (lstat(new_host, &st) == 0) {
+                return -LINUX_EEXIST;
+            }
+        }
+    }
     return handle_renameat(olddirfd, oldpath, newdirfd, newpath);
 }
 
@@ -2332,6 +2414,8 @@ int64_t handle_getpeername(int fd, void *addr, socklen_t *len) {
 }
 
 int64_t handle_sendto(int fd, const void *buf, size_t len, int flags, const void *dest_addr, socklen_t addrlen) {
+    if (fd < 0) return -LINUX_EBADF;
+    if (len > 0 && !buf) return -LINUX_EFAULT;
     if (dest_addr && addrlen > 0) {
         struct sockaddr_storage daddr;
         socklen_t dlen = sizeof(daddr);
@@ -2346,7 +2430,10 @@ int64_t handle_sendto(int fd, const void *buf, size_t len, int flags, const void
 }
 
 int64_t handle_recvfrom(int fd, void *buf, size_t len, int flags, void *src_addr, socklen_t *addrlen) {
+    if (fd < 0) return -LINUX_EBADF;
+    if (len > 0 && !buf) return -LINUX_EFAULT;
     ssize_t ret;
+
     if (src_addr && addrlen && *addrlen > 0) {
         struct sockaddr_storage ss;
         socklen_t slen = sizeof(ss);
@@ -2448,6 +2535,8 @@ int64_t handle_recvmsg(int fd, void *msg, int flags) {
 }
 
 int64_t handle_setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen) {
+    if (fd < 0) return -LINUX_EBADF;
+    if (optlen > 0 && !optval) return -LINUX_EFAULT;
     int dlevel, doptname;
     translate_linux_to_darwin_sockopt(level, optname, &dlevel, &doptname);
     int ret = setsockopt(fd, dlevel, doptname, optval, optlen);
@@ -2462,6 +2551,8 @@ int64_t handle_setsockopt(int fd, int level, int optname, const void *optval, so
 }
 
 int64_t handle_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen) {
+    if (fd < 0) return -LINUX_EBADF;
+    if (!optval || !optlen) return -LINUX_EFAULT;
     int dlevel, doptname;
     translate_linux_to_darwin_sockopt(level, optname, &dlevel, &doptname);
     int ret = getsockopt(fd, dlevel, doptname, optval, optlen);
@@ -2470,6 +2561,8 @@ int64_t handle_getsockopt(int fd, int level, int optname, void *optval, socklen_
 }
 
 int64_t handle_shutdown(int fd, int how) {
+    if (fd < 0) return -LINUX_EBADF;
+    if (how < 0 || how > 2) return -LINUX_EINVAL;
     int ret = shutdown(fd, how);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return 0;
@@ -2477,12 +2570,16 @@ int64_t handle_shutdown(int fd, int how) {
 
 /* Timers & Itimers */
 int64_t handle_setitimer(int which, const void *new_val, void *old_val) {
+    if (which < 0 || which > 2) return -LINUX_EINVAL;
+    if (!new_val) return -LINUX_EFAULT;
     int ret = setitimer(which, (const struct itimerval *)new_val, (struct itimerval *)old_val);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return 0;
 }
 
 int64_t handle_getitimer(int which, void *curr_val) {
+    if (which < 0 || which > 2) return -LINUX_EINVAL;
+    if (!curr_val) return -LINUX_EFAULT;
     int ret = getitimer(which, (struct itimerval *)curr_val);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return 0;
@@ -2519,8 +2616,9 @@ void ltm_epoll_close(int fd) {
 }
 
 int64_t handle_epoll_create1(int flags) {
-    (void)flags;
+    if (flags & ~02000000 /* EPOLL_CLOEXEC */) return -LINUX_EINVAL;
     int slot = -1;
+
     for (int i = 0; i < EPOLL_MAX_INSTANCES; i++) {
         if (!g_epoll_pool[i].in_use) {
             slot = i;
