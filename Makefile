@@ -21,6 +21,7 @@ all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^
+	@python3 scripts/enable_x18_preservation.py $@
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

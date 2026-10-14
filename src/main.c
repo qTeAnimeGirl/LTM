@@ -212,6 +212,20 @@ int main(int argc, char **argv, char **envp) {
     const char *binary_arg = argv[arg_idx];
     bool is_container_path = (binary_arg[0] == '/');
 
+    /* Auto-detect appropriate rootfs if not explicitly specified */
+    if (!rootfs_arg && is_container_path) {
+        char check_path[1024];
+        snprintf(check_path, sizeof(check_path), "arch_rootfs%s", binary_arg);
+        if (access(check_path, F_OK) == 0) {
+            rootfs_arg = "arch_rootfs";
+        } else {
+            snprintf(check_path, sizeof(check_path), "rootfs%s", binary_arg);
+            if (access(check_path, F_OK) == 0) {
+                rootfs_arg = "rootfs";
+            }
+        }
+    }
+
     /* Initialize sandbox with chosen chroot rootfs */
     int s_res = sandbox_init(rootfs_arg);
     if (s_res != 0) {
