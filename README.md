@@ -15,8 +15,12 @@ Because Apple Silicon and 64-bit Linux ARM64 share the exact same AArch64 instru
 
 - **🚀 100% Native Speed (0% CPU Emulation)**: Runs 64-bit Linux ARM64 instructions directly on Apple Silicon cores with zero translation or emulation penalty.
 - **⚡ Dynamic ELF Linker & PT_INTERP Support**: Automatically detects and loads dynamic interpreters (`/lib/ld-musl-aarch64.so.1`), initializing the Linux Aux Vector (`AT_PHDR`, `AT_BASE`, `AT_ENTRY`, `AT_RANDOM`, `AT_PAGESZ=16384`) strictly conforming to the Linux ARM64 ABI.
+- **🌐 Full Internet & Network Connectivity**: TCP, UDP, and Unix domain sockets, complete DNS resolution, `setsockopt`/`getsockopt` translation, `sendmsg`/`recvmsg` with ABI conversion, and epoll event loops (`epoll_create1`, `epoll_ctl`, `epoll_pwait`). Supports `wget`, `curl`, and HTTPS TLS 1.3.
+- **📂 Virtual Directory Browsing (`/proc`, `/sys`, `/dev`)**: Full directory navigation and listing (`cd /proc && ls -la && cat cpuinfo`) with live hardware telemetry, kernel version, uptime, load averages, memory info, and synthetic entries.
+- **🔌 Complete Host Device Mapping (`/dev`)**: Standard character devices (`/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/random`, `/dev/tty`, `/dev/console`, `/dev/ptmx`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/*`).
 - **🖥️ Full Interactive GNU Bash & BusyBox Shells**: Run GNU Bash 5.2 and BusyBox `/bin/sh` interactively with command history, tab completion, pipelines (`|`), I/O redirection (`>`, `<`), and job control.
 - **📊 Native Fastfetch with Live Apple Silicon Telemetry**: Runs `fastfetch` with Alpine Linux ASCII art, displaying real host Apple Silicon CPU brand (`Apple M3`), actual core count (8 cores), real-time Mach VM memory statistics, uptime, and load averages.
+- **⏱️ CPU Power Benchmark Suite**: Built-in side-by-side benchmark (`./scripts/run_benchmark.sh`) comparing native macOS Darwin ARM64 performance with LTM Linux ARM64 ELF execution across 5 compute-intensive workloads.
 - **🛡️ Sandboxed Chroot Jail**: Strict containment within a designated rootfs directory. Directory traversal attempts (`../`) and host paths (`/Library`, `/System`, `/Users`, `/private`) are strictly blocked.
 - **📦 Built-in Rootfs Guard & Auto-Installer**: If no root filesystem is detected, LTM safely refuses execution and offers an automatic one-click installer (`./ltm --install-rootfs`) that downloads and configures Alpine Linux aarch64, Fastfetch, and GNU Bash.
 - **🔄 Darwin `_sigtramp` Bypass**: Custom assembly context restoration engine (`_ltm_resume_context`) enabling seamless child process spawning (`fork`/`clone` + `execve`) from inside signal handlers without kernel signal frame panics.
@@ -38,21 +42,32 @@ LTM includes a built-in installer that downloads Alpine Linux aarch64, Fastfetch
 ```
 *(Alternatively, you can run `./scripts/setup_rootfs.sh`)*
 
-### 3. Run Fastfetch
+### 3. Run CPU Power Benchmark (Native vs LTM)
+Compare macOS Apple Silicon native execution speed directly against LTM Linux ELF execution:
+```bash
+./scripts/run_benchmark.sh
+```
+
+### 4. Test Internet Connectivity
+```bash
+./ltm /usr/bin/wget -O - http://example.com
+```
+
+### 5. Run Fastfetch
 ```bash
 ./ltm /usr/bin/fastfetch
 ```
 
-### 4. Interactive GNU Bash Shell
+### 6. Interactive GNU Bash Shell
 ```bash
 # Launch an interactive GNU Bash session
 ./ltm /bin/bash
 
-# Or execute a one-line command with pipelines
-./ltm /bin/bash -c "echo 'Hello from Linux on Apple Silicon!'; uname -a; pwd"
+# Or browse /proc inside Bash
+./ltm /bin/bash -c "cd /proc && ls -la && cat cpuinfo"
 ```
 
-### 5. Interactive BusyBox Shell
+### 7. Interactive BusyBox Shell
 ```bash
 ./ltm /bin/sh
 ```

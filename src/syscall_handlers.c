@@ -70,7 +70,7 @@ int64_t handle_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
 
     if (res == 1) {
         /* Virtual path */
-        return sandbox_open_virtual(pathname, dflags, mode);
+        return sandbox_open_virtual(host_path, dflags, mode);
     }
 
     int fd = open(host_path, dflags, mode);
@@ -78,11 +78,14 @@ int64_t handle_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
     return fd;
 }
 
+void ltm_epoll_close(int fd);
+
 int64_t handle_close(int fd) {
     if (fd >= 0 && fd < DIR_CACHE_MAX && g_dir_cache[fd]) {
         closedir(g_dir_cache[fd]);
         g_dir_cache[fd] = NULL;
     }
+    ltm_epoll_close(fd);
     int ret = close(fd);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return 0;
@@ -133,6 +136,14 @@ int64_t handle_newfstatat(int dirfd, const char *pathname, struct linux_stat *st
     char host_path[1024];
     int res = sandbox_resolve_path(dirfd, pathname ? pathname : "", host_path, sizeof(host_path), flags);
     if (res < 0) return res;
+
+    if (res == 1) {
+        struct stat st;
+        int vres = sandbox_virtual_stat(host_path, &st);
+        if (vres < 0) return vres;
+        copy_stat_to_linux(&st, statbuf);
+        return 0;
+    }
 
     int dflags = 0;
     if (flags & 0x100) dflags |= AT_SYMLINK_NOFOLLOW; /* Linux AT_SYMLINK_NOFOLLOW is 0x100 */
@@ -1066,6 +1077,9 @@ int64_t handle_readlinkat(int dirfd, const char *pathname, char *buf, size_t buf
     char host_path[1024];
     int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), AT_SYMLINK_NOFOLLOW);
     if (res < 0) return res;
+    if (res == 1) {
+        return sandbox_virtual_readlink(host_path, buf, bufsiz);
+    }
 
     ssize_t ret = readlink(host_path, buf, bufsiz);
     if (ret < 0) return darwin_to_linux_errno(errno);
@@ -1413,6 +1427,137 @@ int64_t handle_sched_setaffinity(pid_t pid, size_t cpusetsize, const unsigned lo
     return 0;
 }
 
+/* Networking & Sockets ABI Translation */
+
+struct linux_msghdr {
+    void *msg_name;
+    socklen_t msg_namelen;
+    int __pad1;
+    struct iovec *msg_iov;
+    size_t msg_iovlen;
+    void *msg_control;
+    size_t msg_controllen;
+    int msg_flags;
+    int __pad2;
+};
+
+static int copy_linux_to_darwin_sockaddr(const void *laddr, socklen_t llen, struct sockaddr_storage *daddr, socklen_t *dlen) {
+    if (!laddr || llen < 2) return -LINUX_EINVAL;
+    uint16_t family = *(const uint16_t *)laddr;
+
+    if (family == 1) { /* AF_UNIX */
+        struct sockaddr_un *dun = (struct sockaddr_un *)daddr;
+        memset(dun, 0, sizeof(*dun));
+        dun->sun_family = AF_UNIX;
+        const char *lpath = (const char *)laddr + 2;
+        size_t path_len = strlen(lpath);
+        if (path_len >= sizeof(dun->sun_path)) path_len = sizeof(dun->sun_path) - 1;
+        memcpy(dun->sun_path, lpath, path_len);
+        dun->sun_len = sizeof(struct sockaddr_un);
+        *dlen = sizeof(struct sockaddr_un);
+        return 0;
+    } else if (family == 2) { /* AF_INET */
+        struct sockaddr_in *din = (struct sockaddr_in *)daddr;
+        memset(din, 0, sizeof(*din));
+        din->sin_len = sizeof(struct sockaddr_in);
+        din->sin_family = AF_INET;
+        if (llen >= 4) memcpy(&din->sin_port, (const char *)laddr + 2, 2);
+        if (llen >= 8) memcpy(&din->sin_addr, (const char *)laddr + 4, 4);
+        *dlen = sizeof(struct sockaddr_in);
+        return 0;
+    } else if (family == 10) { /* Linux AF_INET6 -> Darwin AF_INET6 (30) */
+        struct sockaddr_in6 *din6 = (struct sockaddr_in6 *)daddr;
+        memset(din6, 0, sizeof(*din6));
+        din6->sin6_len = sizeof(struct sockaddr_in6);
+        din6->sin6_family = AF_INET6;
+        if (llen >= 4) memcpy(&din6->sin6_port, (const char *)laddr + 2, 2);
+        if (llen >= 8) memcpy(&din6->sin6_flowinfo, (const char *)laddr + 4, 4);
+        if (llen >= 24) memcpy(&din6->sin6_addr, (const char *)laddr + 8, 16);
+        if (llen >= 28) memcpy(&din6->sin6_scope_id, (const char *)laddr + 24, 4);
+        *dlen = sizeof(struct sockaddr_in6);
+        return 0;
+    } else {
+        size_t cplen = llen < sizeof(*daddr) ? llen : sizeof(*daddr);
+        memcpy(daddr, laddr, cplen);
+        *dlen = (socklen_t)cplen;
+        return 0;
+    }
+}
+
+static int copy_darwin_to_linux_sockaddr(const struct sockaddr_storage *daddr, socklen_t dlen, void *laddr, socklen_t *llen) {
+    if (!laddr || !llen || *llen == 0) return 0;
+    const struct sockaddr *sa = (const struct sockaddr *)daddr;
+
+    if (sa->sa_family == AF_UNIX) {
+        if (*llen >= 2) *(uint16_t *)laddr = 1;
+        const struct sockaddr_un *dun = (const struct sockaddr_un *)daddr;
+        size_t path_len = strlen(dun->sun_path);
+        size_t space = *llen > 2 ? *llen - 2 : 0;
+        if (path_len >= space) path_len = space > 0 ? space - 1 : 0;
+        memcpy((char *)laddr + 2, dun->sun_path, path_len);
+        ((char *)laddr + 2)[path_len] = '\0';
+        *llen = (socklen_t)(2 + path_len + 1);
+        return 0;
+    } else if (sa->sa_family == AF_INET) {
+        const struct sockaddr_in *din = (const struct sockaddr_in *)daddr;
+        if (*llen >= 2) *(uint16_t *)laddr = 2;
+        if (*llen >= 4) memcpy((char *)laddr + 2, &din->sin_port, 2);
+        if (*llen >= 8) memcpy((char *)laddr + 4, &din->sin_addr, 4);
+        if (*llen >= 16) memset((char *)laddr + 8, 0, 8);
+        if (*llen > 16) *llen = 16;
+        return 0;
+    } else if (sa->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *din6 = (const struct sockaddr_in6 *)daddr;
+        if (*llen >= 2) *(uint16_t *)laddr = 10;
+        if (*llen >= 4) memcpy((char *)laddr + 2, &din6->sin6_port, 2);
+        if (*llen >= 8) memcpy((char *)laddr + 4, &din6->sin6_flowinfo, 4);
+        if (*llen >= 24) memcpy((char *)laddr + 8, &din6->sin6_addr, 16);
+        if (*llen >= 28) memcpy((char *)laddr + 24, &din6->sin6_scope_id, 4);
+        if (*llen > 28) *llen = 28;
+        return 0;
+    } else {
+        size_t cplen = dlen < *llen ? dlen : *llen;
+        memcpy(laddr, daddr, cplen);
+        *llen = (socklen_t)cplen;
+        return 0;
+    }
+}
+
+static void translate_linux_to_darwin_sockopt(int level, int optname, int *dlevel, int *doptname) {
+    if (level == 1) { /* LINUX_SOL_SOCKET */
+        *dlevel = SOL_SOCKET;
+        switch (optname) {
+            case 1:  *doptname = SO_DEBUG; break;
+            case 2:  *doptname = SO_REUSEADDR; break;
+            case 3:  *doptname = SO_TYPE; break;
+            case 4:  *doptname = SO_ERROR; break;
+            case 5:  *doptname = SO_DONTROUTE; break;
+            case 6:  *doptname = SO_BROADCAST; break;
+            case 7:  *doptname = SO_SNDBUF; break;
+            case 8:  *doptname = SO_RCVBUF; break;
+            case 9:  *doptname = SO_KEEPALIVE; break;
+            case 10: *doptname = SO_OOBINLINE; break;
+            case 13: *doptname = SO_LINGER; break;
+            case 15: *doptname = SO_REUSEPORT; break;
+            case 18: *doptname = SO_RCVLOWAT; break;
+            case 19: *doptname = SO_SNDLOWAT; break;
+            case 20: *doptname = SO_RCVTIMEO; break;
+            case 21: *doptname = SO_SNDTIMEO; break;
+            case 30: *doptname = SO_ACCEPTCONN; break;
+            default: *doptname = optname; break;
+        }
+    } else if (level == 6) { /* IPPROTO_TCP */
+        *dlevel = IPPROTO_TCP;
+        *doptname = optname;
+    } else if (level == 0) { /* IPPROTO_IP */
+        *dlevel = IPPROTO_IP;
+        *doptname = optname;
+    } else {
+        *dlevel = level;
+        *doptname = optname;
+    }
+}
+
 int64_t handle_socket(int domain, int type, int protocol) {
     int ddomain = domain;
     if (domain == 1) ddomain = AF_UNIX;
@@ -1437,14 +1582,54 @@ int64_t handle_socket(int domain, int type, int protocol) {
     return fd;
 }
 
+int64_t handle_socketpair(int domain, int type, int protocol, int sv[2]) {
+    if (!sv) return -LINUX_EINVAL;
+    int ddomain = domain;
+    if (domain == 1) ddomain = AF_UNIX;
+    int dtype = type & 0xf;
+    int cloexec = (type & 02000000) != 0;
+    int nonblock = (type & 00004000) != 0;
+
+    int fds[2];
+    int ret = socketpair(ddomain, dtype, protocol, fds);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+
+    if (cloexec) {
+        fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+        fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+    }
+    if (nonblock) {
+        int fl0 = fcntl(fds[0], F_GETFL, 0);
+        fcntl(fds[0], F_SETFL, fl0 | O_NONBLOCK);
+        int fl1 = fcntl(fds[1], F_GETFL, 0);
+        fcntl(fds[1], F_SETFL, fl1 | O_NONBLOCK);
+    }
+
+    sv[0] = fds[0];
+    sv[1] = fds[1];
+    return 0;
+}
+
 int64_t handle_connect(int fd, const void *addr, socklen_t len) {
-    int ret = connect(fd, (const struct sockaddr *)addr, len);
+    if (!addr) return -LINUX_EINVAL;
+    struct sockaddr_storage daddr;
+    socklen_t dlen = sizeof(daddr);
+    int r = copy_linux_to_darwin_sockaddr(addr, len, &daddr, &dlen);
+    if (r < 0) return r;
+
+    int ret = connect(fd, (const struct sockaddr *)&daddr, dlen);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return 0;
 }
 
 int64_t handle_bind(int fd, const void *addr, socklen_t len) {
-    int ret = bind(fd, (const struct sockaddr *)addr, len);
+    if (!addr) return -LINUX_EINVAL;
+    struct sockaddr_storage daddr;
+    socklen_t dlen = sizeof(daddr);
+    int r = copy_linux_to_darwin_sockaddr(addr, len, &daddr, &dlen);
+    if (r < 0) return r;
+
+    int ret = bind(fd, (const struct sockaddr *)&daddr, dlen);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return 0;
 }
@@ -1456,43 +1641,161 @@ int64_t handle_listen(int fd, int backlog) {
 }
 
 int64_t handle_accept(int fd, void *addr, socklen_t *len) {
-    int ret = accept(fd, (struct sockaddr *)addr, len);
+    if (addr && len && *len > 0) {
+        struct sockaddr_storage ss;
+        socklen_t slen = sizeof(ss);
+        int ret = accept(fd, (struct sockaddr *)&ss, &slen);
+        if (ret < 0) return darwin_to_linux_errno(errno);
+
+        socklen_t lnamelen = *len;
+        copy_darwin_to_linux_sockaddr(&ss, slen, addr, &lnamelen);
+        *len = lnamelen;
+        return ret;
+    }
+    int ret = accept(fd, NULL, NULL);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return ret;
 }
 
+int64_t handle_accept4(int fd, void *addr, socklen_t *len, int flags) {
+    int ret = handle_accept(fd, addr, len);
+    if (ret < 0) return ret;
+    int newfd = (int)ret;
+    if (flags & 02000000) { /* LINUX_SOCK_CLOEXEC */
+        fcntl(newfd, F_SETFD, FD_CLOEXEC);
+    }
+    if (flags & 00004000) { /* LINUX_SOCK_NONBLOCK */
+        int fl = fcntl(newfd, F_GETFL, 0);
+        fcntl(newfd, F_SETFL, fl | O_NONBLOCK);
+    }
+    return newfd;
+}
+
 int64_t handle_getsockname(int fd, void *addr, socklen_t *len) {
-    int ret = getsockname(fd, (struct sockaddr *)addr, len);
+    if (!addr || !len) return -LINUX_EINVAL;
+    struct sockaddr_storage ss;
+    socklen_t slen = sizeof(ss);
+    int ret = getsockname(fd, (struct sockaddr *)&ss, &slen);
     if (ret < 0) return darwin_to_linux_errno(errno);
+
+    socklen_t lnamelen = *len;
+    copy_darwin_to_linux_sockaddr(&ss, slen, addr, &lnamelen);
+    *len = lnamelen;
     return 0;
 }
 
 int64_t handle_getpeername(int fd, void *addr, socklen_t *len) {
-    int ret = getpeername(fd, (struct sockaddr *)addr, len);
+    if (!addr || !len) return -LINUX_EINVAL;
+    struct sockaddr_storage ss;
+    socklen_t slen = sizeof(ss);
+    int ret = getpeername(fd, (struct sockaddr *)&ss, &slen);
     if (ret < 0) return darwin_to_linux_errno(errno);
+
+    socklen_t lnamelen = *len;
+    copy_darwin_to_linux_sockaddr(&ss, slen, addr, &lnamelen);
+    *len = lnamelen;
     return 0;
 }
 
 int64_t handle_sendto(int fd, const void *buf, size_t len, int flags, const void *dest_addr, socklen_t addrlen) {
-    ssize_t ret = sendto(fd, buf, len, flags, (const struct sockaddr *)dest_addr, addrlen);
+    if (dest_addr && addrlen > 0) {
+        struct sockaddr_storage daddr;
+        socklen_t dlen = sizeof(daddr);
+        copy_linux_to_darwin_sockaddr(dest_addr, addrlen, &daddr, &dlen);
+        ssize_t ret = sendto(fd, buf, len, flags, (const struct sockaddr *)&daddr, dlen);
+        if (ret < 0) return darwin_to_linux_errno(errno);
+        return ret;
+    }
+    ssize_t ret = sendto(fd, buf, len, flags, NULL, 0);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return ret;
 }
 
 int64_t handle_recvfrom(int fd, void *buf, size_t len, int flags, void *src_addr, socklen_t *addrlen) {
-    ssize_t ret = recvfrom(fd, buf, len, flags, (struct sockaddr *)src_addr, addrlen);
+    if (src_addr && addrlen && *addrlen > 0) {
+        struct sockaddr_storage ss;
+        socklen_t slen = sizeof(ss);
+        ssize_t ret = recvfrom(fd, buf, len, flags, (struct sockaddr *)&ss, &slen);
+        if (ret < 0) return darwin_to_linux_errno(errno);
+
+        socklen_t lnamelen = *addrlen;
+        copy_darwin_to_linux_sockaddr(&ss, slen, src_addr, &lnamelen);
+        *addrlen = lnamelen;
+        return ret;
+    }
+    ssize_t ret = recvfrom(fd, buf, len, flags, NULL, NULL);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return ret;
 }
 
+int64_t handle_sendmsg(int fd, const void *msg, int flags) {
+    if (!msg) return -LINUX_EINVAL;
+    const struct linux_msghdr *lmsg = (const struct linux_msghdr *)msg;
+
+    struct msghdr dmsg;
+    memset(&dmsg, 0, sizeof(dmsg));
+    dmsg.msg_iov = lmsg->msg_iov;
+    dmsg.msg_iovlen = (int)lmsg->msg_iovlen;
+    dmsg.msg_control = lmsg->msg_control;
+    dmsg.msg_controllen = (socklen_t)lmsg->msg_controllen;
+    dmsg.msg_flags = lmsg->msg_flags;
+
+    struct sockaddr_storage ss;
+    socklen_t sslen = 0;
+    if (lmsg->msg_name && lmsg->msg_namelen > 0) {
+        copy_linux_to_darwin_sockaddr(lmsg->msg_name, lmsg->msg_namelen, &ss, &sslen);
+        dmsg.msg_name = &ss;
+        dmsg.msg_namelen = sslen;
+    }
+
+    ssize_t ret = sendmsg(fd, &dmsg, flags);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return ret;
+}
+
+int64_t handle_recvmsg(int fd, void *msg, int flags) {
+    if (!msg) return -LINUX_EINVAL;
+    struct linux_msghdr *lmsg = (struct linux_msghdr *)msg;
+
+    struct msghdr dmsg;
+    memset(&dmsg, 0, sizeof(dmsg));
+    dmsg.msg_iov = lmsg->msg_iov;
+    dmsg.msg_iovlen = (int)lmsg->msg_iovlen;
+    dmsg.msg_control = lmsg->msg_control;
+    dmsg.msg_controllen = (socklen_t)lmsg->msg_controllen;
+
+    struct sockaddr_storage ss;
+    if (lmsg->msg_name && lmsg->msg_namelen > 0) {
+        dmsg.msg_name = &ss;
+        dmsg.msg_namelen = sizeof(ss);
+    }
+
+    ssize_t ret = recvmsg(fd, &dmsg, flags);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+
+    if (lmsg->msg_name && dmsg.msg_namelen > 0) {
+        socklen_t lnamelen = lmsg->msg_namelen;
+        copy_darwin_to_linux_sockaddr(&ss, dmsg.msg_namelen, lmsg->msg_name, &lnamelen);
+        lmsg->msg_namelen = lnamelen;
+    }
+    lmsg->msg_controllen = dmsg.msg_controllen;
+    lmsg->msg_flags = dmsg.msg_flags;
+
+    return ret;
+}
+
 int64_t handle_setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen) {
-    int ret = setsockopt(fd, level, optname, optval, optlen);
+    int dlevel, doptname;
+    translate_linux_to_darwin_sockopt(level, optname, &dlevel, &doptname);
+    int ret = setsockopt(fd, dlevel, doptname, optval, optlen);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return 0;
 }
 
 int64_t handle_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen) {
-    int ret = getsockopt(fd, level, optname, optval, optlen);
+    int dlevel, doptname;
+    translate_linux_to_darwin_sockopt(level, optname, &dlevel, &doptname);
+    int ret = getsockopt(fd, dlevel, doptname, optval, optlen);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return 0;
 }
@@ -1501,5 +1804,182 @@ int64_t handle_shutdown(int fd, int how) {
     int ret = shutdown(fd, how);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return 0;
+}
+
+/* Timers & Itimers */
+int64_t handle_setitimer(int which, const void *new_val, void *old_val) {
+    int ret = setitimer(which, (const struct itimerval *)new_val, (struct itimerval *)old_val);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_getitimer(int which, void *curr_val) {
+    int ret = getitimer(which, (struct itimerval *)curr_val);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+/* Epoll Subsystem Emulation */
+#define EPOLL_MAX_INSTANCES 64
+#define EPOLL_MAX_FDS 256
+
+struct ltm_epoll_item {
+    int fd;
+    uint32_t events;
+    uint64_t data;
+};
+
+struct ltm_epoll_ctx {
+    int in_use;
+    int epfd;
+    int pipe_w;
+    int count;
+    struct ltm_epoll_item items[EPOLL_MAX_FDS];
+};
+
+static struct ltm_epoll_ctx g_epoll_pool[EPOLL_MAX_INSTANCES];
+
+void ltm_epoll_close(int fd) {
+    for (int i = 0; i < EPOLL_MAX_INSTANCES; i++) {
+        if (g_epoll_pool[i].in_use && g_epoll_pool[i].epfd == fd) {
+            g_epoll_pool[i].in_use = 0;
+            close(g_epoll_pool[i].pipe_w);
+            break;
+        }
+    }
+}
+
+int64_t handle_epoll_create1(int flags) {
+    (void)flags;
+    int slot = -1;
+    for (int i = 0; i < EPOLL_MAX_INSTANCES; i++) {
+        if (!g_epoll_pool[i].in_use) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) return -LINUX_EMFILE;
+
+    int p[2];
+    if (pipe(p) < 0) return darwin_to_linux_errno(errno);
+    fcntl(p[0], F_SETFD, FD_CLOEXEC);
+    fcntl(p[1], F_SETFD, FD_CLOEXEC);
+
+    g_epoll_pool[slot].in_use = 1;
+    g_epoll_pool[slot].epfd = p[0];
+    g_epoll_pool[slot].pipe_w = p[1];
+    g_epoll_pool[slot].count = 0;
+
+    return p[0];
+}
+
+int64_t handle_epoll_ctl(int epfd, int op, int fd, void *event) {
+    int slot = -1;
+    for (int i = 0; i < EPOLL_MAX_INSTANCES; i++) {
+        if (g_epoll_pool[i].in_use && g_epoll_pool[i].epfd == epfd) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) return -LINUX_EBADF;
+
+    struct ltm_epoll_ctx *ctx = &g_epoll_pool[slot];
+
+    uint32_t ev_mask = 0;
+    uint64_t ev_data = 0;
+    if (event) {
+        ev_mask = *(uint32_t *)event;
+        ev_data = *(uint64_t *)((char *)event + 8);
+    }
+
+    if (op == 1) { /* EPOLL_CTL_ADD */
+        for (int i = 0; i < ctx->count; i++) {
+            if (ctx->items[i].fd == fd) return -LINUX_EEXIST;
+        }
+        if (ctx->count >= EPOLL_MAX_FDS) return -LINUX_ENOMEM;
+        ctx->items[ctx->count].fd = fd;
+        ctx->items[ctx->count].events = ev_mask;
+        ctx->items[ctx->count].data = ev_data;
+        ctx->count++;
+        return 0;
+    } else if (op == 2) { /* EPOLL_CTL_DEL */
+        int found = -1;
+        for (int i = 0; i < ctx->count; i++) {
+            if (ctx->items[i].fd == fd) {
+                found = i;
+                break;
+            }
+        }
+        if (found < 0) return -LINUX_ENOENT;
+        ctx->items[found] = ctx->items[ctx->count - 1];
+        ctx->count--;
+        return 0;
+    } else if (op == 3) { /* EPOLL_CTL_MOD */
+        for (int i = 0; i < ctx->count; i++) {
+            if (ctx->items[i].fd == fd) {
+                ctx->items[i].events = ev_mask;
+                ctx->items[i].data = ev_data;
+                return 0;
+            }
+        }
+        return -LINUX_ENOENT;
+    }
+
+    return -LINUX_EINVAL;
+}
+
+int64_t handle_epoll_pwait(int epfd, void *events, int maxevents, int timeout, const void *sigmask) {
+    (void)sigmask;
+    if (!events || maxevents <= 0) return -LINUX_EINVAL;
+
+    int slot = -1;
+    for (int i = 0; i < EPOLL_MAX_INSTANCES; i++) {
+        if (g_epoll_pool[i].in_use && g_epoll_pool[i].epfd == epfd) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) return -LINUX_EBADF;
+
+    struct ltm_epoll_ctx *ctx = &g_epoll_pool[slot];
+    if (ctx->count == 0) {
+        if (timeout > 0) usleep(timeout * 1000);
+        return 0;
+    }
+
+    struct pollfd pfds[EPOLL_MAX_FDS];
+    int n_pfds = ctx->count;
+    for (int i = 0; i < n_pfds; i++) {
+        pfds[i].fd = ctx->items[i].fd;
+        pfds[i].events = 0;
+        if (ctx->items[i].events & 0x0001) pfds[i].events |= POLLIN;
+        if (ctx->items[i].events & 0x0004) pfds[i].events |= POLLOUT;
+        if (ctx->items[i].events & 0x0002) pfds[i].events |= POLLPRI;
+        pfds[i].revents = 0;
+    }
+
+    int ret = poll(pfds, n_pfds, timeout);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    if (ret == 0) return 0;
+
+    int out_count = 0;
+    for (int i = 0; i < n_pfds && out_count < maxevents; i++) {
+        if (pfds[i].revents != 0) {
+            uint32_t rev = 0;
+            if (pfds[i].revents & POLLIN)  rev |= 0x0001; /* EPOLLIN */
+            if (pfds[i].revents & POLLOUT) rev |= 0x0004; /* EPOLLOUT */
+            if (pfds[i].revents & POLLPRI) rev |= 0x0002; /* EPOLLPRI */
+            if (pfds[i].revents & POLLERR) rev |= 0x0008; /* EPOLLERR */
+            if (pfds[i].revents & POLLHUP) rev |= 0x0010; /* EPOLLHUP */
+
+            char *dest = (char *)events + (out_count * 16);
+            *(uint32_t *)dest = rev;
+            *(uint32_t *)(dest + 4) = 0;
+            *(uint64_t *)(dest + 8) = ctx->items[i].data;
+            out_count++;
+        }
+    }
+
+    return out_count;
 }
 

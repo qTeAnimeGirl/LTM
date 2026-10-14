@@ -99,6 +99,9 @@ static int run_install_rootfs(const char *target_dir) {
 }
 
 int main(int argc, char **argv, char **envp) {
+    /* Prevent OpenSSL from executing unsupported ARMv8 crypto instructions during CPUID probes */
+    setenv("OPENSSL_armcap", "0", 0);
+
     if (argc < 2) {
         print_usage(argv[0]);
         return 1;

@@ -45,4 +45,18 @@ if [ ! -f "$ROOTFS_DIR/bin/bash" ]; then
     echo "[+] GNU bash installed at $ROOTFS_DIR/bin/bash"
 fi
 
+echo "[+] Setting up network DNS configuration..."
+mkdir -p "$ROOTFS_DIR/etc"
+cat << 'EOF' > "$ROOTFS_DIR/etc/resolv.conf"
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+EOF
+
+echo "[+] Initializing /proc, /sys, and /dev directory nodes..."
+mkdir -p "$ROOTFS_DIR/proc/self" "$ROOTFS_DIR/proc/sys/kernel" "$ROOTFS_DIR/sys/devices/system/cpu" "$ROOTFS_DIR/sys/class/dmi/id" "$ROOTFS_DIR/dev/pts" "$ROOTFS_DIR/dev/shm"
+touch "$ROOTFS_DIR/proc/cpuinfo" "$ROOTFS_DIR/proc/meminfo" "$ROOTFS_DIR/proc/version" "$ROOTFS_DIR/proc/uptime" "$ROOTFS_DIR/proc/loadavg" "$ROOTFS_DIR/proc/mounts" "$ROOTFS_DIR/proc/stat" "$ROOTFS_DIR/proc/filesystems" "$ROOTFS_DIR/proc/sys/kernel/osrelease"
+touch "$ROOTFS_DIR/proc/self/cmdline" "$ROOTFS_DIR/proc/self/maps" "$ROOTFS_DIR/proc/self/status" "$ROOTFS_DIR/proc/self/stat" "$ROOTFS_DIR/proc/self/mounts"
+touch "$ROOTFS_DIR/sys/devices/system/cpu/online" "$ROOTFS_DIR/sys/devices/system/cpu/present" "$ROOTFS_DIR/sys/devices/system/cpu/possible" "$ROOTFS_DIR/sys/class/dmi/id/product_name" "$ROOTFS_DIR/sys/class/dmi/id/sys_vendor"
+touch "$ROOTFS_DIR/dev/null" "$ROOTFS_DIR/dev/zero" "$ROOTFS_DIR/dev/urandom" "$ROOTFS_DIR/dev/random" "$ROOTFS_DIR/dev/tty" "$ROOTFS_DIR/dev/console" "$ROOTFS_DIR/dev/ptmx" "$ROOTFS_DIR/dev/stdin" "$ROOTFS_DIR/dev/stdout" "$ROOTFS_DIR/dev/stderr" "$ROOTFS_DIR/dev/fd"
+
 echo "[+] Setup complete! Rootfs is ready at $ROOTFS_DIR"

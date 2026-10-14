@@ -199,16 +199,27 @@ int64_t handle_sched_setaffinity(pid_t pid, size_t cpusetsize, const unsigned lo
 
 /* Networking & Sockets */
 int64_t handle_socket(int domain, int type, int protocol);
+int64_t handle_socketpair(int domain, int type, int protocol, int sv[2]);
 int64_t handle_connect(int fd, const void *addr, socklen_t len);
 int64_t handle_bind(int fd, const void *addr, socklen_t len);
 int64_t handle_listen(int fd, int backlog);
 int64_t handle_accept(int fd, void *addr, socklen_t *len);
+int64_t handle_accept4(int fd, void *addr, socklen_t *len, int flags);
 int64_t handle_getsockname(int fd, void *addr, socklen_t *len);
 int64_t handle_getpeername(int fd, void *addr, socklen_t *len);
 int64_t handle_sendto(int fd, const void *buf, size_t len, int flags, const void *dest_addr, socklen_t addrlen);
 int64_t handle_recvfrom(int fd, void *buf, size_t len, int flags, void *src_addr, socklen_t *addrlen);
+int64_t handle_sendmsg(int fd, const void *msg, int flags);
+int64_t handle_recvmsg(int fd, void *msg, int flags);
 int64_t handle_setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen);
 int64_t handle_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen);
 int64_t handle_shutdown(int fd, int how);
+
+/* Timers & Events */
+int64_t handle_setitimer(int which, const void *new_val, void *old_val);
+int64_t handle_getitimer(int which, void *curr_val);
+int64_t handle_epoll_create1(int flags);
+int64_t handle_epoll_ctl(int epfd, int op, int fd, void *event);
+int64_t handle_epoll_pwait(int epfd, void *events, int maxevents, int timeout, const void *sigmask);
 
 #endif /* SYSCALLS_H */

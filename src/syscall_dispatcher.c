@@ -3,6 +3,8 @@
 static void *g_alt_stack = NULL;
 #define ALT_STACK_SIZE (1024 * 1024) /* 1MB dedicated signal stack */
 
+static void ltm_crash_handler(int sig, siginfo_t *si, void *ctx);
+
 static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
     (void)sig;
     (void)si;
@@ -10,6 +12,27 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
     arm_thread_state64_t *state = &uc->uc_mcontext->__ss;
 
     uint32_t insn = *(uint32_t *)state->__pc;
+
+    /* Handle unpatched svc #0 (0xd4000001) if delivered via SIGILL or SIGSYS */
+    if (insn == 0xd4000001U) {
+        uint64_t num = state->__x[8];
+        uint64_t a0 = state->__x[0];
+        uint64_t a1 = state->__x[1];
+        uint64_t a2 = state->__x[2];
+        uint64_t a3 = state->__x[3];
+        uint64_t a4 = state->__x[4];
+        uint64_t a5 = state->__x[5];
+
+        int64_t ret = syscall_dispatch(num, a0, a1, a2, a3, a4, a5, state);
+        state->__x[0] = (uint64_t)ret;
+        state->__pc += 4;
+        return;
+    }
+
+    if (sig == SIGILL) {
+        ltm_crash_handler(sig, si, ctx);
+        return;
+    }
 
     /* Check if it's our virtualized TLS trap */
     if ((insn & 0xffe0001fU) == 0xd4200000U) {
@@ -61,9 +84,9 @@ static void ltm_crash_handler(int sig, siginfo_t *si, void *ctx) {
     __asm__ volatile("mrs %0, tpidr_el0" : "=r"(cur_tpidr));
 
     fprintf(stderr, "\n[LTM:CRASH] Fatal signal %d (%s) at address %p (tpidr_el0=0x%llx)\n",
-            sig, sig == SIGSEGV ? "SIGSEGV" : (sig == SIGBUS ? "SIGBUS" : "UNKNOWN"),
+            sig, sig == SIGSEGV ? "SIGSEGV" : (sig == SIGBUS ? "SIGBUS" : (sig == SIGILL ? "SIGILL" : "UNKNOWN")),
             si->si_addr, cur_tpidr);
-    fprintf(stderr, "  pc  = 0x%016llx\n", (unsigned long long)state->__pc);
+    fprintf(stderr, "  pc  = 0x%016llx (insn=0x%08x)\n", (unsigned long long)state->__pc, *(uint32_t *)state->__pc);
     fprintf(stderr, "  sp  = 0x%016llx\n", (unsigned long long)state->__sp);
     fprintf(stderr, "  lr  = 0x%016llx\n", (unsigned long long)state->__lr);
     fprintf(stderr, "  x0  = 0x%016llx\n", (unsigned long long)state->__x[0]);
@@ -106,11 +129,9 @@ int syscall_dispatcher_init(void) {
         return -1;
     }
 
-    /* Also register SIGSYS in case of unpatched svc */
-    if (sigaction(SIGSYS, &sa, NULL) != 0) {
-        ltm_log_error("Failed to register SIGSYS handler: %s", strerror(errno));
-        return -1;
-    }
+    /* Also register SIGSYS and SIGILL in case of unpatched svc */
+    sigaction(SIGSYS, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
 
     /* Register crash handlers for diagnostics */
     struct sigaction sa_crash;
@@ -177,6 +198,15 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case LINUX_SYS_getdents64:
             ret = handle_getdents64((int)a0, (void *)a1, (size_t)a2);
             break;
+        case LINUX_SYS_epoll_create1:
+            ret = handle_epoll_create1((int)a0);
+            break;
+        case LINUX_SYS_epoll_ctl:
+            ret = handle_epoll_ctl((int)a0, (int)a1, (int)a2, (void *)a3);
+            break;
+        case LINUX_SYS_epoll_pwait:
+            ret = handle_epoll_pwait((int)a0, (void *)a1, (int)a2, (int)a3, (const void *)a4);
+            break;
         case LINUX_SYS_ppoll:
             ret = handle_ppoll((struct pollfd *)a0, (nfds_t)a1, (const struct linux_timespec *)a2, (const void *)a3);
             break;
@@ -231,6 +261,12 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
             break;
         case LINUX_SYS_sysinfo:
             ret = handle_sysinfo((struct linux_sysinfo *)a0);
+            break;
+        case LINUX_SYS_getitimer:
+            ret = handle_getitimer((int)a0, (void *)a1);
+            break;
+        case LINUX_SYS_setitimer:
+            ret = handle_setitimer((int)a0, (const void *)a1, (void *)a2);
             break;
         case LINUX_SYS_clock_gettime:
             ret = handle_clock_gettime((int)a0, (struct linux_timespec *)a1);
@@ -351,6 +387,9 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case LINUX_SYS_socket:
             ret = handle_socket((int)a0, (int)a1, (int)a2);
             break;
+        case LINUX_SYS_socketpair:
+            ret = handle_socketpair((int)a0, (int)a1, (int)a2, (int *)a3);
+            break;
         case LINUX_SYS_connect:
             ret = handle_connect((int)a0, (const void *)a1, (socklen_t)a2);
             break;
@@ -363,6 +402,9 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case LINUX_SYS_accept:
             ret = handle_accept((int)a0, (void *)a1, (socklen_t *)a2);
             break;
+        case LINUX_SYS_accept4:
+            ret = handle_accept4((int)a0, (void *)a1, (socklen_t *)a2, (int)a3);
+            break;
         case LINUX_SYS_getsockname:
             ret = handle_getsockname((int)a0, (void *)a1, (socklen_t *)a2);
             break;
@@ -374,6 +416,12 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
             break;
         case LINUX_SYS_recvfrom:
             ret = handle_recvfrom((int)a0, (void *)a1, (size_t)a2, (int)a3, (void *)a4, (socklen_t *)a5);
+            break;
+        case LINUX_SYS_sendmsg:
+            ret = handle_sendmsg((int)a0, (const void *)a1, (int)a2);
+            break;
+        case LINUX_SYS_recvmsg:
+            ret = handle_recvmsg((int)a0, (void *)a1, (int)a2);
             break;
         case LINUX_SYS_setsockopt:
             ret = handle_setsockopt((int)a0, (int)a1, (int)a2, (const void *)a3, (socklen_t)a4);

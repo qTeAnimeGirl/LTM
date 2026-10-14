@@ -70,13 +70,42 @@ int sandbox_init_standalone(void) {
 
 bool sandbox_is_virtual_path(const char *path) {
     if (!path) return false;
-    return (strncmp(path, "/proc", 5) == 0 ||
-            strncmp(path, "/sys", 4) == 0 ||
-            strncmp(path, "/dev/null", 9) == 0 ||
-            strncmp(path, "/dev/zero", 9) == 0 ||
-            strncmp(path, "/dev/urandom", 12) == 0 ||
-            strncmp(path, "/dev/random", 11) == 0 ||
-            strncmp(path, "/dev/tty", 8) == 0);
+
+    if (strcmp(path, "/proc/cpuinfo") == 0 ||
+        strcmp(path, "/proc/version") == 0 ||
+        strcmp(path, "/proc/uptime") == 0 ||
+        strcmp(path, "/proc/loadavg") == 0 ||
+        strcmp(path, "/proc/meminfo") == 0 ||
+        strcmp(path, "/proc/mounts") == 0 ||
+        strcmp(path, "/proc/stat") == 0 ||
+        strcmp(path, "/proc/filesystems") == 0 ||
+        strcmp(path, "/proc/sys/kernel/osrelease") == 0 ||
+        strcmp(path, "/proc/self/cmdline") == 0 ||
+        strcmp(path, "/proc/self/maps") == 0 ||
+        strcmp(path, "/proc/self/exe") == 0 ||
+        strcmp(path, "/proc/self/status") == 0 ||
+        strcmp(path, "/proc/self/stat") == 0 ||
+        strcmp(path, "/proc/self/mounts") == 0 ||
+        strncmp(path, "/proc/self/fd/", 14) == 0 ||
+        strcmp(path, "/sys/devices/system/cpu/online") == 0 ||
+        strcmp(path, "/sys/devices/system/cpu/present") == 0 ||
+        strcmp(path, "/sys/devices/system/cpu/possible") == 0 ||
+        strcmp(path, "/sys/class/dmi/id/product_name") == 0 ||
+        strcmp(path, "/sys/class/dmi/id/sys_vendor") == 0 ||
+        strcmp(path, "/dev/null") == 0 ||
+        strcmp(path, "/dev/zero") == 0 ||
+        strcmp(path, "/dev/urandom") == 0 ||
+        strcmp(path, "/dev/random") == 0 ||
+        strcmp(path, "/dev/tty") == 0 ||
+        strcmp(path, "/dev/console") == 0 ||
+        strcmp(path, "/dev/ptmx") == 0 ||
+        strcmp(path, "/dev/stdin") == 0 ||
+        strcmp(path, "/dev/stdout") == 0 ||
+        strcmp(path, "/dev/stderr") == 0 ||
+        strncmp(path, "/dev/fd/", 8) == 0) {
+        return true;
+    }
+    return false;
 }
 
 ssize_t sandbox_virtual_readlink(const char *path, char *buf, size_t bufsiz) {
@@ -107,15 +136,27 @@ int sandbox_virtual_stat(const char *path, struct stat *st) {
         return 0;
     }
 
-    if (strncmp(path, "/proc", 5) == 0 || strncmp(path, "/sys", 4) == 0) {
-        st->st_mode = S_IFREG | 0444;
-        st->st_size = 4096;
+    if (strncmp(path, "/dev/fd/", 8) == 0 || strncmp(path, "/proc/self/fd/", 14) == 0) {
+        st->st_mode = S_IFLNK | 0777;
+        st->st_size = 16;
+        return 0;
+    }
+
+    if (strcmp(path, "/dev/stdin") == 0 || strcmp(path, "/dev/stdout") == 0 || strcmp(path, "/dev/stderr") == 0) {
+        st->st_mode = S_IFCHR | 0666;
+        st->st_rdev = 0x0103;
         return 0;
     }
 
     if (strncmp(path, "/dev/", 5) == 0) {
         st->st_mode = S_IFCHR | 0666;
         st->st_rdev = 0x0103; /* standard dummy char dev */
+        return 0;
+    }
+
+    if (strncmp(path, "/proc", 5) == 0 || strncmp(path, "/sys", 4) == 0) {
+        st->st_mode = S_IFREG | 0444;
+        st->st_size = 4096;
         return 0;
     }
 
@@ -302,6 +343,80 @@ static int open_proc_maps(void) {
     return create_mem_fd(buf, offset);
 }
 
+static int open_proc_mounts(void) {
+    const char *mounts = 
+        "rootfs / rootfs rw 0 0\n"
+        "proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n"
+        "sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0\n"
+        "devtmpfs /dev devtmpfs rw,nosuid,size=4096k,nr_inodes=100000,mode=755 0 0\n"
+        "devpts /dev/pts devpts rw,nosuid,noexec,relatime,mode=600,ptmxmode=000 0 0\n"
+        "shm /dev/shm tmpfs rw,nosuid,nodev,noexec,relatime 0 0\n";
+    return create_mem_fd(mounts, strlen(mounts));
+}
+
+static int open_proc_stat(void) {
+    char buf[1024];
+    int ncpus = 8;
+    size_t size = sizeof(ncpus);
+    sysctlbyname("hw.ncpu", &ncpus, &size, NULL, 0);
+    if (ncpus <= 0) ncpus = 8;
+
+    int len = snprintf(buf, sizeof(buf),
+        "cpu  10000 0 5000 500000 100 0 50 0 0 0\n");
+    for (int i = 0; i < ncpus && len < (int)sizeof(buf) - 64; i++) {
+        len += snprintf(buf + len, sizeof(buf) - len,
+            "cpu%d 1250 0 625 62500 12 0 6 0 0 0\n", i);
+    }
+    len += snprintf(buf + len, sizeof(buf) - len,
+        "intr 1000000\n"
+        "ctxt 2000000\n"
+        "btime 1700000000\n"
+        "processes 5000\n"
+        "procs_running 1\n"
+        "procs_blocked 0\n");
+    return create_mem_fd(buf, len);
+}
+
+static int open_proc_filesystems(void) {
+    const char *fs = 
+        "nodev\tsysfs\n"
+        "nodev\trootfs\n"
+        "nodev\tramfs\n"
+        "nodev\tbdev\n"
+        "nodev\tproc\n"
+        "nodev\tcpuset\n"
+        "nodev\tcgroup\n"
+        "nodev\ttmpfs\n"
+        "nodev\tdevpts\n"
+        "\text4\n"
+        "\tvfat\n";
+    return create_mem_fd(fs, strlen(fs));
+}
+
+static int open_proc_self_status(void) {
+    char buf[1024];
+    int len = snprintf(buf, sizeof(buf),
+        "Name:\t%s\n"
+        "State:\tR (running)\n"
+        "Tgid:\t%d\n"
+        "Pid:\t%d\n"
+        "PPid:\t%d\n"
+        "Uid:\t1000\t1000\t1000\t1000\n"
+        "Gid:\t1000\t1000\t1000\t1000\n"
+        "FDSize:\t256\n"
+        "Threads:\t1\n",
+        g_ltm.binary_path, getpid(), getpid(), getppid());
+    return create_mem_fd(buf, len);
+}
+
+static int open_proc_self_stat(void) {
+    char buf[256];
+    int len = snprintf(buf, sizeof(buf),
+        "%d (%s) R %d 1 1 0 0 0 0 0 0 0 0 0 0 20 0 1 0 100 10000000 1000 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0\n",
+        getpid(), g_ltm.binary_path, getppid());
+    return create_mem_fd(buf, len);
+}
+
 int sandbox_open_virtual(const char *path, int flags, mode_t mode) {
     (void)flags;
     (void)mode;
@@ -312,16 +427,34 @@ int sandbox_open_virtual(const char *path, int flags, mode_t mode) {
     if (strcmp(path, "/dev/urandom") == 0) return open("/dev/urandom", flags, mode);
     if (strcmp(path, "/dev/random") == 0) return open("/dev/random", flags, mode);
     if (strcmp(path, "/dev/tty") == 0) return open("/dev/tty", flags, mode);
+    if (strcmp(path, "/dev/console") == 0) return open("/dev/console", flags, mode);
+    if (strcmp(path, "/dev/ptmx") == 0) return open("/dev/ptmx", flags, mode);
+    if (strcmp(path, "/dev/stdin") == 0) return dup(0);
+    if (strcmp(path, "/dev/stdout") == 0) return dup(1);
+    if (strcmp(path, "/dev/stderr") == 0) return dup(2);
+    if (strncmp(path, "/dev/fd/", 8) == 0) {
+        int target_fd = atoi(path + 8);
+        return dup(target_fd);
+    }
+    if (strncmp(path, "/proc/self/fd/", 14) == 0) {
+        int target_fd = atoi(path + 14);
+        return dup(target_fd);
+    }
 
     if (strcmp(path, "/proc/cpuinfo") == 0) return open_proc_cpuinfo();
     if (strcmp(path, "/proc/version") == 0) return open_proc_version();
     if (strcmp(path, "/proc/uptime") == 0) return open_proc_uptime();
     if (strcmp(path, "/proc/loadavg") == 0) return open_proc_loadavg();
+    if (strcmp(path, "/proc/meminfo") == 0) return open_proc_meminfo();
+    if (strcmp(path, "/proc/mounts") == 0 || strcmp(path, "/proc/self/mounts") == 0) return open_proc_mounts();
+    if (strcmp(path, "/proc/stat") == 0) return open_proc_stat();
+    if (strcmp(path, "/proc/filesystems") == 0) return open_proc_filesystems();
+    if (strcmp(path, "/proc/self/status") == 0) return open_proc_self_status();
+    if (strcmp(path, "/proc/self/stat") == 0) return open_proc_self_stat();
     if (strcmp(path, "/proc/sys/kernel/osrelease") == 0) {
         const char *rel = "6.6.0-ltm\n";
         return create_mem_fd(rel, strlen(rel));
     }
-    if (strcmp(path, "/proc/meminfo") == 0) return open_proc_meminfo();
     if (strcmp(path, "/proc/self/cmdline") == 0) return open_proc_cmdline();
     if (strcmp(path, "/proc/self/maps") == 0) return open_proc_maps();
     if (strcmp(path, "/proc/self/exe") == 0) {
@@ -474,7 +607,11 @@ static int sandbox_resolve_path_lexical(int dirfd, const char *guest_path, char 
 
 int sandbox_resolve_path(int dirfd, const char *guest_path, char *host_path_buf, size_t buf_sz, int flags) {
     if (!guest_path || !host_path_buf || buf_sz == 0) return -LINUX_EINVAL;
-    if (sandbox_is_virtual_path(guest_path)) return 1;
+    if (sandbox_is_virtual_path(guest_path)) {
+        strncpy(host_path_buf, guest_path, buf_sz - 1);
+        host_path_buf[buf_sz - 1] = '\0';
+        return 1;
+    }
 
     char cur_path[1024];
     strncpy(cur_path, guest_path, sizeof(cur_path) - 1);
@@ -486,6 +623,16 @@ int sandbox_resolve_path(int dirfd, const char *guest_path, char *host_path_buf,
     while (loop_count++ < 32) {
         int r = sandbox_resolve_path_lexical(cur_dirfd, cur_path, host_path_buf, buf_sz);
         if (r != 0) return r;
+
+        /* Check if the resolved host path corresponds to a virtual path inside rootfs */
+        size_t root_len = strlen(g_ltm.host_rootfs);
+        if (strncmp(host_path_buf, g_ltm.host_rootfs, root_len) == 0) {
+            const char *virt_cand = host_path_buf + root_len;
+            if (sandbox_is_virtual_path(virt_cand)) {
+                memmove(host_path_buf, virt_cand, strlen(virt_cand) + 1);
+                return 1;
+            }
+        }
 
         /* If caller requested NOFOLLOW on final target, stop here */
         if (flags & (AT_SYMLINK_NOFOLLOW | LINUX_O_NOFOLLOW)) {
