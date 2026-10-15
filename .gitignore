@@ -17,3 +17,4 @@ tests/bin/*
 rootfs/
 arch_rootfs/
 test_binaries/
+Test_LTM/

@@ -6,7 +6,7 @@
 **Kernel Personality**: `Linux LTM 2026.1A`  
 **Last Updated**: October 15, 2026  
 **Syscall Coverage**: **316 of 316 Official Linux ARM64 System Calls Implemented (100.0%)**  
-**Test Pass Rate**: **328 of 328 Automated Tests Passing (100.0%)**  
+**Test Pass Rate**: **329 of 329 Automated Tests Passing (100.0%)**  
 **Detailed References**:
 - **[docs/SYSCALLS.md](file:///Users/qteanimegirl/Documents/LTM/docs/SYSCALLS.md)**: Exhaustive 316-syscall architecture registry and gap analysis.
 - **[docs/TUTORIAL.md](file:///Users/qteanimegirl/Documents/LTM/docs/TUTORIAL.md)**: Complete guide on building, running Arch Linux ARM, using `pacman`, and testing.
