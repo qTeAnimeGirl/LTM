@@ -30,6 +30,7 @@ static void ensure_dir(const char *path, mode_t mode) {
     if (stat(path, &st) != 0) {
         mkdir(path, mode);
     }
+    chmod(path, mode);
 }
 
 static void touch_file(const char *path) {
@@ -45,6 +46,7 @@ static void setup_resolv_conf(const char *rootfs_dir) {
     ensure_dir(path, 0755);
 
     snprintf(path, sizeof(path), "%s/etc/resolv.conf", rootfs_dir);
+    unlink(path); /* Break any dangling symlink from tarball */
     FILE *f = fopen(path, "w");
     if (f) {
         fprintf(f, "nameserver 1.1.1.1\nnameserver 8.8.8.8\n");
@@ -56,7 +58,10 @@ static void setup_vfs_nodes(const char *rootfs_dir) {
     char path[1024];
 
     snprintf(path, sizeof(path), "%s/proc", rootfs_dir); ensure_dir(path, 0755);
+    snprintf(path, sizeof(path), "%s/proc/1", rootfs_dir); ensure_dir(path, 0755);
     snprintf(path, sizeof(path), "%s/proc/self", rootfs_dir); ensure_dir(path, 0755);
+    snprintf(path, sizeof(path), "%s/proc/self/task", rootfs_dir); ensure_dir(path, 0755);
+    snprintf(path, sizeof(path), "%s/proc/self/fd", rootfs_dir); ensure_dir(path, 0755);
     snprintf(path, sizeof(path), "%s/proc/sys", rootfs_dir); ensure_dir(path, 0755);
     snprintf(path, sizeof(path), "%s/proc/sys/kernel", rootfs_dir); ensure_dir(path, 0755);
 
@@ -424,10 +429,11 @@ void ensure_rootfs_configured(const char *rootfs_dir) {
         }
     }
 
-    /* Ensure /etc/resolv.conf exists */
+    /* Ensure /etc/resolv.conf exists and is a valid regular file with nameservers */
     char resolv_conf[1024];
     snprintf(resolv_conf, sizeof(resolv_conf), "%s/etc/resolv.conf", rootfs_dir);
-    if (access(resolv_conf, F_OK) != 0) {
+    struct stat rst;
+    if (lstat(resolv_conf, &rst) != 0 || S_ISLNK(rst.st_mode) || rst.st_size < 10) {
         setup_resolv_conf(rootfs_dir);
     }
 

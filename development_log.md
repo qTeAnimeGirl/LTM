@@ -3079,3 +3079,52 @@ During fresh install validation in an empty directory (`./ltm /usr/bin/bash`), t
 - Automated regression suite (`./run_tests.sh`) re-run:
   - **328 / 328 tests passed (100% pass rate)**.
   - Standalone single binary verified with zero warnings.
+
+---
+
+## [Sprint 15: Clean Install DNS Dangling Symlink Resolution, Procfs Process Enumeration, & Directory Permission Rectification]
+
+**Date**: 2026-10-15  
+**Author**: Antigravity Core Systems & Swarm Overseer  
+**Status**: Completed, 100% Validated (328/328 Tests Passing), Clean Rootfs Verified  
+
+---
+
+### 1. Root Cause Analysis & Architectural Resolutions
+
+#### A. DNS Resolution Failure (`ping google.com: Temporary failure in name resolution`)
+- **Symptom**: During clean installation in an empty directory, `ping 1.1.1.1` succeeded, but `ping google.com` failed with `Temporary failure in name resolution`.
+- **Root Cause**: In Arch Linux ARM upstream tarballs, `/etc/resolv.conf` is extracted as a symlink pointing to `/run/systemd/resolve/stub-resolv.conf`. Because `/run/systemd/resolve` does not exist in an unprivileged translation container, `fopen("arch_rootfs/etc/resolv.conf", "w")` followed the broken symlink and failed with `ENOENT`.
+- **Resolution**:
+  1. Updated `setup_resolv_conf()` in `src/rootfs_installer.c` to call `unlink(path)` prior to `fopen(path, "w")`, cleanly removing any broken symlink.
+  2. Updated `ensure_rootfs_configured()` to check `lstat(resolv_conf, &rst)`: if `/etc/resolv.conf` is missing, is a symlink (`S_ISLNK`), or has size < 10 bytes, it is automatically recreated as a regular file with `1.1.1.1` and `8.8.8.8`.
+
+#### B. `ps` / `ps aux` Procfs Failure (`Error, do this: mount -t proc proc /proc`)
+- **Symptom**: Running `ps` or `ps aux` on a freshly unpacked Arch Linux ARM rootfs printed `Error, do this: mount -t proc proc /proc` and exited with code 47.
+- **Root Causes**:
+  1. **Tar Read-Only Directory Permissions (`0555`)**: The Arch Linux ARM rootfs tarball extracts `/proc` with mode `0555` (`dr-xr-xr-x`, read-only). Because `ensure_dir` did not invoke `chmod` if the directory already existed, subsequent `mkdir(".../proc/self", 0755)` calls failed with `EACCES` (Permission denied).
+  2. **Missing Directory Descriptor in `sandbox_open_virtual`**: When `libproc2` called `openat(AT_FDCWD, "/proc/self", O_PATH | O_DIRECTORY)` (`0x204000`), `sandbox_open_virtual` returned `-ENOENT` because `/proc/self` was treated as a symlink without directory opening semantics.
+  3. **Missing `AT_EMPTY_PATH` in `handle_newfstatat`**: Modern `ps` calls `newfstatat(dirfd, "", &statbuf, AT_EMPTY_PATH)`. LTM previously failed to check `AT_EMPTY_PATH` (0x1000) and attempted to resolve the empty path against rootfs.
+- **Resolution**:
+  1. In `src/rootfs_installer.c`, updated `ensure_dir` to call `chmod(path, mode)` to guarantee writable permissions (`0755`) for `/proc`, `/sys`, `/dev`, `/run`, and `/tmp`.
+  2. In `src/sandbox.c`, updated `sandbox_init` and `sandbox_init_standalone` to explicitly call `chmod(proc_path, 0755)`.
+  3. In `src/sandbox.c`, updated `open_proc_pid_file` and `sandbox_open_virtual` to open host `<host_rootfs>/proc/self`, `/proc/<pid>`, `/proc/self/task`, and `/proc/self/fd` as real directory file descriptors, returning `S_IFDIR | 0555`.
+  4. In `src/syscall_handlers.c`, added `AT_EMPTY_PATH` (0x1000) support to `handle_newfstatat`, directly dispatching to `fstat(dirfd, &st)`.
+  5. Expanded `/proc/<pid>/stat` to full 52 standard fields and added virtual support for `statm`, `wchan`, and `io`.
+
+#### C. Strict Arch Linux Default Rootfs Selection
+- Enforced Arch Linux ARM (`arch_rootfs`) as the strict default across `src/main.c`. LTM only falls back to `rootfs` (Alpine) if the requested binary exists exclusively in `rootfs` (e.g. `/bin/busybox`) or if `--alpine` is explicitly specified.
+
+---
+
+### 2. End-to-End Verification on Fresh Rootfs
+- Completely purged previous rootfs and launched `./ltm /usr/bin/bash`:
+  - Automatically downloaded `ArchLinuxARM-aarch64-latest.tar.gz`.
+  - APFS case collisions in terminfo cleanly absorbed with exit code 0.
+  - Automatically configured `/etc/resolv.conf` and `/etc/pacman.conf`.
+  - Verified `ps aux`: PID 1 (`/bin/sh`) and guest PID (`/usr/bin/ps aux`) rendered accurately.
+  - Verified `ping google.com`: 2 packets transmitted, 2 received, 0% packet loss.
+  - Verified `pacman -Sy`: synchronized core, extra, alarm, aur databases.
+  - Verified `pacman -S fastfetch`: installed cleanly with post-transaction hooks.
+  - Verified `fastfetch`: rendered native system telemetry with Apple Silicon CPU and Arch Linux ARM identity.
+- Automated regression suite (`./run_tests.sh`): **328 / 328 tests passed (100% pass rate)**.

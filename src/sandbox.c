@@ -58,6 +58,7 @@ int sandbox_init(const char *rootfs_dir) {
     char proc_path[1024];
     snprintf(proc_path, sizeof(proc_path), "%s/proc", g_ltm.host_rootfs);
     mkdir(proc_path, 0755);
+    chmod(proc_path, 0755);
 
     ltm_log_info("Sandbox chroot rootfs initialized: %s (invocation dir: %s)", g_ltm.host_rootfs, g_ltm.host_root);
     return 0;
@@ -74,6 +75,7 @@ int sandbox_init_standalone(void) {
     char proc_path[1024];
     snprintf(proc_path, sizeof(proc_path), "%s/proc", g_ltm.host_rootfs);
     mkdir(proc_path, 0755);
+    chmod(proc_path, 0755);
 
     ltm_log_info("Sandbox standalone mode initialized (jail: %s)", g_ltm.host_rootfs);
     return 0;
@@ -125,6 +127,8 @@ bool sandbox_is_virtual_path(const char *path) {
         strcmp(path, "/proc/filesystems") == 0 ||
         strcmp(path, "/proc/sys/kernel/osrelease") == 0 ||
         strcmp(path, "/proc/self") == 0 ||
+        strcmp(path, "/proc/self/task") == 0 ||
+        strcmp(path, "/proc/self/fd") == 0 ||
         strcmp(path, "/sys/devices/system/cpu/online") == 0 ||
         strcmp(path, "/sys/devices/system/cpu/present") == 0 ||
         strcmp(path, "/sys/devices/system/cpu/possible") == 0 ||
@@ -194,16 +198,19 @@ int sandbox_virtual_stat(const char *path, struct stat *st) {
     st->st_nlink = 1;
     st->st_blksize = 4096;
 
-    if (strcmp(path, "/proc/self") == 0) {
-        st->st_mode = S_IFLNK | 0777;
-        st->st_size = 8;
+    if (strcmp(path, "/proc/self") == 0 ||
+        strcmp(path, "/proc/self/task") == 0 ||
+        strcmp(path, "/proc/self/fd") == 0) {
+        st->st_mode = S_IFDIR | 0555;
+        st->st_nlink = 2;
         return 0;
     }
 
     int pid = 0;
     const char *subfile = NULL;
     if (parse_proc_pid_path(path, &pid, &subfile)) {
-        if (subfile == NULL || *subfile == '\0') {
+        if (subfile == NULL || *subfile == '\0' ||
+            strcmp(subfile, "task") == 0 || strcmp(subfile, "fd") == 0) {
             st->st_mode = S_IFDIR | 0555;
             st->st_nlink = 2;
             return 0;
@@ -495,6 +502,34 @@ static int open_proc_filesystems(void) {
 }
 
 static int open_proc_pid_file(int pid, const char *subfile) {
+    if (!subfile || *subfile == '\0') {
+        char host_dir[1024];
+        if (pid == getpid()) {
+            snprintf(host_dir, sizeof(host_dir), "%s/proc/self", g_ltm.host_rootfs);
+        } else {
+            snprintf(host_dir, sizeof(host_dir), "%s/proc/%d", g_ltm.host_rootfs, pid);
+        }
+        mkdir(host_dir, 0755);
+        int fd = open(host_dir, O_RDONLY);
+        return fd >= 0 ? fd : -LINUX_ENOENT;
+    }
+
+    if (strcmp(subfile, "task") == 0) {
+        char host_dir[1024];
+        snprintf(host_dir, sizeof(host_dir), "%s/proc/self/task", g_ltm.host_rootfs);
+        mkdir(host_dir, 0755);
+        int fd = open(host_dir, O_RDONLY);
+        return fd >= 0 ? fd : -LINUX_ENOENT;
+    }
+
+    if (strcmp(subfile, "fd") == 0) {
+        char host_dir[1024];
+        snprintf(host_dir, sizeof(host_dir), "%s/proc/self/fd", g_ltm.host_rootfs);
+        mkdir(host_dir, 0755);
+        int fd = open(host_dir, O_RDONLY);
+        return fd >= 0 ? fd : -LINUX_ENOENT;
+    }
+
     const char *slash = strrchr(g_ltm.binary_path, '/');
     const char *guest_comm = slash ? slash + 1 : g_ltm.binary_path;
     if (*guest_comm == '\0') guest_comm = "guest";
@@ -507,7 +542,7 @@ static int open_proc_pid_file(int pid, const char *subfile) {
     if (strcmp(subfile, "stat") == 0) {
         char buf[512];
         int len = snprintf(buf, sizeof(buf),
-            "%d (%s) %c %d 1 1 0 0 0 0 0 0 0 0 0 20 0 1 0 100 10000000 1000 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0\n",
+            "%d (%s) %c %d 1 1 0 0 0 0 0 0 0 0 0 20 0 1 0 100 10000000 1000 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
             pid, comm, state, ppid);
         return create_mem_fd(buf, len);
     }
@@ -545,6 +580,21 @@ static int open_proc_pid_file(int pid, const char *subfile) {
 
     if (strcmp(subfile, "maps") == 0) {
         return open_proc_maps();
+    }
+
+    if (strcmp(subfile, "statm") == 0) {
+        const char *statm = "2500 250 100 50 0 200 0\n";
+        return create_mem_fd(statm, strlen(statm));
+    }
+
+    if (strcmp(subfile, "wchan") == 0) {
+        const char *wchan = "0\n";
+        return create_mem_fd(wchan, strlen(wchan));
+    }
+
+    if (strcmp(subfile, "io") == 0) {
+        const char *io = "rchar: 1000\nwchar: 1000\nsyscr: 10\nsyscw: 10\nread_bytes: 0\nwrite_bytes: 0\ncancelled_write_bytes: 0\n";
+        return create_mem_fd(io, strlen(io));
     }
 
     if (strcmp(subfile, "exe") == 0) {
@@ -589,6 +639,37 @@ int sandbox_open_virtual(const char *path, int flags, mode_t mode) {
     if (strncmp(path, "/proc/self/fd/", 14) == 0) {
         int target_fd = atoi(path + 14);
         return dup(target_fd);
+    }
+
+    if (strcmp(path, "/proc/self") == 0) {
+        char host_dir[1024];
+        snprintf(host_dir, sizeof(host_dir), "%s/proc/self", g_ltm.host_rootfs);
+        mkdir(host_dir, 0755);
+        int dflags = O_RDONLY;
+        if (flags & O_DIRECTORY) dflags |= O_DIRECTORY;
+        int fd = open(host_dir, dflags, mode);
+        if (fd < 0) fd = open(host_dir, O_RDONLY);
+        return fd >= 0 ? fd : -LINUX_ENOENT;
+    }
+    if (strcmp(path, "/proc/self/task") == 0) {
+        char host_dir[1024];
+        snprintf(host_dir, sizeof(host_dir), "%s/proc/self/task", g_ltm.host_rootfs);
+        mkdir(host_dir, 0755);
+        int dflags = O_RDONLY;
+        if (flags & O_DIRECTORY) dflags |= O_DIRECTORY;
+        int fd = open(host_dir, dflags, mode);
+        if (fd < 0) fd = open(host_dir, O_RDONLY);
+        return fd >= 0 ? fd : -LINUX_ENOENT;
+    }
+    if (strcmp(path, "/proc/self/fd") == 0) {
+        char host_dir[1024];
+        snprintf(host_dir, sizeof(host_dir), "%s/proc/self/fd", g_ltm.host_rootfs);
+        mkdir(host_dir, 0755);
+        int dflags = O_RDONLY;
+        if (flags & O_DIRECTORY) dflags |= O_DIRECTORY;
+        int fd = open(host_dir, dflags, mode);
+        if (fd < 0) fd = open(host_dir, O_RDONLY);
+        return fd >= 0 ? fd : -LINUX_ENOENT;
     }
 
     int pid = 0;

@@ -254,24 +254,20 @@ int main(int argc, char **argv, char **envp) {
     if (!getcwd(cwd, sizeof(cwd))) cwd[0] = '\0';
     bool is_container_path = (binary_arg[0] == '/' && (cwd[0] == '\0' || strncmp(binary_arg, cwd, strlen(cwd)) != 0));
 
-    /* Default to Arch Linux ARM rootfs; auto-fallback to Alpine only if binary exists in rootfs but not arch_rootfs */
+    /* Default strictly to Arch Linux ARM rootfs (arch_rootfs); fallback to rootfs only if binary exclusively exists in rootfs */
     if (!rootfs_explicit) {
-        if (is_container_path) {
-            char check_path[1024];
-            snprintf(check_path, sizeof(check_path), "arch_rootfs%s", binary_arg);
-            if (access(check_path, F_OK) == 0) {
-                rootfs_arg = "arch_rootfs";
-            } else {
-                snprintf(check_path, sizeof(check_path), "rootfs%s", binary_arg);
-                if (access(check_path, F_OK) == 0) {
-                    rootfs_arg = "rootfs";
-                } else {
-                    rootfs_arg = "arch_rootfs";
-                }
-            }
-        } else if (access(binary_arg, F_OK) == 0) {
+        if (!is_container_path && access(binary_arg, F_OK) == 0) {
             /* Standalone binary on host disk (e.g. ./tests/bin/test_hello) */
             rootfs_arg = NULL;
+        } else if (is_container_path) {
+            char check_arch[1024], check_alpine[1024];
+            snprintf(check_arch, sizeof(check_arch), "arch_rootfs%s", binary_arg);
+            snprintf(check_alpine, sizeof(check_alpine), "rootfs%s", binary_arg);
+            if (access(check_arch, F_OK) != 0 && access(check_alpine, F_OK) == 0) {
+                rootfs_arg = "rootfs";
+            } else {
+                rootfs_arg = "arch_rootfs";
+            }
         } else {
             rootfs_arg = "arch_rootfs";
         }

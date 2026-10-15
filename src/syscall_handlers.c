@@ -349,6 +349,15 @@ int64_t handle_newfstatat(int dirfd, const char *pathname, struct linux_stat *st
     if (!statbuf) return -LINUX_EFAULT;
     if (!pathname) return -LINUX_EFAULT;
 
+    if (pathname[0] == '\0') {
+        if (!(flags & LINUX_AT_EMPTY_PATH)) return -LINUX_ENOENT;
+        if (dirfd < 0) return -LINUX_EBADF;
+        struct stat st;
+        if (fstat(dirfd, &st) != 0) return darwin_to_linux_errno(errno);
+        copy_stat_to_linux(&st, statbuf);
+        return 0;
+    }
+
     if (pathname && sandbox_is_virtual_path(pathname)) {
         struct stat st;
         int vres = sandbox_virtual_stat(pathname, &st);
