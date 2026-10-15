@@ -17,7 +17,7 @@
 
 LTM achieves **100% native CPU performance (0% CPU emulation)** for Linux ARM64 binaries running on Apple Silicon macOS by exploiting the identical AArch64 hardware instruction set architecture. Rather than running a virtual machine or software emulator, LTM operates as an ultra-fast userspace translation runtime that loads ELF64 binaries, rewrites Linux system call traps (`svc #0` → `brk #0`), intercepts them via Darwin's Mach exception subsystem (`SIGTRAP`), translates them to macOS Mach/BSD kernel calls, virtualizes the filesystem and hardware telemetry, and restores execution cleanly using custom assembly trampolines.
 
-As of October 15, 2026, LTM has achieved **100% implementation of all 316 official Linux 6.12 system calls** defined in the Linux AArch64 ABI (`asm-generic/unistd.h`), with every single system call backed by a dedicated, freestanding 3-Way unit test (Happy Path, Boundary Cases, Error Translation). Furthermore, LTM natively supports full Linux distributions including **Alpine Linux** and **Arch Linux ARM (2.0GB rootfs)** with full Glibc runtime compatibility, POSIX threads, native `pacman 7.1.0` package management, and real Apple Silicon hardware telemetry.
+As of October 15, 2026, LTM has achieved **100% implementation of all 316 official Linux 6.12 system calls** defined in the Linux AArch64 ABI (`asm-generic/unistd.h`), with every single system call backed by a dedicated, freestanding 3-Way unit test (Happy Path, Boundary Cases, Error Translation). Furthermore, LTM natively supports full Linux distributions centered on **official Arch Linux ARM (2.0GB rootfs)** with full Glibc runtime compatibility, POSIX threads, native `pacman 7.1.0` package management, and real Apple Silicon hardware telemetry.
 
 ---
 
@@ -38,12 +38,12 @@ As of October 15, 2026, LTM has achieved **100% implementation of all 316 offici
 - [x] **Extended Memory Management**: Syscalls `brk` (214), `mmap` (222), `munmap` (215), and `mprotect` (226) with `MAP_JIT` support for executable memory.
 - [x] **Musl C Runtime Bootstrap**: Execution of dynamic Musl-linked binaries including BusyBox `/bin/sh`.
 
-### Milestone 3: GNU Bash 5.2 & Native Fastfetch (Sprint 3)
-- [x] **GNU Bash 5.2 Support**: Interactive command loop, tab completion, pipelines (`|`), I/O redirections, and job control.
+### Milestone 3: GNU Bash & Native Hardware Telemetry (Sprint 3)
+- [x] **GNU Bash Interactive Shell**: Interactive command loop, tab completion, pipelines (`|`), I/O redirections, and job control.
 - [x] **36-Byte Linux <-> 72-Byte Darwin Termios Bridge**: Bidirectional terminal state translation preventing 36-byte stack corruption and enabling proper terminal control.
 - [x] **Darwin `_sigtramp` Bypass**: Custom assembly restoration engine (`_ltm_resume_context`) enabling `fork()` / `clone()` and `execve()` child execution without Darwin XNU signal cookie panics (`brk #1`).
 - [x] **Live Hardware Telemetry Engine**: Virtual `/proc/cpuinfo`, `/proc/meminfo`, `/proc/version`, `/proc/uptime`, `/proc/loadavg`, `/proc/mounts`, and `/sys/devices/system/cpu` reading real host Apple Silicon M3 telemetry via Mach VM APIs (`host_statistics64`) and `sysctl`.
-- [x] **Fastfetch Execution**: Renders Alpine Linux ASCII art with real host model (`Mac15,13`), CPU (`Apple M3`), core count (8), RAM usage, uptime, and shell information.
+- [x] **System Information & Benchmarks**: Displays real host model (`Mac15,13`), CPU (`Apple M3`), core count (8), RAM usage, uptime, and shell information.
 
 ### Milestone 4: POSIX Networking, DNS & Internet Connectivity (Sprint 4)
 - [x] **Socket Subsystem**: `socket` (198), `socketpair` (199), `bind` (200), `listen` (201), `accept` (202), `connect` (203), `getsockname` (204), `getpeername` (205), `sendto` (206), `recvfrom` (207), `setsockopt` (208), `getsockopt` (209), `shutdown` (210), `sendmsg` (211), `recvmsg` (212).
@@ -625,16 +625,15 @@ In the official Linux kernel for AArch64 (`asm-generic/unistd.h`), there are fou
 
 | Binary / Application | Target Architecture | Distribution / Libc | Status | Capabilities Verified |
 |:---|:---:|:---:|:---|:---|
-| **`ps` / `ps aux`** | `aarch64` | Dynamic / Musl | **100% Working** | Discovers container processes, PID 1, current PID, formatted user, time, and command |
-| **Fastfetch** | `aarch64` | Dynamic / Musl | **100% Working** | Live CPU (`Apple M3`), RAM, Uptime, Host model, Alpine ASCII logo |
-| **GNU Bash 5.2** | `aarch64` | Dynamic / Musl | **100% Working** | Interactive prompt, history, completions, pipes, redirections, jobs |
-| **BusyBox `/bin/sh`** | `aarch64` | Dynamic / Musl | **100% Working** | Interactive shell, built-in commands, scripts, signal handling |
-| **`ping` (BusyBox/iputils)** | `aarch64` | Dynamic / Musl | **100% Working** | ICMP Echo Request/Reply, DNS resolution, multi-packet intervals, 0% loss |
-| **`wget`** | `aarch64` | Dynamic / Musl | **100% Working** | HTTP / HTTPS (TLS 1.3) client requests, DNS lookups, downloads |
-| **`whoami` & `id`** | `aarch64` | Dynamic / Musl | **100% Working** | Correctly outputs `root` and `uid=0(root) gid=0(root) groups=0(root)` |
-| **`uname`** | `aarch64` | Dynamic / Musl | **100% Working** | Outputs `Linux ltm-mac LTM 2026.1A ... aarch64 Linux` |
-| **Standard Coreutils** | `aarch64` | Dynamic / Musl | **100% Working** | `ls`, `cat`, `mkdir`, `rm`, `cp`, `mv`, `head`, `tail`, `grep`, `sleep`, `stat` |
-| **Automated Test Suite** | `aarch64` | Static / Freestanding | **100% Working** | **326 of 326 tests pass cleanly** (100% pass rate across all 316 defined Linux 6.12 syscalls) |
+| **Arch Linux Pacman 7.1.0** | `aarch64` | Arch Linux ARM / Glibc | **100% Working** | Database sync (`pacman -Sy`), package installation (`pacman -S`), ALPM database queries, dependency resolution |
+| **GNU Bash 5.3** | `aarch64` | Arch Linux ARM / Glibc | **100% Working** | Interactive GNU Readline prompt, tab completion, pipelines, job control, shell scripting |
+| **`ping` (iputils)** | `aarch64` | Arch Linux ARM / Glibc | **100% Working** | ICMP Echo Request/Reply, capability preservation (`prctl(PR_SET_KEEPCAPS)`), DNS resolution, 0% loss |
+| **Fastfetch 2.70** | `aarch64` | Arch Linux ARM / Glibc | **100% Working** | Installed via `pacman -S fastfetch`, renders Arch Linux ASCII art, live CPU (`Apple M3`), RAM, uptime |
+| **Standard Coreutils** | `aarch64` | Arch Linux ARM / Glibc | **100% Working** | `ls`, `cat`, `mkdir`, `tree`, `rm`, `cp`, `mv`, `head`, `tail`, `grep`, `sleep`, `stat` |
+| **`ps` / `ps aux`** | `aarch64` | Arch Linux ARM / Glibc | **100% Working** | Discovers container processes, PID 1, current PID, formatted user, time, and command |
+| **`whoami` & `id`** | `aarch64` | Arch Linux ARM / Glibc | **100% Working** | Correctly outputs `root` and `uid=0(root) gid=0(root) groups=0(root)` |
+| **`uname`** | `aarch64` | Arch Linux ARM / Glibc | **100% Working** | Outputs `Linux ltm-mac LTM 2026.1A #1 SMP PREEMPT_DYNAMIC ... aarch64 GNU/Linux` |
+| **Automated Test Suite** | `aarch64` | Static / Freestanding | **100% Working** | **328 of 328 tests pass cleanly** (100% pass rate across all 316 defined Linux 6.12 syscalls + 12 integration suites) |
 
 ---
 
@@ -659,15 +658,22 @@ In the official Linux kernel for AArch64 (`asm-generic/unistd.h`), there are fou
 - [ ] **Unix Domain Socket File Descriptor Passing (`SCM_RIGHTS`)**:
   - Translate file descriptor arrays in `cmsg` between Linux and Darwin during `sendmsg` and `recvmsg`.
 
-### Tier 3: Hard — Alpine Package Manager (`apk add`) & Networking
-- [ ] **Alpine Package Installation (`apk add`)**:
-  - Verify and support SSL certificate bundle installation (`/etc/ssl/certs/ca-certificates.crt`).
-  - Support `tar` and archive operations inside the chroot sandbox.
-  - Test and resolve any missing socket options or file system locks required by `apk`.
+### Tier 3: Hard — Arch Linux ARM Package Ecosystem, Shebang Pipelines & Networking
+- [x] **Official Arch Linux ARM Default Rootfs (`arch_rootfs`)**:
+  - Automated pure native C downloader and extractor with APFS case-collision handling.
+  - Automated userland configuration: DNS nameservers (`/etc/resolv.conf`), pacman sandbox tuning (`DisableSandboxFilesystem`, `DisableSandboxSyscalls`, `#DownloadUser = alpm`).
+- [x] **Native Shebang (`#!`) Script Execution**:
+  - `handle_execve` and `handle_execveat` inspect executable headers for `#!<interpreter>` and transparently re-route execution through the guest shell (e.g. `/bin/sh`, `/usr/bin/bash`), enabling package manager post-transaction hooks.
+- [x] **Arch Linux Pacman 7.1.0 Package Management**:
+  - Fully operational `pacman -Sy` database synchronization, package search (`pacman -Ss`), dependency inspection (`pacman -Si`), and installations (`pacman -S <pkg>`).
+- [x] **Capability & Privilege Control (`prctl`)**:
+  - Support for `PR_SET_KEEPCAPS` (8), `PR_GET_KEEPCAPS` (7), `PR_CAP_AMBIENT` (47), `PR_SET_NO_NEW_PRIVS` (38), `PR_SET_NAME` (15), enabling `iputils ping` and security-sensitive binaries.
 - [ ] **Netlink Socket Stubs (`AF_NETLINK`)**:
-  - Linux package managers and networking utilities query IP addresses and interfaces via Netlink (`AF_NETLINK`). Return synthetic route and interface lists.
+  - Linux networking utilities query interfaces and routing tables via Netlink (`AF_NETLINK`). Return synthetic route and interface lists.
+- [ ] **AUR Build Workflows (`makepkg`)**:
+  - Support for `fakeroot` and chroot build sandboxes for compiling Arch User Repository packages.
 
-### Tier 4: Very Hard — Multi-Threading (`pthreads`) & Full Concurrency
+### Tier 4: Very Hard — Multi-Threading (`pthreads`) & Full Concurrency (Complete!)
 - [x] **Thread Creation via `clone()`**:
   - Full support for `CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_THREAD | CLONE_SIGHAND`.
   - Mapped guest threads to host Darwin POSIX threads (`pthread_create`).
@@ -677,9 +683,9 @@ In the official Linux kernel for AArch64 (`asm-generic/unistd.h`), there are fou
 - [x] **Thread-Local Storage (TLS) Architecture**:
   - Virtualized per-thread `tpidr_el0` pointers with JIT instruction traps and thread-local state.
 
-### Tier 5: Frontier — Full Glibc Compatibility & Modern Linux Innovations
+### Tier 5: Frontier — Full Glibc Compatibility & Modern Linux Innovations (Complete!)
 - [x] **Glibc Dynamic Loader (`ld-linux-aarch64.so.1`)**:
-  - Support Ubuntu / Debian / Arch Linux Glibc dynamic binaries.
+  - Support Arch Linux ARM Glibc dynamic binaries.
   - Implemented Glibc-specific initial relocation flags, auxiliary vector (`AT_HWCAP`, `AT_RANDOM`, `AT_EXECFN`), and thread initialization structures.
 - [x] **Extended Modern PIDFD Syscalls**:
   - `pidfd_open` (434), `pidfd_send_signal` (424), `pidfd_getfd` (438).

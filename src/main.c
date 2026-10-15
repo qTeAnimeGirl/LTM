@@ -337,6 +337,10 @@ int main(int argc, char **argv, char **envp) {
         }
     }
 
+    if (g_ltm.host_rootfs[0] != '\0') {
+        ensure_rootfs_configured(g_ltm.host_rootfs);
+    }
+
     /* If binary_arg is a relative host path or within host_root/host_rootfs, resolve directly */
     if (binary_arg[0] != '/' && access(binary_arg, F_OK) == 0 && realpath(binary_arg, g_ltm.binary_path)) {
         /* Local relative host path (e.g. ./tests/bin/test_hello) */

@@ -213,11 +213,11 @@ HELLO FROM UNMODIFIED ARCH LINUX ARM ON APPLE SILICON!
 
 With LTM, Arch Linux ARM's official `pacman 7.1.0` package manager operates natively:
 
-1. **Query installed packages**:
+1. **Query installed packages in the base rootfs**:
    ```bash
    ./ltm /usr/bin/pacman -Q
    ```
-   *Lists all installed packages in the local ALPM database.*
+   *Lists all preinstalled base packages in the local ALPM database.*
 
 2. **Synchronize remote package databases** over network sockets:
    ```bash
@@ -235,12 +235,18 @@ With LTM, Arch Linux ARM's official `pacman 7.1.0` package manager operates nati
        A feature-rich and performance oriented neofetch like system information tool
    ```
 
-4. **Inspect package details and dependencies**:
+4. **Install packages from official Arch Linux repositories**:
+   ```bash
+   ./ltm /usr/bin/pacman -S fastfetch
+   ```
+   *Downloads `fastfetch` and its dependencies, verifies package integrity, extracts files, and executes shebang-driven post-transaction hooks (`ConditionNeedsUpdate`).*
+
+5. **Inspect package details and dependencies**:
    ```bash
    ./ltm /usr/bin/pacman -Si fastfetch
    ```
 
-5. **Check for available updates across the system**:
+6. **Check for available updates across the system**:
    ```bash
    ./ltm /usr/bin/pacman -Qu
    ```
@@ -249,7 +255,7 @@ With LTM, Arch Linux ARM's official `pacman 7.1.0` package manager operates nati
 
 ### 5.3 Fastfetch System Information
 
-Run Fastfetch on Arch Linux ARM:
+Because Arch Linux ARM rootfs is the official minimal upstream distribution, `fastfetch` is not installed by default. Once installed via `pacman -S fastfetch`, run it immediately:
 ```bash
 ./ltm /usr/bin/fastfetch
 ```
@@ -262,7 +268,7 @@ Run Fastfetch on Arch Linux ARM:
                `+oooo:                   Host: Mac15,13
               `+oooooo:                  Kernel: Linux LTM 2026.1A
               -+oooooo+:                 Uptime: 1 day, 4 hours
-            `/:-:++oooo+:                Packages: 165 (pacman)
+            `/:-:++oooo+:                Packages: 167 (pacman)
            `/++++/+++++++:               Shell: bash 5.3.15
           `/++++++++++++++:              Terminal: xterm-256color
          `/+++ooooooooooooo/`            CPU: Virtualized Apple Silicon (8)

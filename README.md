@@ -73,21 +73,25 @@ Linux ltm-mac LTM 2026.1A #1 SMP PREEMPT_DYNAMIC Wed Oct 14 00:00:00 UTC 2026 aa
 /root
 ```
 
-### 3. Run Fastfetch with Live Telemetry
+### 3. Manage Packages with Pacman & Install Applications
+Because LTM runs the official unmodified Arch Linux ARM base rootfs, you can install any package from official Arch repositories using `pacman`:
 ```bash
-./ltm /usr/bin/fastfetch
-```
-
-### 4. Query Arch Linux Packages with Pacman
-```bash
-# Query installed packages
+# Query installed packages in the base distribution
 ./ltm /usr/bin/pacman -Q
 
 # Synchronize official repository databases
 ./ltm /usr/bin/pacman -Sy
 
-# Search package repository
-./ltm /usr/bin/pacman -Ss fastfetch
+# Install fastfetch (or any other package)
+./ltm /usr/bin/pacman -S fastfetch
+
+# Run newly installed applications with live Apple Silicon telemetry
+./ltm /usr/bin/fastfetch
+```
+
+### 4. POSIX Networking & ICMP Ping
+```bash
+./ltm /usr/sbin/ping -c 3 google.com
 ```
 
 ### 5. Pass Custom Environment Variables

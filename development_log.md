@@ -3005,3 +3005,77 @@ In response to the user's explicit directive to synchronize documentation, expla
   - Output: `GUEST_VAR=AntigravitySuccess` (Exit code 0).
 - Verified host environment leakage prevention:
   - Host-only environment variables (e.g. `HOST_ONLY_SECRET`) do not leak into the guest container, guaranteeing clean environment sandbox isolation.
+
+
+---
+
+## [Sprint 14: APFS Tar Extraction Recovery, Prctl Capability Extensions, Shebang Execve Support, & Roadmap Rework]
+
+**Date**: 2026-10-15  
+**Author**: Antigravity Core Systems & Swarm Overseer  
+**Status**: Completed, 100% Validated (328/328 Tests Passing), Pushed to GitHub  
+
+---
+
+### 1. Root Cause Analysis of Clean Installation Defects
+
+During fresh install validation in an empty directory (`./ltm /usr/bin/bash`), two critical defects were uncovered and diagnosed:
+
+#### A. Tar Exit Code 1 on macOS APFS Case-Insensitive Filesystems
+- **Symptom**:
+  ```text
+  ./usr/share/terminfo/p/p5: Can't create 'usr/share/terminfo/p/p5': No such file or directory
+  ./usr/share/terminfo/p/prism12: Hard-link target './usr/share/terminfo/P/P12' does not exist
+  tar: Error exit delayed from previous errors.
+  [-] Failed to extract Arch Linux ARM rootfs archive (tar exit code: 1)
+  ```
+- **Root Cause**: macOS default APFS is case-preserving but case-insensitive. Arch Linux ARM's official tarball contains both lowercase `usr/share/terminfo/p` and uppercase `usr/share/terminfo/P`. Bsdtar reported collision warnings and exited with code 1.
+- **Cascade Effect**: Because `ret != 0` returned immediately, `setup_resolv_conf()` and `configure_pacman_conf()` were never called. When the user subsequently ran `pacman -S fastfetch`, pacman failed with:
+  `error: restricting filesystem access failed because Landlock is not supported by the kernel!`
+  `error: switching to sandbox user 'alpm' failed!`
+- **Resolution**:
+  1. In `src/rootfs_installer.c`, verified that core files (`/bin/sh` or `/usr/bin/bash`) were extracted. If present, non-fatal terminfo collisions are safely absorbed (`ret = 0`).
+  2. Implemented `ensure_rootfs_configured()` in `src/rootfs_installer.c` and wired it into `src/main.c` during `sandbox_init`. Regardless of how the rootfs was created, `pacman.conf` and `resolv.conf` are guaranteed to be tuned for unprivileged userland execution.
+
+#### B. `iputils ping` Prctl Failure
+- **Symptom**:
+  ```text
+  [root@ltm-mac ~]# ping 1.1.1.1
+  /usr/sbin/ping: prctl: Invalid argument
+  ```
+- **Root Cause**: In Arch Linux ARM, `/usr/sbin/ping` (iputils) calls `prctl(PR_SET_KEEPCAPS, 1)` (option 8) to retain capabilities across UID changes. Because `handle_prctl` only supported a few options, option 8 returned `-LINUX_EINVAL` (-22).
+- **Resolution**:
+  Added support in `handle_prctl` (`src/syscall_handlers.c`) for:
+  - `PR_SET_KEEPCAPS` (8) & `PR_GET_KEEPCAPS` (7)
+  - `PR_CAP_AMBIENT` (47)
+  - `PR_SET_PDEATHSIG` (1) & `PR_GET_PDEATHSIG` (2)
+  - `PR_SET_CHILD_SUBREAPER` (36) & `PR_GET_CHILD_SUBREAPER` (37)
+  - `PR_SET_SECUREBITS` (28) & `PR_GET_SECUREBITS` (27)
+  - `PR_CAPBSET_DROP` (24)
+- **Validation**:
+  `./ltm /usr/sbin/ping -c 3 1.1.1.1` and `./ltm /usr/sbin/ping -c 3 google.com` execute flawlessly with **0% packet loss**.
+
+#### C. Post-Transaction Hook Shebang Execution
+- **Symptom**:
+  ```text
+  [LTM:ERROR] Not an ELF binary: '.../usr/share/libalpm/scripts/systemd-hook'
+  ```
+- **Root Cause**: Pacman post-transaction hooks execute shell scripts (`#!/bin/sh`). `handle_execve` previously attempted to execute the script directly as an ELF binary.
+- **Resolution**:
+  Added transparent shebang (`#!`) parsing in `handle_execve` (`src/syscall_handlers.c`). If the target begins with `#!`, `handle_execve` parses the interpreter and argument (e.g. `/bin/sh`) and constructs `new_argv` to invoke the interpreter under LTM, executing scripts seamlessly.
+
+---
+
+### 2. Documentation & Roadmap Harmonization
+
+- **Clean Arch Linux Default**: Clarified across `README.md` and `docs/TUTORIAL.md` that Arch Linux ARM default rootfs is the official minimal upstream distribution; it does not bundle `fastfetch` by default. Demonstrated installing it via `pacman -Sy && pacman -S fastfetch`.
+- **Roadmap Rework (`ROADMAP.md`)**:
+  - Removed all legacy Alpine/Musl/apk leftovers from Section 1, Section 2 Milestone 3, Section 4 (Application Compatibility Matrix), and Section 5 (Future Capability Roadmap).
+  - Centered all application matrices and roadmap milestones on Arch Linux ARM, Glibc runtime, Pacman 7.1.0, shebang execution, and ALPM ecosystem.
+
+---
+
+### 3. Regression Certification
+- Automated regression suite (`./run_tests.sh`) re-run:
+  - **328 / 328 tests passed (100% pass rate)**.
+  - Standalone single binary verified with zero warnings.

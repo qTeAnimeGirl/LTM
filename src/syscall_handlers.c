@@ -2226,12 +2226,44 @@ int64_t handle_execve(const char *pathname, char *const argv[], char *const envp
         return -LINUX_ENOENT;
     }
 
+    /* Check if target executable is a script with shebang (#!) */
+    char shebang_interp[512] = {0};
+    char shebang_arg[512] = {0};
+    bool is_script = false;
+    int sfd = open(host_path, O_RDONLY);
+    if (sfd >= 0) {
+        char magic[2];
+        if (read(sfd, magic, 2) == 2 && magic[0] == '#' && magic[1] == '!') {
+            char sline[1024];
+            ssize_t sr = read(sfd, sline, sizeof(sline) - 1);
+            if (sr > 0) {
+                sline[sr] = '\0';
+                char *nl = strchr(sline, '\n');
+                if (nl) *nl = '\0';
+                char *p = sline;
+                while (*p == ' ' || *p == '\t') p++;
+                char *interp = p;
+                while (*p && *p != ' ' && *p != '\t') p++;
+                if (*p) {
+                    *p++ = '\0';
+                    while (*p == ' ' || *p == '\t') p++;
+                    strncpy(shebang_arg, p, sizeof(shebang_arg) - 1);
+                }
+                strncpy(shebang_interp, interp, sizeof(shebang_interp) - 1);
+                if (shebang_interp[0] != '\0') {
+                    is_script = true;
+                }
+            }
+        }
+        close(sfd);
+    }
+
     int guest_argc = 0;
     while (argv && argv[guest_argc]) {
         guest_argc++;
     }
 
-    int max_args = guest_argc + 8;
+    int max_args = guest_argc + 16;
     char **new_argv = malloc(max_args * sizeof(char *));
     if (!new_argv) return -LINUX_ENOMEM;
 
@@ -2243,7 +2275,16 @@ int64_t handle_execve(const char *pathname, char *const argv[], char *const envp
     if (g_ltm.trace_syscalls) {
         new_argv[n++] = "-s";
     }
-    new_argv[n++] = (char *)pathname;
+
+    if (is_script) {
+        new_argv[n++] = shebang_interp;
+        if (shebang_arg[0] != '\0') {
+            new_argv[n++] = shebang_arg;
+        }
+        new_argv[n++] = (char *)pathname;
+    } else {
+        new_argv[n++] = (char *)pathname;
+    }
 
     for (int i = 0; i < guest_argc; i++) {
         ltm_log_info("execve guest argv[%d] = '%s'", i, argv[i] ? argv[i] : "(null)");
@@ -4311,6 +4352,8 @@ int64_t handle_setrlimit(int resource, const struct linux_rlimit *rlim) {
     return 0;
 }
 
+static int s_keepcaps = 0;
+
 int64_t handle_prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5) {
     (void)arg3; (void)arg4; (void)arg5;
     /* PR_SET_NAME = 15 */
@@ -4331,8 +4374,34 @@ int64_t handle_prctl(int option, unsigned long arg2, unsigned long arg3, unsigne
     /* PR_SET_NO_NEW_PRIVS = 38, PR_GET_NO_NEW_PRIVS = 39 */
     if (option == 38) return 0;
     if (option == 39) return 0;
-    /* PR_CAPBSET_READ = 23 */
+    /* PR_CAPBSET_READ = 23, PR_CAPBSET_DROP = 24 */
     if (option == 23) return 1;
+    if (option == 24) return 0;
+    /* PR_SET_KEEPCAPS = 8, PR_GET_KEEPCAPS = 7 */
+    if (option == 7) return s_keepcaps;
+    if (option == 8) {
+        s_keepcaps = (arg2 != 0);
+        return 0;
+    }
+    /* PR_CAP_AMBIENT = 47 */
+    if (option == 47) return 0;
+    /* PR_SET_PDEATHSIG = 1, PR_GET_PDEATHSIG = 2 */
+    if (option == 1) return 0;
+    if (option == 2) {
+        if (!arg2) return -LINUX_EFAULT;
+        *(int *)arg2 = 0;
+        return 0;
+    }
+    /* PR_SET_CHILD_SUBREAPER = 36, PR_GET_CHILD_SUBREAPER = 37 */
+    if (option == 36) return 0;
+    if (option == 37) {
+        if (!arg2) return -LINUX_EFAULT;
+        *(int *)arg2 = 0;
+        return 0;
+    }
+    /* PR_SET_SECUREBITS = 28, PR_GET_SECUREBITS = 27 */
+    if (option == 27) return 0;
+    if (option == 28) return 0;
 
     return -LINUX_EINVAL;
 }
