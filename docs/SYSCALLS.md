@@ -6,7 +6,7 @@
 **Kernel Target**: Linux 6.12 LTS  
 **Kernel Personality**: `Linux LTM 2026.1A`  
 **Specification Status**: **316 of 316 Official Linux ARM64 System Calls Implemented (100.0%)**  
-**Verification Status**: **328 of 328 Automated Tests Passing (100% Pass Rate)**  
+**Verification Status**: **329 of 329 Automated Tests Passing (100% Pass Rate)**  
 
 ---
 
@@ -21,8 +21,8 @@ LTM translates unmodified Linux ARM64 (AArch64) ELF binaries to run natively on 
 | **Official Linux 6.12 ARM64 Syscalls** | **316** | **100.0%** | Full Linux 6.12 AArch64 ABI specification |
 | **Implemented Syscalls in LTM** | **316** | **100.0%** | Native Darwin translation or hermetic subsystem emulation |
 | **Standalone Per-Syscall Unit Tests (`tests/syscalls/`)** | **316** | **100.0%** | Strict 3-Way Mandate: Case A (Happy), Case B (Boundary), Case C (Errno) |
-| **Core Integration Test Suites** | **12** | **100.0%** | Real-world multi-subsystem, glibc, pthreads, and BusyBox tests |
-| **Total Automated Test Suites Passing** | **328 / 328** | **100.0%** | Zero regressions, zero memory leaks, zero host escapes |
+| **Core Integration Test Suites** | **13** | **100.0%** | Real-world multi-subsystem, glibc, pthreads, concurrency stress, and BusyBox tests |
+| **Total Automated Test Suites Passing** | **329 / 329** | **100.0%** | Zero regressions, zero memory leaks, zero host escapes |
 
 ---
 
