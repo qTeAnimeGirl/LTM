@@ -408,9 +408,10 @@ int elf_setup_stack(ltm_runtime_t *rt) {
     int argc = rt->guest_argc;
     uintptr_t *argv_ptrs = malloc((argc + 1) * sizeof(uintptr_t));
     for (int i = argc - 1; i >= 0; i--) {
-        size_t len = strlen(rt->guest_argv[i]) + 1;
+        const char *arg_str = (rt->guest_argv && rt->guest_argv[i]) ? rt->guest_argv[i] : "";
+        size_t len = strlen(arg_str) + 1;
         sp -= (len + 7) & ~7ULL;
-        memcpy((void *)sp, rt->guest_argv[i], len);
+        memcpy((void *)sp, arg_str, len);
         argv_ptrs[i] = sp;
     }
     argv_ptrs[argc] = 0;

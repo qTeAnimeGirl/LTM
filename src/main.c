@@ -413,6 +413,8 @@ int main(int argc, char **argv, char **envp) {
                 sline[sr] = '\0';
                 char *nl = strchr(sline, '\n');
                 if (nl) *nl = '\0';
+                char *cr = strchr(sline, '\r');
+                if (cr) *cr = '\0';
                 char *p = sline;
                 while (*p == ' ' || *p == '\t') p++;
                 char *interp = p;
@@ -421,7 +423,17 @@ int main(int argc, char **argv, char **envp) {
                 if (*p) {
                     *p++ = '\0';
                     while (*p == ' ' || *p == '\t') p++;
+                    char *end = p + strlen(p) - 1;
+                    while (end >= p && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) {
+                        *end = '\0';
+                        end--;
+                    }
                     strncpy(interp_arg, p, sizeof(interp_arg) - 1);
+                }
+                char *end = interp + strlen(interp) - 1;
+                while (end >= interp && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) {
+                    *end = '\0';
+                    end--;
                 }
                 char resolved_interp[1024];
                 if (sandbox_resolve_path(LINUX_AT_FDCWD, interp, resolved_interp, sizeof(resolved_interp), 0) == 0) {

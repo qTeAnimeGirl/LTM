@@ -3320,5 +3320,91 @@ Two architectural defects were identified:
   - Native `tree /etc -L 1` ran cleanly inside `Test_LTM` (44 directories, 59 files).
   - Native `fastfetch` 2.70.0-1 verified and operational.
 
+---
+
+## [Sprint 12: Clean Rootfs Installation, Fcntl Flock Translation & Glibc Hook Completion]
+
+**Date**: 2026-10-15  
+**Author**: Engineering Swarm (Lead Architect, Core Systems Coder, Diligent Tester, Glibc Specialist)  
+
+### 1. Root Cause Analysis: Hook Execution & File Locking
+
+#### 1.1 `PC=0x101bd5c68, fault_addr=0x0` in `open_proc_cmdline`
+When pacman executes post-transaction hooks (such as `/usr/share/libalpm/scripts/systemd-hook update`), tools in the hook chain inspect `/proc/self/cmdline`.
+In `src/sandbox.c`, `open_proc_cmdline()` iterated `for (int i = 0; i < g_ltm.guest_argc; i++)` and called `strlen(g_ltm.guest_argv[i])` without checking if `g_ltm.guest_argv` or `g_ltm.guest_argv[i]` was NULL.
+In sub-processes spawned via fork/execve or where argv was empty/null, `strlen(NULL)` dereferenced address `0x0`, causing `SIGSEGV` at `PC=0x101bd5c68` in host code.
+
+#### 1.2 `handle_fcntl` Flock Translation & Command Inversion
+Linux ARM64 `struct flock64` is 32 bytes with field order `(l_type, l_whence, __pad, l_start, l_len, l_pid)`.
+Darwin macOS `struct flock` is 40 bytes with field order `(l_start, l_len, l_pid, l_type, l_whence)`.
+Furthermore, Linux `F_SETLK` is 6 and `F_SETLKW` is 7, while on Darwin:
+- Darwin `F_SETOWN` is 6!
+- Darwin `F_GETOWN` is 5!
+Passing Linux 6 to Darwin `fcntl()` invoked `F_SETOWN`, treating the `struct flock` pointer as a process ID. This broke database synchronization and file locking in `libalpm` and pacman.
+
+#### 1.3 `handle_utimensat` Symlink Traversal
+`handle_utimensat` passed `0` instead of `(flags & LINUX_AT_SYMLINK_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW : 0` to `sandbox_resolve_path()`, causing symlinks to be inadvertently dereferenced when updating timestamps on directories and symlinks.
+
+#### 1.4 Shebang Parser CRLF & Whitespace
+Shebang scripts with Windows/DOS line endings (`\r\n`) or trailing whitespace preserved `\r` in `shebang_arg`, causing interpreter invocations (e.g. `/bin/sh "-e\r"`) to fail.
+
+---
+
+### 2. Solutions Implemented
+
+1. **Robust Null Guards in `open_proc_cmdline` & `create_mem_fd` (`src/sandbox.c`)**:
+   - `open_proc_cmdline` verifies that `g_ltm.guest_argv` is non-NULL and guards against `NULL` pointers at every index `i`.
+   - Falls back to `g_ltm.binary_path` if argv is empty.
+   - `create_mem_fd` validates `data` pointer before invoking `write()` and safely handles 0-length memory files.
+   - `open_proc_maps` provides fallback to `/bin/guest` if `binary_path` is empty.
+
+2. **Bidirectional `flock64` Translation in `handle_fcntl` (`src/syscall_handlers.c` & `include/syscalls.h`)**:
+   - Defined `struct linux_flock64` matching Linux ARM64 kernel layout.
+   - Implemented bidirectional field translation between `linux_flock64` and Darwin `struct flock`.
+   - Mapped `LINUX_F_GETLK` (5), `LINUX_F_SETLK` (6), `LINUX_F_SETLKW` (7), `LINUX_F_GETLK64` (12), `LINUX_F_SETLK64` (13), `LINUX_F_SETLKW64` (14), `LINUX_F_OFD_GETLK` (36), `LINUX_F_OFD_SETLK` (37), `LINUX_F_OFD_SETLKW` (38) to Darwin `F_GETLK`, `F_SETLK`, and `F_SETLKW`.
+   - Mapped `F_SETPIPE_SZ` (1031) and `F_GETPIPE_SZ` (1032) returning 64KB Linux pipe buffer capacity.
+   - Mapped `LINUX_F_SETOWN` (8) and `LINUX_F_GETOWN` (9) to Darwin `F_SETOWN` and `F_GETOWN`.
+
+3. **`handle_utimensat` Flag Support (`src/syscall_handlers.c`)**:
+   - Passed `(flags & LINUX_AT_SYMLINK_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW : 0` to `sandbox_resolve_path()`.
+
+4. **Shebang Parser Hardening (`src/syscall_handlers.c` & `src/main.c`)**:
+   - Stripped `\r` (CR) and trimmed trailing spaces and tabs from `shebang_interp`, `shebang_arg`, and `interp_arg`.
+
+5. **Fatal Host Signal Guard in `ltm_host_signal_handler` (`src/syscall_handlers.c`)**:
+   - Added check: if a fatal synchronous signal (`SIGSEGV`, `SIGBUS`, `SIGILL`) occurs while `s_in_host_syscall` is active, log an explicit diagnostic and terminate cleanly with `_exit(128 + l_sig)` instead of deferring or looping.
+
+---
+
+### 3. Verification & Live Results
+
+1. **Full Regression Test Suite (`./run_tests.sh`)**:
+   - All 316 Linux ARM64 syscall unit tests pass across all 3 conditions (Happy path, Boundary, Errno).
+   - All 13 core test suites pass (`test_hello`, `test_args_env`, `test_file_io`, `test_sandbox_defense`, `test_procfs`, `test_memory`, `test_ps_procfs`, `test_wave1_syscalls`, `busybox ps`, `test_wave2_syscalls`, `test_pthreads`, `test_glibc`, `test_concurrency_stress`).
+   - Total: **329/329 PASS (100%)**.
+
+2. **Clean Installation from Scratch (`/tmp/test_clean_ltm`)**:
+   - Executed `./ltm -i arch` in an empty directory.
+   - Rootfs downloaded, extracted, configured with DNS and pacman mirrors automatically.
+   - Executed `pacman -Syy --noconfirm fastfetch`:
+     - Synchronized databases: core, extra, alarm, aur.
+     - Resolved dependencies: `yyjson`, `fastfetch`.
+     - Downloaded, verified keys, verified integrity, and extracted files.
+     - Executed post-transaction hook `(1/1) Arming ConditionNeedsUpdate...`.
+     - Exited with code **0**.
+   - Executed `./ltm /usr/bin/fastfetch`:
+     - Rendered authentic Arch Linux ARM logo, Apple M3 (8), Host Mac15,13, Kernel Linux LTM 2026.1A, memory, and uptime.
+   - Installed `jq` via `pacman -S --noconfirm jq` with exit code **0**.
+   - Verified `./ltm /usr/bin/jq -n '{message: "...", glibc_compatible: true}'` with exit code **0**.
+
+3. **Performance Benchmarks**:
+   - **CPU Single-Thread Benchmark (`scripts/run_benchmark.sh`)**:
+     - 5 Workloads (Prime Sieve, SHA-256, Matrix GEMM, Recursive Fib F(40), Memory Bandwidth).
+     - Native macOS: 591 ms vs LTM Linux ELF: 646 ms (**91.5% efficiency**).
+   - **8-Core Multi-Thread Benchmark (`scripts/run_multithread_benchmark.sh`)**:
+     - 8 Concurrent Threads across 4P + 4E cores.
+     - Native macOS: 3475 ms vs LTM Linux ELF: 3491 ms (**99.5% efficiency**).
+     - Multi-core scaling speedup: 5.85x on Apple M3.
+
 
 

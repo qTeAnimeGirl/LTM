@@ -344,6 +344,41 @@ struct linux_sembuf {
     int16_t  sem_flg;
 };
 
+/* Linux ARM64 flock64 (32 bytes) */
+struct linux_flock64 {
+    int16_t  l_type;
+    int16_t  l_whence;
+    int32_t  __pad1;
+    int64_t  l_start;
+    int64_t  l_len;
+    int32_t  l_pid;
+    int32_t  __pad2;
+};
+
+#define LINUX_F_DUPFD         0
+#define LINUX_F_GETFD         1
+#define LINUX_F_SETFD         2
+#define LINUX_F_GETFL         3
+#define LINUX_F_SETFL         4
+#define LINUX_F_GETLK         5
+#define LINUX_F_SETLK         6
+#define LINUX_F_SETLKW        7
+#define LINUX_F_SETOWN        8
+#define LINUX_F_GETOWN        9
+#define LINUX_F_SETSIG        10
+#define LINUX_F_GETSIG        11
+#define LINUX_F_GETLK64       12
+#define LINUX_F_SETLK64       13
+#define LINUX_F_SETLKW64      14
+#define LINUX_F_SETOWN_EX     15
+#define LINUX_F_GETOWN_EX     16
+#define LINUX_F_OFD_GETLK     36
+#define LINUX_F_OFD_SETLK     37
+#define LINUX_F_OFD_SETLKW    38
+#define LINUX_F_DUPFD_CLOEXEC 1030
+#define LINUX_F_SETPIPE_SZ    1031
+#define LINUX_F_GETPIPE_SZ    1032
+
 /* Syscall Dispatcher Registration & Entry */
 int syscall_dispatcher_init(void);
 int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,

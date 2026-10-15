@@ -1259,9 +1259,67 @@ int64_t handle_dup3(int oldfd, int newfd, int flags) {
 }
 
 int64_t handle_fcntl(int fd, int cmd, unsigned long arg) {
+    if (cmd == LINUX_F_GETPIPE_SZ || cmd == LINUX_F_SETPIPE_SZ) {
+        return 65536; /* Default Linux pipe capacity: 64KB */
+    }
+
+    if (cmd == LINUX_F_GETLK || cmd == LINUX_F_GETLK64 || cmd == LINUX_F_OFD_GETLK) {
+        struct linux_flock64 *lfl = (struct linux_flock64 *)arg;
+        if (!lfl) return -LINUX_EFAULT;
+        struct flock dfl;
+        memset(&dfl, 0, sizeof(dfl));
+        dfl.l_type = lfl->l_type;
+        dfl.l_whence = lfl->l_whence;
+        dfl.l_start = lfl->l_start;
+        dfl.l_len = lfl->l_len;
+        dfl.l_pid = lfl->l_pid;
+        int ret = fcntl(fd, F_GETLK, &dfl);
+        if (ret < 0) return darwin_to_linux_errno(errno);
+        lfl->l_type = dfl.l_type;
+        lfl->l_whence = dfl.l_whence;
+        lfl->l_start = dfl.l_start;
+        lfl->l_len = dfl.l_len;
+        lfl->l_pid = dfl.l_pid;
+        return 0;
+    }
+
+    if (cmd == LINUX_F_SETLK || cmd == LINUX_F_SETLK64 || cmd == LINUX_F_OFD_SETLK) {
+        struct linux_flock64 *lfl = (struct linux_flock64 *)arg;
+        if (!lfl) return -LINUX_EFAULT;
+        struct flock dfl;
+        memset(&dfl, 0, sizeof(dfl));
+        dfl.l_type = lfl->l_type;
+        dfl.l_whence = lfl->l_whence;
+        dfl.l_start = lfl->l_start;
+        dfl.l_len = lfl->l_len;
+        dfl.l_pid = lfl->l_pid;
+        int ret = fcntl(fd, F_SETLK, &dfl);
+        if (ret < 0) return darwin_to_linux_errno(errno);
+        return 0;
+    }
+
+    if (cmd == LINUX_F_SETLKW || cmd == LINUX_F_SETLKW64 || cmd == LINUX_F_OFD_SETLKW) {
+        struct linux_flock64 *lfl = (struct linux_flock64 *)arg;
+        if (!lfl) return -LINUX_EFAULT;
+        struct flock dfl;
+        memset(&dfl, 0, sizeof(dfl));
+        dfl.l_type = lfl->l_type;
+        dfl.l_whence = lfl->l_whence;
+        dfl.l_start = lfl->l_start;
+        dfl.l_len = lfl->l_len;
+        dfl.l_pid = lfl->l_pid;
+        int ret = fcntl(fd, F_SETLKW, &dfl);
+        if (ret < 0) return darwin_to_linux_errno(errno);
+        return 0;
+    }
+
     int dcmd = cmd;
-    if (cmd == 1030) { /* F_DUPFD_CLOEXEC */
+    if (cmd == LINUX_F_DUPFD_CLOEXEC) {
         dcmd = F_DUPFD_CLOEXEC;
+    } else if (cmd == LINUX_F_SETOWN) {
+        dcmd = F_SETOWN;
+    } else if (cmd == LINUX_F_GETOWN) {
+        dcmd = F_GETOWN;
     }
 
     int ret = fcntl(fd, dcmd, arg);
@@ -1271,7 +1329,7 @@ int64_t handle_fcntl(int fd, int cmd, unsigned long arg) {
         return darwin_to_linux_errno(err);
     }
 
-    if ((cmd == F_DUPFD || cmd == 1030) && ret >= 0 && ret < MAX_TRACKED_FDS && fd >= 0 && fd < MAX_TRACKED_FDS) {
+    if ((cmd == LINUX_F_DUPFD || cmd == LINUX_F_DUPFD_CLOEXEC) && ret >= 0 && ret < MAX_TRACKED_FDS && fd >= 0 && fd < MAX_TRACKED_FDS) {
         g_sock_is_icmp[ret] = g_sock_is_icmp[fd];
         g_sock_so_timestamp[ret] = g_sock_so_timestamp[fd];
         g_sock_last_timestamp[ret] = g_sock_last_timestamp[fd];
@@ -1748,15 +1806,20 @@ static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) 
         return;
     }
 
+    ucontext_t *uc = (ucontext_t *)ucontext;
+    arm_thread_state64_t *cur_state = &uc->uc_mcontext->__ss;
+
     /* If the signal arrived while the host is executing a blocking syscall, defer delivery to avoid clobbering host C frame */
     if (s_in_host_syscall) {
+        if (l_sig == 4 || l_sig == 7 || l_sig == 8 || l_sig == 11 || l_sig == 31) {
+            ltm_log_error("Fatal signal %d delivered during host syscall execution: PC=0x%llx, fault_addr=%p",
+                          l_sig, (unsigned long long)cur_state->__pc, info ? info->si_addr : NULL);
+            _exit(128 + l_sig);
+        }
         s_pending_signal = l_sig;
         if (info) s_pending_siginfo = *info;
         return;
     }
-
-    ucontext_t *uc = (ucontext_t *)ucontext;
-    arm_thread_state64_t *cur_state = &uc->uc_mcontext->__ss;
 
     /* Recursion protection for fatal exception signals */
     if (l_sig == 4 || l_sig == 7 || l_sig == 8 || l_sig == 11 || l_sig == 31) {
@@ -2809,6 +2872,8 @@ int64_t handle_execve(const char *pathname, char *const argv[], char *const envp
                 sline[sr] = '\0';
                 char *nl = strchr(sline, '\n');
                 if (nl) *nl = '\0';
+                char *cr = strchr(sline, '\r');
+                if (cr) *cr = '\0';
                 char *p = sline;
                 while (*p == ' ' || *p == '\t') p++;
                 char *interp = p;
@@ -2816,7 +2881,17 @@ int64_t handle_execve(const char *pathname, char *const argv[], char *const envp
                 if (*p) {
                     *p++ = '\0';
                     while (*p == ' ' || *p == '\t') p++;
+                    char *end = p + strlen(p) - 1;
+                    while (end >= p && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) {
+                        *end = '\0';
+                        end--;
+                    }
                     strncpy(shebang_arg, p, sizeof(shebang_arg) - 1);
+                }
+                char *end = interp + strlen(interp) - 1;
+                while (end >= interp && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) {
+                    *end = '\0';
+                    end--;
                 }
                 strncpy(shebang_interp, interp, sizeof(shebang_interp) - 1);
                 if (shebang_interp[0] != '\0') {
@@ -3028,7 +3103,8 @@ int64_t handle_utimensat(int dirfd, const char *pathname, const struct linux_tim
     char host_path[1024];
     const char *target = pathname;
     if (pathname && pathname[0] != '\0') {
-        int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), 0);
+        int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path),
+                                       (flags & LINUX_AT_SYMLINK_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW : 0);
         if (res < 0) return res;
         if (res == 1) return 0; /* virtual path */
         target = host_path;

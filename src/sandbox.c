@@ -16,7 +16,7 @@ static int create_mem_fd(const void *data, size_t len) {
     }
     /* Immediately unlink so it will disappear on close or termination */
     unlink(tmppath);
-    if (len > 0) {
+    if (len > 0 && data) {
         ssize_t written = write(fd, data, len);
         if (written < 0 || (size_t)written != len) {
             close(fd);
@@ -369,12 +369,23 @@ static int open_sys_product_name(void) {
 static int open_proc_cmdline(void) {
     char buf[4096];
     size_t offset = 0;
-    for (int i = 0; i < g_ltm.guest_argc && offset < sizeof(buf) - 1; i++) {
-        const char *arg = g_ltm.guest_argv[i];
-        size_t len = strlen(arg) + 1;
-        if (offset + len >= sizeof(buf)) break;
-        memcpy(buf + offset, arg, len);
-        offset += len;
+    if (g_ltm.guest_argv && g_ltm.guest_argc > 0) {
+        for (int i = 0; i < g_ltm.guest_argc && offset < sizeof(buf) - 1; i++) {
+            const char *arg = g_ltm.guest_argv[i];
+            if (!arg) break;
+            size_t len = strlen(arg) + 1;
+            if (offset + len >= sizeof(buf)) break;
+            memcpy(buf + offset, arg, len);
+            offset += len;
+        }
+    }
+    if (offset == 0) {
+        const char *name = g_ltm.binary_path[0] ? g_ltm.binary_path : "/bin/guest";
+        size_t len = strlen(name) + 1;
+        if (len < sizeof(buf)) {
+            memcpy(buf, name, len);
+            offset = len;
+        }
     }
     return create_mem_fd(buf, offset);
 }
@@ -448,7 +459,7 @@ static int open_proc_maps(void) {
         "%016lx-%016lx rw-p 00000000 00:00 0 [stack]\n",
         (unsigned long)g_ltm.elf_base,
         (unsigned long)(g_ltm.elf_base + 0x10000),
-        g_ltm.binary_path,
+        g_ltm.binary_path[0] ? g_ltm.binary_path : "/bin/guest",
         (unsigned long)g_ltm.brk_start,
         (unsigned long)(g_ltm.brk_current > g_ltm.brk_start ? g_ltm.brk_current : g_ltm.brk_start + 0x10000),
         (unsigned long)g_ltm.guest_stack_base,
