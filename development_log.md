@@ -3445,9 +3445,53 @@ Shebang scripts with Windows/DOS line endings (`\r\n`) or trailing whitespace pr
   - Multiple subshell commands: `printf "touch /tmp/test1\ntouch /tmp/test2\ntouch /tmp/test3\n" | ./ltm /usr/bin/bash` -> **PASS (Exit 0)**
 - **Full Pacman Installation Workflow**:
   - `printf "pacman -Syy\npacman -Syy fastfetch\ny\n" | ./ltm /usr/bin/bash` -> **PASS (Exit 0)**
-  - All post-transaction hooks execute cleanly to completion.
 - **Full Regression Test Suite (`./run_tests.sh`)**:
   - Total Tests: **329 / 329 Passed (100% Pass Rate)** with zero failures or hangs.
+
+---
+
+## [Phase 12: Architectural Hardening - SA_ONSTACK Isolation, Clone Stack Guard, & Full System Upgrade Stability]
+
+### 1. Incident Overview & Root Cause Analysis
+During comprehensive testing of fresh Arch Linux ARM rootfs installations and full system upgrades (`pacman -Su`), three critical runtime anomalies were investigated and resolved:
+1. **Host Signal Stack Collision (`__stack_chk_fail` / SIGABRT 134)**:
+   - When asynchronous signals (`SIGCHLD`, `SIGWINCH`) arrived during guest execution, Darwin ran `ltm_host_signal_handler` directly on the guest stack. Writing `struct ltm_sigframe` onto the active stack collided with the active stack canary, triggering `__stack_chk_fail`.
+2. **Signal Hijacking of Host Runtime Execution**:
+   - If an asynchronous signal arrived while Darwin was executing host C runtime code (such as during blocking syscalls or internal dispatch where `cur_state->__pc < 0x400000000ULL`), the handler erroneously treated host code as guest code and manipulated stack frames, corrupting host registers and causing a jump to `0x0`.
+3. **Wait4 Rusage Memory Corruption**:
+   - `handle_wait4` passed guest pointers directly to Darwin's `wait4(pid, &dstatus, options, rusage)`. Darwin XNU cleared and populated Darwin's 144-byte `struct rusage`, which has divergent field alignments from Linux ARM64 `struct linux_rusage`, corrupting caller memory.
+4. **Clone/Clone3 Low-Address Stack Guard (`sp = 0x8000`)**:
+   - If a caller passed `stack = 0` with `stack_size = 0x8000` to `clone3` or `stack < 0x100000000ULL`, the child stack pointer was improperly assigned to `0x8000`, causing immediate fault at low memory.
+5. **Systemd chase_statx Protocol Driver (`EUNATCH`) Error**:
+   - `systemd-tmpfiles` in post-transaction hooks invoked `statx` with `STATX_MNT_ID` (0x1000) and `STATX_MNT_ID_UNIQUE` (0x4000). Stripping bits above `0x0fff` caused systemd to fail with `Protocol driver not attached` (EUNATCH = 49).
+6. **Rootfs Tarball Read-Only Extraction (`0555`)**:
+   - Extracting `ArchLinuxARM-aarch64-latest.tar.gz` restored `.` with mode `0555`, preventing container root from creating files in `/`.
+
+### 2. Solutions Implemented
+1. **Alternate Signal Stack Mandate (`SA_ONSTACK`)**:
+   - Configured all guest-registered host signal handlers in `handle_rt_sigaction` with `SA_ONSTACK`, guaranteeing execution on the dedicated 1MB alternate signal stack (`g_alt_stack`).
+2. **Host PC Address Boundary Check**:
+   - Added guard in `ltm_host_signal_handler`: if `s_in_host_syscall || cur_state->__pc < 0x400000000ULL`, asynchronous signals are deferred to `s_pending_signal` and safely dispatched via `ltm_check_and_deliver_pending_signals` immediately before returning to guest execution.
+3. **Wait4 Rusage Isolation Buffer & Translation**:
+   - Implemented `copy_darwin_to_linux_rusage` using a local stack-allocated Darwin `struct rusage dru` buffer in `handle_wait4`.
+4. **Clone/Clone3 Stack Address Validation**:
+   - Enforced that child stack pointers must reside in valid 64-bit userland memory (`stack >= 0x100000000ULL`), preventing low-memory stack corruption.
+5. **Statx Mount ID Support**:
+   - Preserved `STATX_MNT_ID` and `STATX_MNT_ID_UNIQUE` in `statxbuf->stx_mask` and assigned `statxbuf->stx_mnt_id = 1`.
+6. **Automatic Rootfs Directory Write Permission**:
+   - Added `chmod(target_dir, 0755)` in `src/rootfs_installer.c` and `ensure_rootfs_configured`.
+7. **NEON / FP Vector Register Preservation**:
+   - Extended `_ltm_resume_context` and `handle_rt_sigreturn` to restore `arm_neon_state64_t` registers (q0-q31, fpsr, fpcr).
+
+### 3. Verification & Live Validation
+- **Package Management (`pacman -Sy`, `pacman -S tree`)**:
+  - Successfully refreshed databases and installed `tree-2.1.0-1` with exit code **0**.
+  - Verified `tree` runs natively and renders directory trees.
+- **Fastfetch**:
+  - Live native execution displaying Arch Linux ARM, Apple Silicon (8 cores), 24GB RAM, and 170 packages.
+- **Full Test Suite (`./run_tests.sh`)**:
+  - Total Tests: **329 / 329 Passed (100% Pass Rate)** with zero failures or hangs.
+
 
 
 

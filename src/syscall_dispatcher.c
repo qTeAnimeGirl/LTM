@@ -12,6 +12,7 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
     (void)si;
     ucontext_t *uc = (ucontext_t *)ctx;
     arm_thread_state64_t *state = &uc->uc_mcontext->__ss;
+    arm_neon_state64_t *neon = &uc->uc_mcontext->__ns;
 
     uint32_t insn = *(uint32_t *)state->__pc;
 
@@ -25,7 +26,7 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
         uint64_t a4 = state->__x[4];
         uint64_t a5 = state->__x[5];
 
-        int64_t ret = syscall_dispatch(num, a0, a1, a2, a3, a4, a5, state);
+        int64_t ret = syscall_dispatch(num, a0, a1, a2, a3, a4, a5, state, neon);
         state->__x[0] = (uint64_t)ret;
         state->__pc += 4;
         return;
@@ -119,11 +120,11 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
     uint64_t a5 = state->__x[5];
 
     ltm_set_in_host_syscall(1);
-    int64_t ret = syscall_dispatch(num, a0, a1, a2, a3, a4, a5, state);
+    int64_t ret = syscall_dispatch(num, a0, a1, a2, a3, a4, a5, state, neon);
     ltm_set_in_host_syscall(0);
 
     if (num == 139 /* rt_sigreturn */ && ret == 0) {
-        /* Guest context has been fully restored from sigframe into state */
+        /* Guest context has been fully restored from sigframe into state & neon */
         return;
     }
 
@@ -135,6 +136,7 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
 
     /* Check for signals that arrived while executing host syscall */
     ltm_check_and_deliver_pending_signals(state);
+    return;
 }
 
 static void ltm_crash_handler(int sig, siginfo_t *si, void *ctx) {
@@ -163,7 +165,7 @@ static void ltm_crash_handler(int sig, siginfo_t *si, void *ctx) {
                     (unsigned long long)(state->__pc + i * 4), code[i + 4]);
         }
     }
-    if (state->__sp >= 0x1000) {
+    if (state->__sp >= 0x100000000ULL) {
         uint64_t *stk = (uint64_t *)state->__sp;
         fprintf(stderr, "Stack dump:\n");
         for (int i = 0; i < 16; i += 2) {
@@ -704,7 +706,7 @@ const char *linux_syscall_name(int sysno) {
 }
 
 int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
-                         uint64_t a3, uint64_t a4, uint64_t a5, void *state) {
+                         uint64_t a3, uint64_t a4, uint64_t a5, void *state, void *neon) {
     ltm_trace("sys_%llu [%s](0x%llx, 0x%llx, 0x%llx, 0x%llx, 0x%llx, 0x%llx)",
               (unsigned long long)num, linux_syscall_name((int)num), (unsigned long long)a0, (unsigned long long)a1,
               (unsigned long long)a2, (unsigned long long)a3, (unsigned long long)a4,
@@ -893,7 +895,7 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
             ret = handle_rt_sigaction((int)a0, (const struct linux_sigaction *)a1, (struct linux_sigaction *)a2, (size_t)a3);
             break;
         case LINUX_SYS_rt_sigreturn:
-            ret = handle_rt_sigreturn(state);
+            ret = handle_rt_sigreturn(state, neon);
             break;
         case LINUX_SYS_rt_sigprocmask:
             ret = handle_rt_sigprocmask((int)a0, (const uint64_t *)a1, (uint64_t *)a2, (size_t)a3);

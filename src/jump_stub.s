@@ -48,6 +48,29 @@ _ltm_jump_to_entry:
 .global _ltm_resume_context
 _ltm_resume_context:
     // x0 = pointer to arm_thread_state64_t
+    // x1 = optional pointer to arm_neon_state64_t (or NULL)
+    cbz x1, 1f
+    ldp q0, q1, [x1, #0]
+    ldp q2, q3, [x1, #32]
+    ldp q4, q5, [x1, #64]
+    ldp q6, q7, [x1, #96]
+    ldp q8, q9, [x1, #128]
+    ldp q10, q11, [x1, #160]
+    ldp q12, q13, [x1, #192]
+    ldp q14, q15, [x1, #224]
+    ldp q16, q17, [x1, #256]
+    ldp q18, q19, [x1, #288]
+    ldp q20, q21, [x1, #320]
+    ldp q22, q23, [x1, #352]
+    ldp q24, q25, [x1, #384]
+    ldp q26, q27, [x1, #416]
+    ldp q28, q29, [x1, #448]
+    ldp q30, q31, [x1, #480]
+    ldr w2, [x1, #512]
+    msr fpsr, x2
+    ldr w2, [x1, #516]
+    msr fpcr, x2
+1:
     ldr w1, [x0, #264]      // Load __cpsr
     msr nzcv, x1            // Restore NZCV condition flags
     ldr x1, [x0, #248]      // Load guest __sp

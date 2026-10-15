@@ -273,6 +273,9 @@ int ltm_install_arch_rootfs(const char *target_dir) {
         return 1;
     }
 
+    /* Ensure rootfs directory is writable (tar extraction may have restored 0555 on .) */
+    chmod(target_dir, 0755);
+
     /* Configure network DNS nameservers */
     printf("[+] Configuring /etc/resolv.conf nameservers (1.1.1.1, 8.8.8.8)...\n");
     setup_resolv_conf(target_dir);
@@ -402,6 +405,9 @@ int rootfs_install(const char *flavor, const char *target_dir) {
 
 void ensure_rootfs_configured(const char *rootfs_dir) {
     if (!rootfs_dir || rootfs_dir[0] == '\0') return;
+
+    /* Ensure rootfs directory is writable */
+    chmod(rootfs_dir, 0755);
 
     /* Verify pacman.conf has sandbox disabling flags and no DownloadUser = alpm */
     char pacman_conf[1024];

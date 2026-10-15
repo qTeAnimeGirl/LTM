@@ -382,7 +382,7 @@ struct linux_flock64 {
 /* Syscall Dispatcher Registration & Entry */
 int syscall_dispatcher_init(void);
 int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
-                         uint64_t a3, uint64_t a4, uint64_t a5, void *state);
+                         uint64_t a3, uint64_t a4, uint64_t a5, void *state, void *neon);
 
 /* Individual Syscall Handlers */
 int64_t handle_read(int fd, void *buf, size_t count);
@@ -416,7 +416,7 @@ struct linux_sigaction {
 
 void ltm_sigreturn_stub(void);
 int64_t handle_rt_sigaction(int signum, const struct linux_sigaction *act, struct linux_sigaction *oldact, size_t sigsetsize);
-int64_t handle_rt_sigreturn(void *state);
+int64_t handle_rt_sigreturn(void *state, void *neon);
 int64_t handle_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, size_t sigsetsize);
 void ltm_set_in_host_syscall(int in_sys);
 void ltm_check_and_deliver_pending_signals(void *state);

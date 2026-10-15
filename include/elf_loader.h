@@ -119,6 +119,6 @@ typedef struct {
 int elf_load_binary(const char *filepath, ltm_runtime_t *rt);
 int elf_setup_stack(ltm_runtime_t *rt);
 void ltm_jump_to_entry(uintptr_t entry, void *sp) __attribute__((noreturn));
-void ltm_resume_context(void *state) __attribute__((noreturn));
+void ltm_resume_context(void *state, void *neon) __attribute__((noreturn));
 
 #endif /* ELF_LOADER_H */
