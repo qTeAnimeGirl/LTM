@@ -93,9 +93,11 @@ static void init_futex_bucket(futex_bucket_t *b) {
 #define DIR_CACHE_MAX 256
 static DIR *g_dir_cache[DIR_CACHE_MAX];
 
-/* Track ICMP sockets to strip IPv4 header on receive */
+/* Track ICMP sockets to strip IPv4 header on receive & SO_TIMESTAMP emulation */
 #define MAX_TRACKED_FDS 1024
 static bool g_sock_is_icmp[MAX_TRACKED_FDS];
+static bool g_sock_so_timestamp[MAX_TRACKED_FDS];
+static struct timeval g_sock_last_timestamp[MAX_TRACKED_FDS];
 
 /* Eventfd Emulation */
 typedef struct {
@@ -302,6 +304,9 @@ int64_t handle_close(int fd) {
     }
     if (fd >= 0 && fd < MAX_TRACKED_FDS) {
         g_sock_is_icmp[fd] = false;
+        g_sock_so_timestamp[fd] = false;
+        g_sock_last_timestamp[fd].tv_sec = 0;
+        g_sock_last_timestamp[fd].tv_usec = 0;
     }
     ltm_epoll_close(fd);
     ltm_timerfd_close(fd);
@@ -830,6 +835,34 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
         return 0;
     }
 
+    /* SIOCGSTAMP: Linux 0x8906 (get packet timestamp as struct timeval) */
+    if (request == 0x8906) {
+        if (!arg) return -LINUX_EFAULT;
+        struct timeval *tv = (struct timeval *)arg;
+        if (fd >= 0 && fd < MAX_TRACKED_FDS && g_sock_last_timestamp[fd].tv_sec > 0) {
+            *tv = g_sock_last_timestamp[fd];
+        } else {
+            gettimeofday(tv, NULL);
+        }
+        return 0;
+    }
+
+    /* SIOCGSTAMPNS: Linux 0x8907 (get packet timestamp as struct timespec) */
+    if (request == 0x8907) {
+        if (!arg) return -LINUX_EFAULT;
+        struct timespec *ts = (struct timespec *)arg;
+        if (fd >= 0 && fd < MAX_TRACKED_FDS && g_sock_last_timestamp[fd].tv_sec > 0) {
+            ts->tv_sec = g_sock_last_timestamp[fd].tv_sec;
+            ts->tv_nsec = (long)g_sock_last_timestamp[fd].tv_usec * 1000L;
+        } else {
+            struct timeval tv;
+            gettimeofday(&tv, NULL);
+            ts->tv_sec = tv.tv_sec;
+            ts->tv_nsec = (long)tv.tv_usec * 1000L;
+        }
+        return 0;
+    }
+
     return -LINUX_ENOTTY;
 }
 
@@ -870,6 +903,8 @@ int64_t handle_dup(int oldfd) {
     if (ret < 0) return darwin_to_linux_errno(errno);
     if (ret >= 0 && ret < MAX_TRACKED_FDS && oldfd >= 0 && oldfd < MAX_TRACKED_FDS) {
         g_sock_is_icmp[ret] = g_sock_is_icmp[oldfd];
+        g_sock_so_timestamp[ret] = g_sock_so_timestamp[oldfd];
+        g_sock_last_timestamp[ret] = g_sock_last_timestamp[oldfd];
     }
     return ret;
 }
@@ -881,6 +916,8 @@ int64_t handle_dup3(int oldfd, int newfd, int flags) {
 
     if (newfd >= 0 && newfd < MAX_TRACKED_FDS && oldfd >= 0 && oldfd < MAX_TRACKED_FDS) {
         g_sock_is_icmp[newfd] = g_sock_is_icmp[oldfd];
+        g_sock_so_timestamp[newfd] = g_sock_so_timestamp[oldfd];
+        g_sock_last_timestamp[newfd] = g_sock_last_timestamp[oldfd];
     }
 
     if (flags & LINUX_O_CLOEXEC) {
@@ -904,6 +941,8 @@ int64_t handle_fcntl(int fd, int cmd, unsigned long arg) {
 
     if ((cmd == F_DUPFD || cmd == 1030) && ret >= 0 && ret < MAX_TRACKED_FDS && fd >= 0 && fd < MAX_TRACKED_FDS) {
         g_sock_is_icmp[ret] = g_sock_is_icmp[fd];
+        g_sock_so_timestamp[ret] = g_sock_so_timestamp[fd];
+        g_sock_last_timestamp[ret] = g_sock_last_timestamp[fd];
     }
 
     return ret;
@@ -2843,7 +2882,10 @@ static void translate_linux_to_darwin_sockopt(int level, int optname, int *dleve
             case 19: *doptname = SO_SNDLOWAT; break;
             case 20: *doptname = SO_RCVTIMEO; break;
             case 21: *doptname = SO_SNDTIMEO; break;
+            case 29: *doptname = SO_TIMESTAMP; break; /* Linux SO_TIMESTAMP -> Darwin SO_TIMESTAMP (0x0400) */
             case 30: *doptname = SO_ACCEPTCONN; break;
+            case 35: *doptname = SO_TIMESTAMP; break; /* Linux SO_TIMESTAMPNS -> Darwin SO_TIMESTAMP (0x0400) */
+            case 37: *doptname = SO_TIMESTAMP; break; /* Linux SO_TIMESTAMPING */
             default: *doptname = optname; break;
         }
     } else if (level == 6) { /* IPPROTO_TCP */
@@ -3073,6 +3115,10 @@ int64_t handle_recvfrom(int fd, void *buf, size_t len, int flags, void *src_addr
         }
     }
 
+    if (fd >= 0 && fd < MAX_TRACKED_FDS) {
+        gettimeofday(&g_sock_last_timestamp[fd], NULL);
+    }
+
     return ret;
 }
 
@@ -3109,8 +3155,12 @@ int64_t handle_recvmsg(int fd, void *msg, int flags) {
     memset(&dmsg, 0, sizeof(dmsg));
     dmsg.msg_iov = lmsg->msg_iov;
     dmsg.msg_iovlen = (int)lmsg->msg_iovlen;
-    dmsg.msg_control = lmsg->msg_control;
-    dmsg.msg_controllen = (socklen_t)lmsg->msg_controllen;
+
+    char darwin_cbuf[512];
+    if (lmsg->msg_control && lmsg->msg_controllen > 0) {
+        dmsg.msg_control = darwin_cbuf;
+        dmsg.msg_controllen = sizeof(darwin_cbuf);
+    }
 
     struct sockaddr_storage ss;
     if (lmsg->msg_name && lmsg->msg_namelen > 0) {
@@ -3138,7 +3188,57 @@ int64_t handle_recvmsg(int fd, void *msg, int flags) {
         copy_darwin_to_linux_sockaddr(&ss, dmsg.msg_namelen, lmsg->msg_name, &lnamelen);
         lmsg->msg_namelen = lnamelen;
     }
-    lmsg->msg_controllen = dmsg.msg_controllen;
+
+    /* Record packet arrival timestamp for SIOCGSTAMP */
+    struct timeval recv_tv;
+    gettimeofday(&recv_tv, NULL);
+    if (fd >= 0 && fd < MAX_TRACKED_FDS) {
+        g_sock_last_timestamp[fd] = recv_tv;
+    }
+
+    /* Process control messages and synthesize/translate Linux SO_TIMESTAMP */
+    if (lmsg->msg_control && lmsg->msg_controllen > 0) {
+        bool have_ts = false;
+        struct timeval ts_val = recv_tv;
+
+        if (dmsg.msg_controllen > 0) {
+            struct cmsghdr *dcmsg = CMSG_FIRSTHDR(&dmsg);
+            while (dcmsg) {
+                if (dcmsg->cmsg_level == SOL_SOCKET && dcmsg->cmsg_type == SCM_TIMESTAMP &&
+                    dcmsg->cmsg_len >= (socklen_t)(sizeof(struct cmsghdr) + sizeof(struct timeval))) {
+                    memcpy(&ts_val, CMSG_DATA(dcmsg), sizeof(struct timeval));
+                    have_ts = true;
+                    if (fd >= 0 && fd < MAX_TRACKED_FDS) {
+                        g_sock_last_timestamp[fd] = ts_val;
+                    }
+                    break;
+                }
+                dcmsg = CMSG_NXTHDR(&dmsg, dcmsg);
+            }
+        }
+
+        bool want_ts = (fd >= 0 && fd < MAX_TRACKED_FDS && g_sock_so_timestamp[fd]) || have_ts;
+        if (want_ts && lmsg->msg_controllen >= 32) {
+            struct {
+                uint64_t cmsg_len;
+                int32_t  cmsg_level;
+                int32_t  cmsg_type;
+                struct timeval tv;
+            } __attribute__((packed)) lcmsg;
+
+            lcmsg.cmsg_len = sizeof(lcmsg); /* 32 bytes on Linux ARM64 */
+            lcmsg.cmsg_level = 1;           /* LINUX_SOL_SOCKET */
+            lcmsg.cmsg_type = 29;           /* LINUX_SO_TIMESTAMP */
+            lcmsg.tv = ts_val;
+
+            memcpy(lmsg->msg_control, &lcmsg, sizeof(lcmsg));
+            lmsg->msg_controllen = sizeof(lcmsg);
+        } else if (!have_ts) {
+            lmsg->msg_controllen = 0;
+        }
+    } else {
+        lmsg->msg_controllen = 0;
+    }
     lmsg->msg_flags = dmsg.msg_flags;
 
     return ret;
@@ -3147,10 +3247,23 @@ int64_t handle_recvmsg(int fd, void *msg, int flags) {
 int64_t handle_setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen) {
     if (fd < 0) return -LINUX_EBADF;
     if (optlen > 0 && !optval) return -LINUX_EFAULT;
+
+    if (level == 1 && (optname == 29 || optname == 35 || optname == 37)) {
+        int on = (optval && optlen >= sizeof(int)) ? *(const int *)optval : 1;
+        if (fd >= 0 && fd < MAX_TRACKED_FDS) {
+            g_sock_so_timestamp[fd] = (on != 0);
+        }
+    }
+
     int dlevel, doptname;
     translate_linux_to_darwin_sockopt(level, optname, &dlevel, &doptname);
     int ret = setsockopt(fd, dlevel, doptname, optval, optlen);
     if (ret < 0) {
+        /* SO_TIMESTAMP emulation: Darwin kernel doesn't support SO_TIMESTAMP on raw/dgram ICMP,
+         * so we emulate it in userspace via synthesized cmsg in recvmsg and SIOCGSTAMP ioctl */
+        if (level == 1 && (optname == 29 || optname == 35 || optname == 37)) {
+            return 0;
+        }
         /* Benign IP metadata options that shouldn't fail applications if unsupported */
         if (level == 0 && (optname == 12 || optname == 13 || optname == 8 || optname == 11 || optname == 7 || optname == 6 || optname == 4)) {
             return 0;
@@ -3163,10 +3276,27 @@ int64_t handle_setsockopt(int fd, int level, int optname, const void *optval, so
 int64_t handle_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen) {
     if (fd < 0) return -LINUX_EBADF;
     if (!optval || !optlen) return -LINUX_EFAULT;
+    if (level == 1 && (optname == 29 || optname == 35 || optname == 37)) {
+        if (*optlen >= sizeof(int)) {
+            int on = (fd >= 0 && fd < MAX_TRACKED_FDS) ? g_sock_so_timestamp[fd] : 0;
+            *(int *)optval = on;
+            *optlen = sizeof(int);
+            return 0;
+        }
+    }
     int dlevel, doptname;
     translate_linux_to_darwin_sockopt(level, optname, &dlevel, &doptname);
     int ret = getsockopt(fd, dlevel, doptname, optval, optlen);
-    if (ret < 0) return darwin_to_linux_errno(errno);
+    if (ret < 0) {
+        if (level == 1 && (optname == 29 || optname == 35 || optname == 37)) {
+            if (*optlen >= sizeof(int)) {
+                *(int *)optval = (fd >= 0 && fd < MAX_TRACKED_FDS) ? g_sock_so_timestamp[fd] : 0;
+                *optlen = sizeof(int);
+                return 0;
+            }
+        }
+        return darwin_to_linux_errno(errno);
+    }
     return 0;
 }
 

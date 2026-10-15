@@ -283,6 +283,13 @@ As of October 15, 2026, LTM has achieved **100% implementation of all 316 offici
   - `README.md`: Overhauled project overview, features, benchmarks, and CLI reference.
 - [x] **100% Regression Certification**: 328 of 328 test suites passing cleanly with zero warnings.
 
+### Milestone 21: High-Fidelity POSIX Socket Timestamps (`SO_TIMESTAMP`), `SIOCGSTAMP` Ioctl, & Clean Rootfs Robustness
+- [x] **Linux `SO_TIMESTAMP` Emulation**: Implemented socket option translation for `SO_TIMESTAMP` (29), `SO_TIMESTAMPNS` (35), and `SO_TIMESTAMPING` (37) in `setsockopt` and `getsockopt`. On Darwin, unprivileged ICMP sockets return `ENOPROTOOPT` for kernel socket-level timestamping; LTM absorbs Darwin's error and emulates `SO_TIMESTAMP` cleanly in userland.
+- [x] **Control Message Packaging (`recvmsg`)**: Synthesizes Linux ARM64-compliant 32-byte `struct cmsghdr` with `cmsg_level=1` (`SOL_SOCKET`), `cmsg_type=29` (`SO_TIMESTAMP`), and 16-byte `struct timeval` for packet reception timestamps.
+- [x] **Packet Timestamp Ioctls (`SIOCGSTAMP` & `SIOCGSTAMPNS`)**: Implemented `ioctl(fd, 0x8906)` and `ioctl(fd, 0x8907)` returning the precise reception timestamp of the last incoming packet.
+- [x] **Zero-Warning Clean Ping**: `iputils ping` executes with 0 warnings, zero packet loss, sub-millisecond precision, and seamless DNS hostname resolution.
+- [x] **Clean Installation APFS Case-Collision Tolerance**: BSD filesystem case-insensitive collisions during rootfs extraction (e.g. `terminfo/p` vs `terminfo/P`) are safely handled and validated, ensuring core filesystem nodes, `/etc/resolv.conf`, and `/etc/pacman.conf` are configured on clean downloads.
+
 ---
 
 ## 3. Linux ARM64 System Call Number Architecture & Gap Clarification

@@ -3128,3 +3128,39 @@ During fresh install validation in an empty directory (`./ltm /usr/bin/bash`), t
   - Verified `pacman -S fastfetch`: installed cleanly with post-transaction hooks.
   - Verified `fastfetch`: rendered native system telemetry with Apple Silicon CPU and Arch Linux ARM identity.
 - Automated regression suite (`./run_tests.sh`): **328 / 328 tests passed (100% pass rate)**.
+
+---
+
+## [Sprint 16: Socket Timestamping Emulation (SO_TIMESTAMP / SIOCGSTAMP) & Ping Warning Elimination]
+
+**Date**: 2026-10-15  
+**Author**: Antigravity Core Systems & Swarm Overseer  
+**Status**: Completed, 100% Validated (328/328 Tests Passing)  
+
+### 1. Root Cause Analysis
+- **Warning**: `/usr/sbin/ping: Warning: no SO_TIMESTAMP support, falling back to SIOCGSTAMP`
+- **Causes**:
+  1. Linux `iputils ping` requests packet hardware/arrival timestamps using `setsockopt(fd, SOL_SOCKET, SO_TIMESTAMP, &one, sizeof(one))` (`level=1`, `optname=29`).
+  2. On Darwin, `setsockopt(fd, SOL_SOCKET, SO_TIMESTAMP, ...)` returns `-1` with `errno = ENOPROTOOPT` (92) on unprivileged `SOCK_DGRAM, IPPROTO_ICMP` sockets.
+  3. LTM returned `-LINUX_ENOPROTOOPT` (-92) to the guest binary, which triggered `ping` to print the warning and attempt fallback to `ioctl(fd, SIOCGSTAMP, &tv)`.
+  4. In `handle_ioctl`, request `0x8906` (`SIOCGSTAMP`) and `0x8907` (`SIOCGSTAMPNS`) previously returned `-LINUX_ENOTTY` (-25).
+
+### 2. Architectural Implementation
+1. **Timestamp Tracking & Socket Option Emulation**:
+   - In `src/syscall_handlers.c`, added tracking arrays `g_sock_so_timestamp[MAX_TRACKED_FDS]` and `g_sock_last_timestamp[MAX_TRACKED_FDS]`.
+   - Wired lifecycle management across `handle_close`, `handle_dup`, `handle_dup3`, and `handle_fcntl`.
+   - In `handle_setsockopt`, for `level == 1 && (optname == 29 || optname == 35 || optname == 37)` (`SO_TIMESTAMP`, `SO_TIMESTAMPNS`, `SO_TIMESTAMPING`), recorded active flag and absorbed Darwin's kernel `ENOPROTOOPT` error, returning `0`.
+   - In `handle_getsockopt`, returned tracked timestamp option state.
+2. **Linux Control Message Synthesis (`handle_recvmsg`)**:
+   - In `handle_recvmsg`, recorded arrival timestamp in `g_sock_last_timestamp[fd]`.
+   - If timestamping is active or provided by Darwin, synthesized a Linux ARM64-compliant 32-byte `struct cmsghdr` (`cmsg_len=32`, `cmsg_level=1`, `cmsg_type=29`, `tv`) into `lmsg->msg_control`.
+3. **Ioctl Emulation (`handle_ioctl`)**:
+   - Implemented `SIOCGSTAMP` (0x8906) returning `struct timeval`.
+   - Implemented `SIOCGSTAMPNS` (0x8907) returning `struct timespec`.
+
+### 3. Verification & Validation
+- Ran `./ltm /usr/sbin/ping -c 2 1.1.1.1` and `./ltm /usr/sbin/ping -c 2 google.com`:
+  - Zero warnings emitted (no `no SO_TIMESTAMP support, falling back to SIOCGSTAMP`).
+  - 100% packet delivery (0% packet loss) with accurate sub-millisecond round-trip times.
+- Automated regression suite (`./run_tests.sh`): **328 / 328 tests passed (100% pass rate)**.
+
