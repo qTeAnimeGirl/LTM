@@ -18,7 +18,7 @@ Welcome to the comprehensive tutorial for **LTM (Linux To Mac)**. This guide cov
    - [Hermetic Environment Isolation & Custom Variables](#54-hermetic-environment-isolation--custom-variables)
    - [Networking & ICMP Ping](#55-networking--icmp-ping)
 6. [Testing & Verification](#6-testing--verification)
-   - [Running the 328-Test Suite](#61-running-the-328-test-suite)
+   - [Running the 329-Test Suite](#61-running-the-329-test-suite)
    - [Running Individual Standalone Syscall Tests](#62-running-individual-standalone-syscall-tests)
    - [Running Native vs. LTM CPU Benchmarks](#63-running-native-vs-ltm-cpu-benchmarks)
 7. [Troubleshooting & Diagnostics](#7-troubleshooting--diagnostics)
@@ -251,6 +251,16 @@ With LTM, Arch Linux ARM's official `pacman 7.1.0` package manager operates nati
    ./ltm /usr/bin/pacman -Qu
    ```
 
+7. **Stale Database Lock Auto-Recovery (`--unlock`)**:
+   If an earlier pacman process was killed or interrupted unexpectedly, the ALPM database lock file `/var/lib/pacman/db.lck` can remain on disk. LTM automatically tracks active sessions; if no other LTM instance is running, you can unlock the database instantly:
+   ```bash
+   ./ltm --unlock
+   ```
+   *Output*:
+   ```text
+   [*] Successfully removed stale pacman database lock: arch_rootfs/var/lib/pacman/db.lck
+   ```
+
 ---
 
 ### 5.3 Fastfetch System Information
@@ -333,11 +343,26 @@ LTM bridges Linux network sockets directly to Darwin BSD sockets:
    ./ltm /usr/bin/wget -O - http://example.com
    ```
 
+4. **Network Interface Inspection with `ifconfig`**:
+   LTM virtualizes `/proc/net/dev` and implements `SIOCGIFCONF`, `SIOCGIFFLAGS`, `SIOCGIFADDR`, `SIOCGIFNETMASK`, and `SIOCGIFHWADDR`:
+   ```bash
+   ./ltm /usr/bin/ifconfig
+   ```
+   *Displays `eth0` and `lo` with live IP addresses, MAC addresses, MTUs, and packet counters.*
+
+5. **Netlink Routing & Interface Queries with `ip`**:
+   LTM implements an `AF_NETLINK` (`NETLINK_ROUTE`) socket translation engine responding to `RTM_GETLINK`, `RTM_GETADDR`, and `RTM_GETROUTE`:
+   ```bash
+   ./ltm /usr/bin/ip addr
+   ./ltm /usr/bin/ip link
+   ./ltm /usr/bin/ip route
+   ```
+
 ---
 
 ## 6. Testing & Verification
 
-### 6.1 Running the 328-Test Suite
+### 6.1 Running the 329-Test Suite
 
 LTM includes an automated test runner that exercises every single implemented system call and integration suite:
 ```bash
@@ -349,17 +374,17 @@ LTM includes an automated test runner that exercises every single implemented sy
 ======================================================
                    TEST SUITE SUMMARY                 
 ======================================================
-Total Tests : 328
-Passed      : 328
+Total Tests : 329
+Passed      : 329
 Failed      : 0
-ALL 328 TESTS PASSED! Translation module validated with 100% accuracy.
+ALL 329 TESTS PASSED! Translation module validated with 100% accuracy.
 ```
 
 - **316 Standalone Syscall Tests (`tests/bin/syscalls/`)**: Each Linux 6.12 system call is tested individually with the 3-Way Mandate:
   - **Case A**: Happy Path (valid descriptors/parameters, side effects confirmed).
   - **Case B**: Boundary Cases (zero-length buffers, offset limits, flags).
   - **Case C**: Error Handling (`-EBADF`, `-EFAULT`, `-EINVAL`, `-ENOENT`).
-- **12 Core Integration Suites**: `test_hello`, `test_args_env`, `test_file_io`, `test_sandbox_defense`, `test_procfs`, `test_memory`, `test_ps_procfs`, `test_wave1_syscalls`, `busybox ps`, `test_wave2_syscalls`, `test_pthreads`, `test_glibc`.
+- **13 Core Integration Suites**: `test_hello`, `test_args_env`, `test_file_io`, `test_sandbox_defense`, `test_procfs`, `test_memory`, `test_ps_procfs`, `test_wave1_syscalls`, `busybox ps`, `test_wave2_syscalls`, `test_pthreads`, `test_glibc`, `test_concurrency_stress`.
 
 ---
 
@@ -403,6 +428,16 @@ To test 8-core multi-threaded CPU scalability:
 ./scripts/run_multithread_benchmark.sh
 ```
 
+To run detailed multi-core scaling benchmarks across 1, 2, 4, and 8 threads:
+```bash
+./scripts/run_scaling_benchmark.sh
+```
+
+To run high-concurrency mutex and futex stress testing (64 threads, 320,000 operations):
+```bash
+./scripts/run_stress_benchmark.sh
+```
+
 ---
 
 ## 7. Troubleshooting & Diagnostics
@@ -441,3 +476,18 @@ stty sane
 
 ### 4. Sandbox Path Containment
 LTM strictly confines all filesystem access within the rootfs directory. Any attempt by a Linux process to access host paths like `/Library`, `/System`, `/Users`, or `/private` is intercepted and rejected with `-ENOENT` or `-EACCES`.
+
+### 5. Stale Pacman Database Lock (`db.lck`)
+If pacman was interrupted during a transaction, it displays:
+```text
+error: failed to init transaction (unable to lock database)
+error: could not lock database: File exists
+  if you're sure a package manager is not already
+  running, you can remove /var/lib/pacman/db.lck
+```
+LTM automatically detects stale locks when starting new sessions if no other LTM process is active. You can also explicitly remove stale locks anytime using:
+```bash
+./ltm --unlock
+# or
+./ltm --unlock-pacman
+```

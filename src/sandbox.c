@@ -1,5 +1,12 @@
 #include "sandbox.h"
 #include <mach/mach_host.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <net/if_dl.h>
+#include <arpa/inet.h>
+#include <ctype.h>
+#include <net/route.h>
+#include <sys/sysctl.h>
 
 static int create_mem_fd(const void *data, size_t len) {
     char tmppath[] = "/tmp/ltm_vfs_XXXXXX";
@@ -57,6 +64,9 @@ int sandbox_init(const char *rootfs_dir) {
 
     char proc_path[1024];
     snprintf(proc_path, sizeof(proc_path), "%s/proc", g_ltm.host_rootfs);
+    mkdir(proc_path, 0755);
+    chmod(proc_path, 0755);
+    snprintf(proc_path, sizeof(proc_path), "%s/proc/net", g_ltm.host_rootfs);
     mkdir(proc_path, 0755);
     chmod(proc_path, 0755);
 
@@ -125,6 +135,10 @@ bool sandbox_is_virtual_path(const char *path) {
         strcmp(path, "/proc/mounts") == 0 ||
         strcmp(path, "/proc/stat") == 0 ||
         strcmp(path, "/proc/filesystems") == 0 ||
+        strcmp(path, "/proc/net") == 0 ||
+        strcmp(path, "/proc/net/dev") == 0 ||
+        strcmp(path, "/proc/net/route") == 0 ||
+        strcmp(path, "/proc/net/arp") == 0 ||
         strcmp(path, "/proc/sys/kernel/osrelease") == 0 ||
         strcmp(path, "/proc/self") == 0 ||
         strcmp(path, "/proc/self/task") == 0 ||
@@ -200,7 +214,8 @@ int sandbox_virtual_stat(const char *path, struct stat *st) {
 
     if (strcmp(path, "/proc/self") == 0 ||
         strcmp(path, "/proc/self/task") == 0 ||
-        strcmp(path, "/proc/self/fd") == 0) {
+        strcmp(path, "/proc/self/fd") == 0 ||
+        strcmp(path, "/proc/net") == 0) {
         st->st_mode = S_IFDIR | 0555;
         st->st_nlink = 2;
         return 0;
@@ -617,6 +632,189 @@ static int open_proc_pid_file(int pid, const char *subfile) {
     return -LINUX_ENOENT;
 }
 
+static int open_proc_net_dev(void) {
+    struct ifaddrs *ifap = NULL;
+    if (getifaddrs(&ifap) != 0) {
+        return -LINUX_EIO;
+    }
+
+    char buf[4096];
+    int len = snprintf(buf, sizeof(buf),
+        "Inter-|   Receive                                                |  Transmit\n"
+        " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n");
+
+    /* First pass: lo0 -> lo */
+    for (struct ifaddrs *ifa = ifap; ifa && len < (int)sizeof(buf) - 256; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_LINK) continue;
+        if (strcmp(ifa->ifa_name, "lo0") == 0) {
+            struct if_data *ifd = (struct if_data *)ifa->ifa_data;
+            uint64_t rx_b = ifd ? ifd->ifi_ibytes : 0;
+            uint64_t rx_p = ifd ? ifd->ifi_ipackets : 0;
+            uint64_t rx_e = ifd ? ifd->ifi_ierrors : 0;
+            uint64_t rx_d = ifd ? ifd->ifi_iqdrops : 0;
+            uint64_t rx_m = ifd ? ifd->ifi_imcasts : 0;
+            uint64_t tx_b = ifd ? ifd->ifi_obytes : 0;
+            uint64_t tx_p = ifd ? ifd->ifi_opackets : 0;
+            uint64_t tx_e = ifd ? ifd->ifi_oerrors : 0;
+            uint64_t coll = ifd ? ifd->ifi_collisions : 0;
+            len += snprintf(buf + len, sizeof(buf) - len,
+                "%6s: %7llu %7llu %4llu %4llu %4llu %5llu %10llu %9llu %8llu %7llu %4llu %4llu %4llu %5llu %7llu %10llu\n",
+                "lo",
+                (unsigned long long)rx_b, (unsigned long long)rx_p,
+                (unsigned long long)rx_e, (unsigned long long)rx_d,
+                0ULL, 0ULL, 0ULL, (unsigned long long)rx_m,
+                (unsigned long long)tx_b, (unsigned long long)tx_p,
+                (unsigned long long)tx_e, 0ULL, 0ULL,
+                (unsigned long long)coll, 0ULL, 0ULL);
+            break;
+        }
+    }
+
+    /* Second pass: ethernet/WiFi interfaces (en0 -> eth0, etc.) */
+    for (struct ifaddrs *ifa = ifap; ifa && len < (int)sizeof(buf) - 256; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_LINK) continue;
+        if (strncmp(ifa->ifa_name, "en", 2) == 0 && isdigit((unsigned char)ifa->ifa_name[2])) {
+            struct if_data *ifd = (struct if_data *)ifa->ifa_data;
+            bool is_en0 = (strcmp(ifa->ifa_name, "en0") == 0);
+            if (!is_en0 && (ifa->ifa_flags & IFF_UP) == 0 && (!ifd || (ifd->ifi_ibytes == 0 && ifd->ifi_obytes == 0))) {
+                continue;
+            }
+            char lname[16];
+            snprintf(lname, sizeof(lname), "eth%s", ifa->ifa_name + 2);
+            uint64_t rx_b = ifd ? ifd->ifi_ibytes : 0;
+            uint64_t rx_p = ifd ? ifd->ifi_ipackets : 0;
+            uint64_t rx_e = ifd ? ifd->ifi_ierrors : 0;
+            uint64_t rx_d = ifd ? ifd->ifi_iqdrops : 0;
+            uint64_t rx_m = ifd ? ifd->ifi_imcasts : 0;
+            uint64_t tx_b = ifd ? ifd->ifi_obytes : 0;
+            uint64_t tx_p = ifd ? ifd->ifi_opackets : 0;
+            uint64_t tx_e = ifd ? ifd->ifi_oerrors : 0;
+            uint64_t coll = ifd ? ifd->ifi_collisions : 0;
+            len += snprintf(buf + len, sizeof(buf) - len,
+                "%6s: %7llu %7llu %4llu %4llu %4llu %5llu %10llu %9llu %8llu %7llu %4llu %4llu %4llu %5llu %7llu %10llu\n",
+                lname,
+                (unsigned long long)rx_b, (unsigned long long)rx_p,
+                (unsigned long long)rx_e, (unsigned long long)rx_d,
+                0ULL, 0ULL, 0ULL, (unsigned long long)rx_m,
+                (unsigned long long)tx_b, (unsigned long long)tx_p,
+                (unsigned long long)tx_e, 0ULL, 0ULL,
+                (unsigned long long)coll, 0ULL, 0ULL);
+        }
+    }
+
+    freeifaddrs(ifap);
+    return create_mem_fd(buf, len);
+}
+
+static int open_proc_net_route(void) {
+    char buf[4096];
+    int len = snprintf(buf, sizeof(buf),
+        "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n");
+
+    /* 1. Extract live default gateway from Darwin sysctl */
+    struct in_addr gw = {0};
+    char gw_dname[32] = {0};
+    char gw_lname[32] = {0};
+    bool has_gw = false;
+
+    int mib[6] = {CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_DUMP, 0};
+    size_t needed = 0;
+    if (sysctl(mib, 6, NULL, &needed, NULL, 0) == 0 && needed > 0) {
+        char *rtbuf = (char *)malloc(needed);
+        if (rtbuf) {
+            if (sysctl(mib, 6, rtbuf, &needed, NULL, 0) == 0) {
+                char *next = rtbuf;
+                char *lim = rtbuf + needed;
+                while (next < lim) {
+                    struct rt_msghdr *rtm = (struct rt_msghdr *)next;
+                    if (rtm->rtm_msglen == 0) break;
+                    if ((rtm->rtm_flags & RTF_GATEWAY) && (rtm->rtm_flags & RTF_UP)) {
+                        char *cp = (char *)(rtm + 1);
+                        struct sockaddr *sa_dst = NULL;
+                        struct sockaddr *sa_gw = NULL;
+                        for (int i = 0; i < RTAX_MAX; i++) {
+                            if (rtm->rtm_addrs & (1 << i)) {
+                                struct sockaddr *sa = (struct sockaddr *)cp;
+                                if (i == RTAX_DST) sa_dst = sa;
+                                else if (i == RTAX_GATEWAY) sa_gw = sa;
+                                cp += (sa->sa_len > 0 ? (1 + (((sa->sa_len) - 1) | 3)) : 4);
+                            }
+                        }
+                        if (sa_dst && sa_gw && sa_gw->sa_family == AF_INET) {
+                            struct sockaddr_in *sin_dst = (struct sockaddr_in *)sa_dst;
+                            struct sockaddr_in *sin_gw = (struct sockaddr_in *)sa_gw;
+                            if (sa_dst->sa_len == 0 || sin_dst->sin_addr.s_addr == 0) {
+                                gw = sin_gw->sin_addr;
+                                if_indextoname(rtm->rtm_index, gw_dname);
+                                has_gw = true;
+                                break;
+                            }
+                        }
+                    }
+                    next += rtm->rtm_msglen;
+                }
+            }
+            free(rtbuf);
+        }
+    }
+
+    /* Translate Darwin gw interface to Linux name (e.g. en0 -> eth0) */
+    if (has_gw) {
+        if (strcmp(gw_dname, "lo0") == 0) {
+            snprintf(gw_lname, sizeof(gw_lname), "lo");
+        } else if (strncmp(gw_dname, "en", 2) == 0 && isdigit((unsigned char)gw_dname[2])) {
+            snprintf(gw_lname, sizeof(gw_lname), "eth%s", gw_dname + 2);
+        } else {
+            snprintf(gw_lname, sizeof(gw_lname), "%s", gw_dname);
+        }
+
+        /* Default route entry */
+        len += snprintf(buf + len, sizeof(buf) - len,
+            "%s\t00000000\t%08X\t0003\t0\t0\t0\t00000000\t0\t0\t0\n",
+            gw_lname, (unsigned int)gw.s_addr);
+    }
+
+    /* 2. Subnet routes for active interfaces */
+    struct ifaddrs *ifap = NULL;
+    if (getifaddrs(&ifap) == 0) {
+        for (struct ifaddrs *ifa = ifap; ifa; ifa = ifa->ifa_next) {
+            if (!ifa->ifa_name || !ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
+            if (!(ifa->ifa_flags & IFF_UP)) continue;
+
+            char lname[32];
+            if (strcmp(ifa->ifa_name, "lo0") == 0) {
+                snprintf(lname, sizeof(lname), "lo");
+            } else if (strncmp(ifa->ifa_name, "en", 2) == 0 && isdigit((unsigned char)ifa->ifa_name[2])) {
+                snprintf(lname, sizeof(lname), "eth%s", ifa->ifa_name + 2);
+            } else {
+                continue;
+            }
+
+            struct sockaddr_in *sin = (struct sockaddr_in *)ifa->ifa_addr;
+            struct in_addr mask = {0};
+            if (ifa->ifa_netmask) {
+                mask = ((struct sockaddr_in *)ifa->ifa_netmask)->sin_addr;
+            }
+            struct in_addr dest;
+            dest.s_addr = sin->sin_addr.s_addr & mask.s_addr;
+
+            len += snprintf(buf + len, sizeof(buf) - len,
+                "%s\t%08X\t00000000\t0001\t0\t0\t0\t%08X\t0\t0\t0\n",
+                lname, (unsigned int)dest.s_addr, (unsigned int)mask.s_addr);
+        }
+        freeifaddrs(ifap);
+    }
+
+    return create_mem_fd(buf, len);
+}
+
+static int open_proc_net_arp(void) {
+    char buf[512];
+    int len = snprintf(buf, sizeof(buf),
+        "IP address       HW type     Flags       HW address            Mask     Device\n");
+    return create_mem_fd(buf, len);
+}
+
 int sandbox_open_virtual(const char *path, int flags, mode_t mode) {
     (void)flags;
     (void)mode;
@@ -697,6 +895,20 @@ int sandbox_open_virtual(const char *path, int flags, mode_t mode) {
         const char *rel = LTM_KERNEL_VERSION_NAME "\n";
         return create_mem_fd(rel, strlen(rel));
     }
+    if (strcmp(path, "/proc/net") == 0) {
+        char host_dir[1024];
+        snprintf(host_dir, sizeof(host_dir), "%s/proc/net", g_ltm.host_rootfs);
+        mkdir(host_dir, 0755);
+        int dflags = O_RDONLY;
+        if (flags & O_DIRECTORY) dflags |= O_DIRECTORY;
+        int fd = open(host_dir, dflags, mode);
+        if (fd < 0) fd = open(host_dir, O_RDONLY);
+        return fd >= 0 ? fd : -LINUX_ENOENT;
+    }
+    if (strcmp(path, "/proc/net/dev") == 0) return open_proc_net_dev();
+    if (strcmp(path, "/proc/net/route") == 0) return open_proc_net_route();
+    if (strcmp(path, "/proc/net/arp") == 0) return open_proc_net_arp();
+
     if (strcmp(path, "/proc/self/cmdline") == 0) return open_proc_cmdline();
     if (strcmp(path, "/proc/self/maps") == 0) return open_proc_maps();
     if (strcmp(path, "/proc/self/exe") == 0) {

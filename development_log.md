@@ -3164,3 +3164,54 @@ During fresh install validation in an empty directory (`./ltm /usr/bin/bash`), t
   - 100% packet delivery (0% packet loss) with accurate sub-millisecond round-trip times.
 - Automated regression suite (`./run_tests.sh`): **328 / 328 tests passed (100% pass rate)**.
 
+---
+
+## [Sprint 17: Full Glibc Compatibility, Netlink Routing Engine (ip/ifconfig), & Pacman Stale Lock Healing]
+
+**Date**: 2026-10-15  
+**Author**: Engineering Swarm (Lead Architect, Glibc Specialist, Networking Specialist, Benchmark Engineer, Rootfs Auditor)  
+**Status**: Completed, 100% Validated (329/329 Tests Passing), Live Pacman & Netlink Certified  
+
+### 1. Root Cause Analyses & Resolutions
+
+#### A. Glibc Dynamic Linker Assertion (`Assertion 'r_state == RT_CONSISTENT' failed!`)
+- **Symptom**: Multi-threaded `pacman -S fastfetch` using `libcurl` crashed with `Inconsistency detected by ld.so: dl-open.c: 948: _dl_open: Assertion 'r_state == RT_CONSISTENT' failed!`.
+- **Root Cause**: An off-by-one concurrency defect in `ltm_allocate_tid()` caused parallel worker threads to receive duplicate Thread IDs (TIDs). Glibc's internal recursive mutex (`GL(dl_load_lock)`) checks lock ownership via thread ID; duplicate TIDs caused Glibc to assume another thread was the same thread recursively acquiring the lock, completely bypassing mutual exclusion and corrupting dynamic linker state.
+- **Resolution**:
+  1. Updated `ltm_allocate_tid` to assign strictly unique, monotonically increasing TIDs using atomic addition.
+  2. Updated `ltm_set_guest_tls` to write directly to Apple Silicon hardware `tpidr_el0` (`msr tpidr_el0, Xt`), ensuring seamless 1-cycle TLS access for dynamic resolvers.
+  3. Expanded futex hash buckets to 256, initialized with `pthread_once`, and translated `CLOCK_MONOTONIC` absolute timeouts in `FUTEX_WAIT_BITSET` to Darwin `CLOCK_REALTIME` deadlines.
+  4. Updated `ltm_thread_entry` to preserve inherited signal masks from the creator thread while selectively unblocking `SIGTRAP`.
+
+#### B. Network Inspection Tool Failures (`ifconfig` & `ip -a`)
+- **Symptoms**:
+  - `ifconfig`: `cannot open /proc/net/dev`, `SIOCGIFCONF: Inappropriate ioctl for device`.
+  - `ip -a` / `ip link` / `ip route`: `Cannot open netlink socket: Address family not supported by protocol`.
+- **Resolution**:
+  1. Added virtual `/proc/net/dev`, `/proc/net/route`, and `/proc/net/arp` in `src/sandbox.c` dynamically populated from Darwin `getifaddrs()` and sysctl routing tables.
+  2. Implemented network interface ioctls in `handle_ioctl`: `SIOCGIFCONF` (0x8912), `SIOCGIFFLAGS` (0x8913), `SIOCGIFADDR` (0x8915), `SIOCGIFNETMASK` (0x891b), `SIOCGIFBRDADDR` (0x8919), `SIOCGIFHWADDR` (0x8927), `SIOCGIFMTU` (0x8921), `SIOCGIFINDEX` (0x8933).
+  3. Implemented full `AF_NETLINK` (domain 16) / `NETLINK_ROUTE` socket subsystem:
+     - Handles `RTM_GETLINK`, `RTM_GETADDR`, and `RTM_GETROUTE`.
+     - Synthesizes `struct linux_ifinfomsg`, `struct linux_ifaddrmsg`, and `struct linux_rtmsg` with standard attributes (`IFLA_IFNAME`, `IFA_ADDRESS`, `RTA_GATEWAY`).
+     - Appends `NLMSG_DONE` carrying an integer status payload (`LINUX_NLMSG_LENGTH(sizeof(int))`), satisfying `iproute2`'s strict validation and eliminating `DONE truncated` errors.
+
+#### C. Pacman Stale Database Lock Auto-Recovery & Rootfs Hardening
+- **Symptoms**: Interrupted pacman runs leave `/var/lib/pacman/db.lck` permanently preventing package operations. Package extraction warned `(Can't restore time)`.
+- **Resolution**:
+  1. Implemented session advisory file locking (`flock`) on `<rootfs>/.ltm_session.lck`. When `pacman` launches, orphaned `db.lck` files from prior dead sessions are automatically detected and cleaned up.
+  2. Added manual `--unlock` / `--unlock-pacman` CLI flags to `src/main.c`.
+  3. Added Darwin `futimens` fallback in `handle_utimensat` for empty pathnames, eliminating `touch` errors and pacman `(Can't restore time)` warnings.
+  4. Enforced POSIX sticky bits (`01777`) on `/tmp`, `/var/tmp`, and `/dev/shm`.
+  5. Added direct shebang script execution in `./ltm` CLI (e.g. `./ltm /usr/bin/locale-gen`).
+
+### 2. Verification & Validation
+- **Pacman Package Installation**: `./ltm /usr/bin/pacman -S --noconfirm fastfetch` completed with exit code 0 and zero warnings.
+- **Network Tools**:
+  - `./ltm /usr/bin/ifconfig` displays complete live interface statistics.
+  - `./ltm /usr/bin/ip addr` displays complete interface addresses and loopback.
+  - `./ltm /usr/bin/ip route` displays default gateway and subnet routes.
+- **Stress & Benchmark Suite**:
+  - `test_concurrency_stress` passed with 64 threads, 320,000 mutex lock/unlock operations (120,554 ops/sec), and 40 MB memory page stress testing.
+  - Automated regression suite (`./run_tests.sh`): **329 / 329 tests passed (100% pass rate)**.
+
+

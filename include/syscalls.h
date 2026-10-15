@@ -799,5 +799,290 @@ int64_t handle_lsm_set_self_attr(unsigned int attr, const void *ctx, size_t size
 int64_t handle_lsm_list_modules(uint64_t *ids, size_t *size, uint32_t flags);
 int64_t handle_mseal(unsigned long start, size_t len, unsigned long flags);
 
+/* Linux Network Interface ioctls and structs */
+#define LINUX_IFNAMSIZ 16
+
+#define LINUX_SIOCGIFNAME       0x8910
+#define LINUX_SIOCGIFCONF       0x8912
+#define LINUX_SIOCGIFFLAGS      0x8913
+#define LINUX_SIOCSIFFLAGS      0x8914
+#define LINUX_SIOCGIFADDR       0x8915
+#define LINUX_SIOCSIFADDR       0x8916
+#define LINUX_SIOCGIFDSTADDR    0x8917
+#define LINUX_SIOCGIFBRDADDR    0x8919
+#define LINUX_SIOCSIFBRDADDR    0x891a
+#define LINUX_SIOCGIFNETMASK    0x891b
+#define LINUX_SIOCSIFNETMASK    0x891c
+#define LINUX_SIOCGIFMETRIC     0x891d
+#define LINUX_SIOCGIFMTU        0x8921
+#define LINUX_SIOCSIFMTU        0x8922
+#define LINUX_SIOCGIFHWADDR     0x8927
+#define LINUX_SIOCGIFINDEX      0x8933
+#define LINUX_SIOCGIFTXQLEN     0x8942
+#define LINUX_SIOCSIFTXQLEN     0x8943
+
+#define LINUX_IFF_UP            0x1
+#define LINUX_IFF_BROADCAST     0x2
+#define LINUX_IFF_DEBUG         0x4
+#define LINUX_IFF_LOOPBACK      0x8
+#define LINUX_IFF_POINTOPOINT   0x10
+#define LINUX_IFF_NOTRAILERS    0x20
+#define LINUX_IFF_RUNNING       0x40
+#define LINUX_IFF_NOARP         0x80
+#define LINUX_IFF_PROMISC       0x100
+#define LINUX_IFF_ALLMULTI      0x200
+#define LINUX_IFF_MULTICAST     0x1000
+
+#define LINUX_ARPHRD_ETHER      1
+#define LINUX_ARPHRD_LOOPBACK   772
+
+struct linux_sockaddr {
+    uint16_t sa_family;
+    char     sa_data[14];
+};
+
+struct linux_ifmap {
+    uint64_t mem_start;
+    uint64_t mem_end;
+    uint16_t base_addr;
+    uint8_t  irq;
+    uint8_t  dma;
+    uint8_t  port;
+    uint8_t  pad[3];
+};
+
+/* Undefine Darwin BSD network macros that conflict with Linux struct members */
+#undef ifr_addr
+#undef ifr_dstaddr
+#undef ifr_broadaddr
+#undef ifr_netmask
+#undef ifr_flags
+#undef ifr_metric
+#undef ifr_mtu
+#undef ifr_map
+#undef ifr_slave
+#undef ifr_data
+#undef ifr_ifindex
+#undef ifr_bandwidth
+#undef ifr_qlen
+#undef ifr_newname
+#undef ifc_buf
+#undef ifc_req
+
+struct linux_ifreq {
+    char ifr_name[LINUX_IFNAMSIZ];
+    union {
+        struct linux_sockaddr ifru_addr;
+        struct linux_sockaddr ifru_dstaddr;
+        struct linux_sockaddr ifru_broadaddr;
+        struct linux_sockaddr ifru_netmask;
+        struct linux_sockaddr ifru_hwaddr;
+        int16_t ifru_flags;
+        int32_t ifru_ivalue;
+        int32_t ifru_mtu;
+        struct linux_ifmap ifru_map;
+        char ifru_slave[LINUX_IFNAMSIZ];
+        char ifru_newname[LINUX_IFNAMSIZ];
+        void *ifru_data;
+    } ifr_ifru;
+};
+
+struct linux_ifconf {
+    int32_t ifc_len;
+    int32_t _pad;
+    union {
+        char *ifcu_buf;
+        struct linux_ifreq *ifcu_req;
+    } ifc_ifcu;
+};
+
+/* Linux Netlink definitions */
+#define LINUX_AF_NETLINK        16
+#define LINUX_NETLINK_ROUTE     0
+#define LINUX_SOL_NETLINK       270
+
+#define LINUX_NLMSG_NOOP        1
+#define LINUX_NLMSG_ERROR       2
+#define LINUX_NLMSG_DONE        3
+
+#define LINUX_NLM_F_REQUEST     0x01
+#define LINUX_NLM_F_MULTI       0x02
+#define LINUX_NLM_F_ACK         0x04
+#define LINUX_NLM_F_ROOT        0x100
+#define LINUX_NLM_F_MATCH       0x200
+#define LINUX_NLM_F_DUMP        (LINUX_NLM_F_ROOT | LINUX_NLM_F_MATCH)
+
+#define LINUX_RTM_BASE          16
+#define LINUX_RTM_NEWLINK       16
+#define LINUX_RTM_DELLINK       17
+#define LINUX_RTM_GETLINK       18
+#define LINUX_RTM_SETLINK       19
+#define LINUX_RTM_NEWADDR       20
+#define LINUX_RTM_DELADDR       21
+#define LINUX_RTM_GETADDR       22
+#define LINUX_RTM_NEWROUTE      24
+#define LINUX_RTM_DELROUTE      25
+#define LINUX_RTM_GETROUTE      26
+#define LINUX_RTM_GETNEIGH      30
+
+#define LINUX_IFLA_UNSPEC       0
+#define LINUX_IFLA_ADDRESS      1
+#define LINUX_IFLA_BROADCAST    2
+#define LINUX_IFLA_IFNAME       3
+#define LINUX_IFLA_MTU          4
+#define LINUX_IFLA_LINK         5
+#define LINUX_IFLA_QDISC        6
+#define LINUX_IFLA_STATS        7
+#define LINUX_IFLA_TXQLEN       13
+#define LINUX_IFLA_OPERSTATE    16
+#define LINUX_IFLA_LINKMODE     17
+#define LINUX_IFLA_STATS64      23
+
+#define LINUX_IFA_UNSPEC        0
+#define LINUX_IFA_ADDRESS       1
+#define LINUX_IFA_LOCAL         2
+#define LINUX_IFA_LABEL         3
+#define LINUX_IFA_BROADCAST     4
+#define LINUX_IFA_FLAGS         8
+#define LINUX_IFA_CACHEINFO     6
+
+#define LINUX_RTA_UNSPEC        0
+#define LINUX_RTA_DST           1
+#define LINUX_RTA_SRC           2
+#define LINUX_RTA_IIF           3
+#define LINUX_RTA_OIF           4
+#define LINUX_RTA_GATEWAY       5
+#define LINUX_RTA_PRIORITY      6
+#define LINUX_RTA_PREFSRC       7
+#define LINUX_RTA_METRICS       8
+#define LINUX_RTA_MULTIPATH     9
+#define LINUX_RTA_PROTOINFO     10
+#define LINUX_RTA_FLOW          11
+#define LINUX_RTA_CACHEINFO     12
+#define LINUX_RTA_TABLE         15
+
+#define LINUX_RTN_UNICAST       1
+#define LINUX_RTPROT_KERNEL     2
+#define LINUX_RTPROT_BOOT       3
+#define LINUX_RT_SCOPE_UNIVERSE 0
+#define LINUX_RT_SCOPE_SITE     200
+#define LINUX_RT_SCOPE_LINK     253
+#define LINUX_RT_SCOPE_HOST     254
+#define LINUX_RT_TABLE_MAIN     254
+
+#define LINUX_MSG_OOB           0x0001
+#define LINUX_MSG_PEEK          0x0002
+#define LINUX_MSG_DONTROUTE     0x0004
+#define LINUX_MSG_CTRUNC        0x0008
+#define LINUX_MSG_PROXY         0x0010
+#define LINUX_MSG_TRUNC         0x0020
+#define LINUX_MSG_DONTWAIT      0x0040
+#define LINUX_MSG_EOR           0x0080
+#define LINUX_MSG_WAITALL       0x0100
+
+#define LINUX_NLMSG_ALIGNTO     4U
+#define LINUX_NLMSG_ALIGN(len)  (((len) + LINUX_NLMSG_ALIGNTO - 1) & ~(LINUX_NLMSG_ALIGNTO - 1))
+#define LINUX_NLMSG_HDRLEN      ((int)LINUX_NLMSG_ALIGN(sizeof(struct linux_nlmsghdr)))
+#define LINUX_NLMSG_LENGTH(len) ((len) + LINUX_NLMSG_HDRLEN)
+#define LINUX_NLMSG_DATA(nlh)   ((void *)(((char *)(nlh)) + LINUX_NLMSG_HDRLEN))
+
+#define LINUX_RTA_ALIGNTO       4U
+#define LINUX_RTA_ALIGN(len)    (((len) + LINUX_RTA_ALIGNTO - 1) & ~(LINUX_RTA_ALIGNTO - 1))
+#define LINUX_RTA_LENGTH(len)   (LINUX_RTA_ALIGN(sizeof(struct linux_rtattr)) + (len))
+#define LINUX_RTA_DATA(rta)     ((void *)(((char *)(rta)) + LINUX_RTA_LENGTH(0)))
+
+struct linux_sockaddr_nl {
+    uint16_t nl_family;
+    uint16_t nl_pad;
+    uint32_t nl_pid;
+    uint32_t nl_groups;
+};
+
+struct linux_nlmsghdr {
+    uint32_t nlmsg_len;
+    uint16_t nlmsg_type;
+    uint16_t nlmsg_flags;
+    uint32_t nlmsg_seq;
+    uint32_t nlmsg_pid;
+};
+
+struct linux_nlmsgerr {
+    int32_t  error;
+    struct linux_nlmsghdr msg;
+};
+
+struct linux_ifinfomsg {
+    uint8_t  ifi_family;
+    uint8_t  __ifi_pad;
+    uint16_t ifi_type;
+    int32_t  ifi_index;
+    uint32_t ifi_flags;
+    uint32_t ifi_change;
+};
+
+struct linux_ifaddrmsg {
+    uint8_t  ifa_family;
+    uint8_t  ifa_prefixlen;
+    uint8_t  ifa_flags;
+    uint8_t  ifa_scope;
+    uint32_t ifa_index;
+};
+
+struct linux_ifa_cacheinfo {
+    uint32_t ifa_prefered;
+    uint32_t ifa_valid;
+    uint32_t cstamp;
+    uint32_t tstamp;
+};
+
+struct linux_rtmsg {
+    uint8_t  rtm_family;
+    uint8_t  rtm_dst_len;
+    uint8_t  rtm_src_len;
+    uint8_t  rtm_tos;
+    uint8_t  rtm_table;
+    uint8_t  rtm_protocol;
+    uint8_t  rtm_scope;
+    uint8_t  rtm_type;
+    uint32_t rtm_flags;
+};
+
+struct linux_rtattr {
+    uint16_t rta_len;
+    uint16_t rta_type;
+};
+
+struct linux_rtnl_link_stats {
+    uint32_t rx_packets;
+    uint32_t tx_packets;
+    uint32_t rx_bytes;
+    uint32_t tx_bytes;
+    uint32_t rx_errors;
+    uint32_t tx_errors;
+    uint32_t rx_dropped;
+    uint32_t tx_dropped;
+    uint32_t multicast;
+    uint32_t collisions;
+    uint32_t rx_length_errors;
+    uint32_t rx_over_errors;
+    uint32_t rx_crc_errors;
+    uint32_t rx_frame_errors;
+    uint32_t rx_fifo_errors;
+    uint32_t rx_missed_errors;
+    uint32_t tx_aborted_errors;
+    uint32_t tx_carrier_errors;
+    uint32_t tx_fifo_errors;
+    uint32_t tx_heartbeat_errors;
+    uint32_t tx_window_errors;
+    uint32_t rx_compressed;
+    uint32_t tx_compressed;
+    uint32_t rx_nohandler;
+};
+
+void ltm_netlink_close(int fd);
+bool ltm_netlink_is_netlink(int fd);
+int64_t ltm_netlink_recvmsg(int fd, void *msg, int flags);
+int64_t ltm_netlink_recvfrom(int fd, void *buf, size_t len, int flags, void *src_addr, socklen_t *addrlen);
+
 #endif /* SYSCALLS_H */
 

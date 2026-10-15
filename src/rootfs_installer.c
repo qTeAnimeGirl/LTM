@@ -75,10 +75,12 @@ static void setup_vfs_nodes(const char *rootfs_dir) {
 
     snprintf(path, sizeof(path), "%s/dev", rootfs_dir); ensure_dir(path, 0755);
     snprintf(path, sizeof(path), "%s/dev/pts", rootfs_dir); ensure_dir(path, 0755);
-    snprintf(path, sizeof(path), "%s/dev/shm", rootfs_dir); ensure_dir(path, 0755);
+    snprintf(path, sizeof(path), "%s/dev/shm", rootfs_dir); ensure_dir(path, 01777);
 
+    snprintf(path, sizeof(path), "%s/run", rootfs_dir); ensure_dir(path, 0755);
     snprintf(path, sizeof(path), "%s/root", rootfs_dir); ensure_dir(path, 0700);
-    snprintf(path, sizeof(path), "%s/tmp", rootfs_dir); ensure_dir(path, 0777);
+    snprintf(path, sizeof(path), "%s/tmp", rootfs_dir); ensure_dir(path, 01777);
+    snprintf(path, sizeof(path), "%s/var/tmp", rootfs_dir); ensure_dir(path, 01777);
 
     /* Stub files for /proc */
     snprintf(path, sizeof(path), "%s/proc/cpuinfo", rootfs_dir); touch_file(path);

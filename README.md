@@ -5,7 +5,7 @@
 [![Guest](https://img.shields.io/badge/Guest-Linux%20ARM64%20(AArch64)-orange.svg)]()
 [![Kernel](https://img.shields.io/badge/Kernel-LTM%202026.1A-blueviolet.svg)]()
 [![Syscalls](https://img.shields.io/badge/Syscalls-316%2F316%20Implemented%20(100%25)-brightgreen.svg)](docs/SYSCALLS.md)
-[![Tests](https://img.shields.io/badge/Tests-328%2F328%20Passing%20(100%25)-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-329%2F329%20Passing%20(100%25)-brightgreen.svg)]()
 
 **LTM (Linux To Mac)** is an ultra-high-performance userspace translation runtime that executes **unmodified Linux ARM64 (AArch64) ELF binaries natively on macOS Apple Silicon** (Darwin ARM64 / M1, M2, M3, M4) without CPU emulation or virtual machines.
 
@@ -17,14 +17,14 @@ Because Apple Silicon and 64-bit Linux ARM64 share the exact same AArch64 instru
 
 - **🚀 100% Native Speed (0% CPU Emulation)**: Runs 64-bit Linux ARM64 instructions directly on bare-metal Apple Silicon CPU cores with zero binary translation or JIT compilation penalty.
 - **📦 316 of 316 Linux ARM64 Syscalls Implemented (100.0%)**: Comprehensive coverage of every single official system call in Linux 6.12 LTS, including modern features like `io_uring`, `pidfd`, `landlock`, `mseal`, `futex_waitv`, and `statmount`. See **[docs/SYSCALLS.md](docs/SYSCALLS.md)** for the complete matrix.
-- **🐧 Official Arch Linux ARM & Pacman 7.1.0**: Runs an unmodified Arch Linux ARM userspace out of the box (`arch_rootfs`). Features fully operational `pacman` database synchronization (`pacman -Sy`), package search (`pacman -Ss`), and metadata inspection (`pacman -Si`).
+- **🐧 Official Arch Linux ARM & Pacman 7.1.0**: Runs an unmodified Arch Linux ARM userspace out of the box (`arch_rootfs`). Features fully operational `pacman` database synchronization (`pacman -Sy`), package search (`pacman -Ss`), package installation (`pacman -S <pkg>`), and automatic stale database lock recovery (`--unlock`).
 - **🛡️ Strict Environment Isolation**: Automatically isolates the guest from macOS host environment parameters (clearing Darwin `DYLD_*`, `Apple_*`, host paths, and user settings). Supports custom `-e KEY=VAL` / `--env KEY=VAL` injection and `--preserve-env`.
-- **⚡ Dynamic ELF Linker & Glibc Compatibility**: Seamlessly loads GNU Dynamic Linkers (`ld-linux-aarch64.so.1`) and Musl linkers (`ld-musl-aarch64.so.1`), initializing the Linux Auxiliary Vector (`AT_PHDR`, `AT_BASE`, `AT_ENTRY`, `AT_RANDOM`, `AT_PAGESZ=16384`) strictly conforming to the Linux ARM64 ABI.
-- **🧵 Full Multi-Threading Architecture**: Mappings for `clone(CLONE_THREAD)` to Darwin `pthread_create()`, per-thread virtualized Thread-Local Storage (`TPIDR_EL0`), independent 1MB alternate signal stacks, and futex synchronization (`futex_wake`, `futex_wait`).
+- **⚡ Dynamic ELF Linker & Glibc Compatibility**: Seamlessly loads GNU Dynamic Linkers (`ld-linux-aarch64.so.1`) and Musl linkers (`ld-musl-aarch64.so.1`), initializing the Linux Auxiliary Vector (`AT_PHDR`, `AT_BASE`, `AT_ENTRY`, `AT_RANDOM`, `AT_PAGESZ=16384`) strictly conforming to the Linux ARM64 ABI. Monotonic thread ID allocation and hardware `TPIDR_EL0` synchronization guarantee flawless multi-threaded `dlopen()` operation.
+- **🧵 Full Multi-Threading Architecture**: Mappings for `clone(CLONE_THREAD)` to Darwin `pthread_create()`, per-thread virtualized Thread-Local Storage (`TPIDR_EL0`), independent 1MB alternate signal stacks, and 256-bucket hash-partitioned futex synchronization (`futex_wake`, `futex_wait`).
 - **🔒 Darwin XNU x18 Platform Register Preservation**: Automatically tags the Mach-O binary with macOS 12.3.0 SDK target, instructing Darwin XNU kernel scheduler to preserve register `x18` across timer interrupts and thread preemptions.
-- **🌐 Full POSIX Socket Networking & ICMP Ping**: TCP, UDP, and Unix domain sockets, DNS resolution, and automated 20-byte Darwin IPv4 header stripping on ICMP datagrams for seamless `ping` execution with 0% packet loss.
+- **🌐 Full POSIX Socket Networking, Netlink, & ICMP Ping**: TCP, UDP, Unix domain sockets, and `AF_NETLINK` (`NETLINK_ROUTE`) sockets powering `ip addr`, `ip link`, `ip route`, and `ifconfig` alongside DNS resolution and automated 20-byte Darwin IPv4 header stripping on ICMP datagrams for seamless `ping` execution with 0% packet loss.
 - **⏱️ Real-Time Signal Delivery Engine**: Intercepts Linux signals (`rt_sigaction` / `rt_sigreturn`), pushes structured signal frames to guest stacks, and restores execution via custom assembly restorer trampolines (`_ltm_sigreturn_stub`).
-- **📂 Hermetic Chroot Sandbox & Live Telemetry**: Strict path containment inside the container rootfs. Virtual `/proc` and `/sys` engines deliver live Apple Silicon telemetry (CPU model, core count, Mach VM RAM, uptime, and load average) without hardcoded strings.
+- **📂 Hermetic Chroot Sandbox & Live Telemetry**: Strict path containment inside the container rootfs. Virtual `/proc` (including `/proc/net/dev`, `/proc/net/route`) and `/sys` engines deliver live Apple Silicon telemetry (CPU model, core count, Mach VM RAM, uptime, and load average) without hardcoded strings.
 - **🖥️ Full Interactive TTY & GNU Readline**: Seamlessly bridges Linux 36-byte / 44-byte `termios2` ioctls with Darwin 72-byte termios, delivering interactive shells (`/bin/bash`, `/bin/sh`) with syntax highlighting, line-editing, and job control.
 - **📥 Automatic Rootfs Downloader**: If the root filesystem (`arch_rootfs`) is missing or incomplete, LTM automatically downloads and unpacks the official Arch Linux ARM rootfs archive.
 
@@ -89,9 +89,17 @@ Because LTM runs the official unmodified Arch Linux ARM base rootfs, you can ins
 ./ltm /usr/bin/fastfetch
 ```
 
-### 4. POSIX Networking & ICMP Ping
+### 4. POSIX Networking, Interface Inspection, & ICMP Ping
 ```bash
+# ICMP ping with automated Darwin IPv4 header stripping
 ./ltm /usr/sbin/ping -c 3 google.com
+
+# Inspect network interfaces via SIOCGIFCONF and virtual /proc/net/dev
+./ltm /usr/bin/ifconfig
+
+# Query IP addresses and routes via Netlink sockets (AF_NETLINK)
+./ltm /usr/bin/ip addr
+./ltm /usr/bin/ip route
 ```
 
 ### 5. Pass Custom Environment Variables
@@ -103,7 +111,7 @@ Because LTM runs the official unmodified Arch Linux ARM base rootfs, you can ins
 ```bash
 ./run_tests.sh
 ```
-*(Runs all 316 per-syscall unit tests and 12 core integration test suites with 100% pass rate).*
+*(Runs all 316 per-syscall unit tests and 13 core integration test suites with 100% pass rate: 329 / 329 tests).*
 
 ---
 
@@ -120,6 +128,7 @@ Options:
   -e, --env <KEY=VAL>        Set environment variable in guest (can be specified multiple times)
       --preserve-env         Inherit host environment variables (default: isolated clean env)
   -i, --install-rootfs [type] Automatically download & install rootfs ('arch' [default] or 'alpine')
+      --unlock               Remove stale pacman database lock (/var/lib/pacman/db.lck)
   -v, --verbose              Enable verbose debug logging (or set LTM_DEBUG=1)
   -s, --strace               Enable syscall tracing (or set LTM_STRACE=1)
   -h, --help                 Display this help message and exit
@@ -127,6 +136,9 @@ Options:
 Examples:
   ./ltm /bin/bash
   ./ltm /usr/bin/pacman -Sy
+  ./ltm /usr/bin/ifconfig
+  ./ltm /usr/bin/ip addr
+  ./ltm --unlock
   ./ltm -e FOO=BAR /bin/sh -c 'echo $FOO'
   ./ltm --alpine /usr/bin/fastfetch
   ./ltm --install-rootfs arch

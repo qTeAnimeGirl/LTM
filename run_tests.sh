@@ -192,6 +192,9 @@ run_single_test "test_pthreads" "test_pthreads passed!"
 # Run Glibc dynamic loader and runtime test suite (Step 2)
 run_single_test "test_glibc" "100% Glibc dynamic loader and runtime compatibility verified!"
 
+# Run multi-threaded concurrency stress test suite
+run_single_test "test_concurrency_stress" "Concurrency Stress Test PASSED"
+
 # Run standalone syscall test binaries (Sprint 10)
 if [ -d "$BIN_DIR/syscalls" ]; then
     for sys_bin in "$BIN_DIR/syscalls"/test_sys_*; do

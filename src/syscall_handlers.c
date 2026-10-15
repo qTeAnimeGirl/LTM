@@ -17,6 +17,13 @@
 #include <sys/sem.h>
 #include <sys/shm.h>
 #include <stdatomic.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <net/if_dl.h>
+#include <arpa/inet.h>
+#include <ctype.h>
+#include <net/route.h>
+#include <sys/sysctl.h>
 
 #define LTM_MAX_THREADS 256
 
@@ -43,6 +50,7 @@ uintptr_t ltm_get_guest_tls(void) {
 void ltm_set_guest_tls(uintptr_t val) {
     s_guest_tls = val;
     g_ltm.guest_tls = val;
+    __asm__ volatile("msr tpidr_el0, %0" : : "r"(val));
 }
 
 int *ltm_get_child_tid_ptr(void) {
@@ -65,9 +73,7 @@ void ltm_set_thread_tid(int tid) {
 
 static int ltm_allocate_tid(void) {
     int expected = 0;
-    if (atomic_compare_exchange_strong(&g_next_thread_tid, &expected, getpid() + 1)) {
-        return getpid() + 1;
-    }
+    atomic_compare_exchange_strong(&g_next_thread_tid, &expected, getpid() + 1);
     return atomic_fetch_add(&g_next_thread_tid, 1);
 }
 
@@ -78,15 +84,22 @@ typedef struct {
     bool initialized;
 } futex_bucket_t;
 
-#define FUTEX_BUCKETS 64
+#define FUTEX_BUCKETS 256
 static futex_bucket_t g_futex_table[FUTEX_BUCKETS];
+static pthread_once_t g_futex_init_once = PTHREAD_ONCE_INIT;
 
-static void init_futex_bucket(futex_bucket_t *b) {
-    if (!b->initialized) {
-        pthread_mutex_init(&b->mutex, NULL);
-        pthread_cond_init(&b->cond, NULL);
-        b->initialized = true;
+static void init_all_futex_buckets(void) {
+    for (int i = 0; i < FUTEX_BUCKETS; i++) {
+        pthread_mutex_init(&g_futex_table[i].mutex, NULL);
+        pthread_cond_init(&g_futex_table[i].cond, NULL);
+        g_futex_table[i].initialized = true;
     }
+}
+
+static inline futex_bucket_t *get_futex_bucket(uint32_t *uaddr) {
+    pthread_once(&g_futex_init_once, init_all_futex_buckets);
+    uint32_t bucket_idx = ((uintptr_t)uaddr >> 2) % FUTEX_BUCKETS;
+    return &g_futex_table[bucket_idx];
 }
 
 /* Directory descriptor cache for getdents64 */
@@ -145,9 +158,18 @@ static bool ltm_eventfd_is_eventfd(int fd) {
     return ltm_eventfd_get_write_fd(fd) >= 0;
 }
 
+bool ltm_netlink_is_netlink(int fd);
+void ltm_netlink_close(int fd);
+ssize_t ltm_netlink_handle_send(int fd, const void *buf, size_t len);
+
 /* File I/O */
 int64_t handle_read(int fd, void *buf, size_t count) {
     if (count > 0 && !buf) return -LINUX_EFAULT;
+    if (ltm_netlink_is_netlink(fd)) {
+        ssize_t r = recv(fd, buf, count, 0);
+        if (r < 0) return darwin_to_linux_errno(errno);
+        return r;
+    }
     if (ltm_eventfd_is_eventfd(fd)) {
         if (count < sizeof(uint64_t)) return -LINUX_EINVAL;
     }
@@ -158,6 +180,9 @@ int64_t handle_read(int fd, void *buf, size_t count) {
 
 int64_t handle_write(int fd, const void *buf, size_t count) {
     if (count > 0 && !buf) return -LINUX_EFAULT;
+    if (ltm_netlink_is_netlink(fd)) {
+        return ltm_netlink_handle_send(fd, buf, count);
+    }
     int ev_wfd = ltm_eventfd_get_write_fd(fd);
     if (ev_wfd >= 0) {
         if (count < sizeof(uint64_t)) return -LINUX_EINVAL;
@@ -314,6 +339,7 @@ int64_t handle_close(int fd) {
     ltm_eventfd_close(fd);
     ltm_pidfd_close(fd);
     ltm_mq_close(fd);
+    ltm_netlink_close(fd);
     int ret = close(fd);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return 0;
@@ -677,6 +703,168 @@ static void copy_linux_to_darwin_termios2(const struct linux_termios2 *l2, struc
     if (l2->c_ospeed) cfsetospeed(d, (speed_t)l2->c_ospeed);
 }
 
+typedef struct {
+    char linux_name[LINUX_IFNAMSIZ];
+    char darwin_name[32];
+    int ifindex;
+    short flags;          /* Linux flags */
+    uint32_t mtu;
+    bool has_ipv4;
+    struct in_addr ip;
+    struct in_addr netmask;
+    struct in_addr broadcast;
+    bool has_mac;
+    unsigned char mac[6];
+    uint16_t arphdr_type;
+    uint64_t rx_bytes;
+    uint64_t rx_packets;
+    uint64_t rx_errors;
+    uint64_t rx_dropped;
+    uint64_t tx_bytes;
+    uint64_t tx_packets;
+    uint64_t tx_errors;
+    uint64_t tx_dropped;
+    uint64_t collisions;
+    uint64_t multicast;
+} ltm_netif_info_t;
+
+static void linux_to_darwin_ifname(const char *linux_name, char *darwin_name, size_t maxlen) {
+    if (!linux_name || !darwin_name || maxlen == 0) return;
+    if (strcmp(linux_name, "lo") == 0) {
+        snprintf(darwin_name, maxlen, "lo0");
+        return;
+    }
+    if (strncmp(linux_name, "eth", 3) == 0 && isdigit((unsigned char)linux_name[3])) {
+        snprintf(darwin_name, maxlen, "en%s", linux_name + 3);
+        return;
+    }
+    snprintf(darwin_name, maxlen, "%s", linux_name);
+}
+
+static void darwin_to_linux_ifname(const char *darwin_name, char *linux_name, size_t maxlen) {
+    if (!darwin_name || !linux_name || maxlen == 0) return;
+    if (strcmp(darwin_name, "lo0") == 0) {
+        snprintf(linux_name, maxlen, "lo");
+        return;
+    }
+    if (strncmp(darwin_name, "en", 2) == 0 && isdigit((unsigned char)darwin_name[2])) {
+        snprintf(linux_name, maxlen, "eth%s", darwin_name + 2);
+        return;
+    }
+    snprintf(linux_name, maxlen, "%s", darwin_name);
+}
+
+static short darwin_to_linux_if_flags(unsigned int dflags) {
+    short lflags = 0;
+    if (dflags & IFF_UP)          lflags |= LINUX_IFF_UP;
+    if (dflags & IFF_BROADCAST)   lflags |= LINUX_IFF_BROADCAST;
+    if (dflags & IFF_DEBUG)       lflags |= LINUX_IFF_DEBUG;
+    if (dflags & IFF_LOOPBACK)    lflags |= LINUX_IFF_LOOPBACK;
+    if (dflags & IFF_POINTOPOINT) lflags |= LINUX_IFF_POINTOPOINT;
+    if (dflags & IFF_RUNNING)     lflags |= LINUX_IFF_RUNNING;
+    if (dflags & IFF_NOARP)       lflags |= LINUX_IFF_NOARP;
+    if (dflags & IFF_PROMISC)     lflags |= LINUX_IFF_PROMISC;
+    if (dflags & IFF_ALLMULTI)    lflags |= LINUX_IFF_ALLMULTI;
+    if (dflags & 0x8000 /* Darwin IFF_MULTICAST */) lflags |= LINUX_IFF_MULTICAST;
+    return lflags;
+}
+
+static int ltm_collect_netifs(ltm_netif_info_t *out, int max_entries) {
+    struct ifaddrs *ifap = NULL;
+    if (getifaddrs(&ifap) != 0) return 0;
+
+    int count = 0;
+
+    for (struct ifaddrs *ifa = ifap; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_name) continue;
+
+        char lname[LINUX_IFNAMSIZ];
+        darwin_to_linux_ifname(ifa->ifa_name, lname, sizeof(lname));
+
+        bool is_lo = (strcmp(ifa->ifa_name, "lo0") == 0);
+        bool is_en = (strncmp(ifa->ifa_name, "en", 2) == 0 && isdigit((unsigned char)ifa->ifa_name[2]));
+        if (!is_lo && !is_en) continue;
+
+        int idx = -1;
+        for (int i = 0; i < count; i++) {
+            if (strcmp(out[i].linux_name, lname) == 0) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx < 0) {
+            if (count >= max_entries) continue;
+            idx = count++;
+            memset(&out[idx], 0, sizeof(ltm_netif_info_t));
+            strncpy(out[idx].linux_name, lname, sizeof(out[idx].linux_name) - 1);
+            strncpy(out[idx].darwin_name, ifa->ifa_name, sizeof(out[idx].darwin_name) - 1);
+            out[idx].ifindex = count;
+            if (is_lo) {
+                out[idx].arphdr_type = LINUX_ARPHRD_LOOPBACK;
+                out[idx].mtu = 65536;
+            } else {
+                out[idx].arphdr_type = LINUX_ARPHRD_ETHER;
+                out[idx].mtu = 1500;
+            }
+        }
+
+        if (ifa->ifa_flags) {
+            out[idx].flags = darwin_to_linux_if_flags(ifa->ifa_flags);
+        }
+
+        if (ifa->ifa_addr) {
+            if (ifa->ifa_addr->sa_family == AF_INET) {
+                struct sockaddr_in *sin = (struct sockaddr_in *)ifa->ifa_addr;
+                out[idx].has_ipv4 = true;
+                out[idx].ip = sin->sin_addr;
+                if (ifa->ifa_netmask) {
+                    struct sockaddr_in *m = (struct sockaddr_in *)ifa->ifa_netmask;
+                    out[idx].netmask = m->sin_addr;
+                }
+                if (ifa->ifa_dstaddr) {
+                    struct sockaddr_in *b = (struct sockaddr_in *)ifa->ifa_dstaddr;
+                    out[idx].broadcast = b->sin_addr;
+                } else if (out[idx].netmask.s_addr != 0) {
+                    out[idx].broadcast.s_addr = out[idx].ip.s_addr | ~out[idx].netmask.s_addr;
+                }
+            } else if (ifa->ifa_addr->sa_family == AF_LINK) {
+                struct sockaddr_dl *sdl = (struct sockaddr_dl *)ifa->ifa_addr;
+                struct if_data *ifd = (struct if_data *)ifa->ifa_data;
+                if (sdl && sdl->sdl_alen == 6) {
+                    out[idx].has_mac = true;
+                    memcpy(out[idx].mac, LLADDR(sdl), 6);
+                }
+                if (ifd) {
+                    if (ifd->ifi_mtu > 0) out[idx].mtu = ifd->ifi_mtu;
+                    out[idx].rx_bytes = ifd->ifi_ibytes;
+                    out[idx].rx_packets = ifd->ifi_ipackets;
+                    out[idx].rx_errors = ifd->ifi_ierrors;
+                    out[idx].rx_dropped = ifd->ifi_iqdrops;
+                    out[idx].tx_bytes = ifd->ifi_obytes;
+                    out[idx].tx_packets = ifd->ifi_opackets;
+                    out[idx].tx_errors = ifd->ifi_oerrors;
+                    out[idx].collisions = ifd->ifi_collisions;
+                    out[idx].multicast = ifd->ifi_imcasts;
+                }
+            }
+        }
+    }
+
+    freeifaddrs(ifap);
+
+    for (int i = 1; i < count; i++) {
+        if (strcmp(out[i].linux_name, "lo") == 0) {
+            ltm_netif_info_t tmp = out[0];
+            out[0] = out[i];
+            out[i] = tmp;
+            out[0].ifindex = 1;
+            out[i].ifindex = i + 1;
+            break;
+        }
+    }
+    return count;
+}
+
 int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
     /* TIOCGWINSZ: Linux 0x5413 */
     if (request == 0x5413) {
@@ -861,6 +1049,145 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
             ts->tv_nsec = (long)tv.tv_usec * 1000L;
         }
         return 0;
+    }
+
+    /* SIOCGIFCONF: Linux 0x8912 */
+    if (request == LINUX_SIOCGIFCONF) {
+        if (!arg) return -LINUX_EFAULT;
+        struct linux_ifconf *ifc = (struct linux_ifconf *)arg;
+
+        ltm_netif_info_t ifaces[16];
+        int count = ltm_collect_netifs(ifaces, 16);
+
+        int ipv4_count = 0;
+        for (int i = 0; i < count; i++) {
+            if (ifaces[i].has_ipv4) ipv4_count++;
+        }
+
+        if (!ifc->ifc_ifcu.ifcu_req || ifc->ifc_len <= 0) {
+            ifc->ifc_len = (int)(ipv4_count * sizeof(struct linux_ifreq));
+            return 0;
+        }
+
+        int max_entries = ifc->ifc_len / (int)sizeof(struct linux_ifreq);
+        struct linux_ifreq *reqs = ifc->ifc_ifcu.ifcu_req;
+        int written = 0;
+
+        for (int i = 0; i < count && written < max_entries; i++) {
+            if (!ifaces[i].has_ipv4) continue;
+            memset(&reqs[written], 0, sizeof(struct linux_ifreq));
+            strncpy(reqs[written].ifr_name, ifaces[i].linux_name, LINUX_IFNAMSIZ - 1);
+            reqs[written].ifr_ifru.ifru_addr.sa_family = 2; /* AF_INET */
+            memcpy(&reqs[written].ifr_ifru.ifru_addr.sa_data[2], &ifaces[i].ip, 4);
+            written++;
+        }
+
+        ifc->ifc_len = (int)(written * sizeof(struct linux_ifreq));
+        return 0;
+    }
+
+    /* Single-interface ioctls: SIOCGIFFLAGS, SIOCGIFADDR, SIOCGIFNETMASK, SIOCGIFBRDADDR,
+     * SIOCGIFHWADDR, SIOCGIFMTU, SIOCGIFINDEX, SIOCGIFNAME, SIOCGIFTXQLEN, SIOCGIFMETRIC */
+    if (request == LINUX_SIOCGIFFLAGS || request == LINUX_SIOCSIFFLAGS ||
+        request == LINUX_SIOCGIFADDR   || request == LINUX_SIOCSIFADDR   ||
+        request == LINUX_SIOCGIFNETMASK|| request == LINUX_SIOCSIFNETMASK||
+        request == LINUX_SIOCGIFBRDADDR|| request == LINUX_SIOCSIFBRDADDR||
+        request == LINUX_SIOCGIFHWADDR || request == LINUX_SIOCGIFMTU    ||
+        request == LINUX_SIOCSIFMTU    || request == LINUX_SIOCGIFINDEX  ||
+        request == LINUX_SIOCGIFNAME   || request == LINUX_SIOCGIFTXQLEN ||
+        request == LINUX_SIOCSIFTXQLEN || request == LINUX_SIOCGIFMETRIC) {
+
+        if (!arg) return -LINUX_EFAULT;
+        struct linux_ifreq *ifr = (struct linux_ifreq *)arg;
+
+        ltm_netif_info_t ifaces[16];
+        int count = ltm_collect_netifs(ifaces, 16);
+
+        int match_idx = -1;
+        if (request == LINUX_SIOCGIFNAME) {
+            int target_idx = ifr->ifr_ifru.ifru_ivalue;
+            for (int i = 0; i < count; i++) {
+                if (ifaces[i].ifindex == target_idx) {
+                    match_idx = i;
+                    break;
+                }
+            }
+        } else {
+            char query_darwin[LINUX_IFNAMSIZ];
+            linux_to_darwin_ifname(ifr->ifr_name, query_darwin, sizeof(query_darwin));
+
+            for (int i = 0; i < count; i++) {
+                if (strcmp(ifaces[i].linux_name, ifr->ifr_name) == 0 ||
+                    strcmp(ifaces[i].darwin_name, ifr->ifr_name) == 0 ||
+                    strcmp(ifaces[i].darwin_name, query_darwin) == 0) {
+                    match_idx = i;
+                    break;
+                }
+            }
+        }
+
+        if (match_idx < 0) {
+            return -LINUX_ENODEV;
+        }
+
+        ltm_netif_info_t *it = &ifaces[match_idx];
+
+        switch (request) {
+            case LINUX_SIOCGIFNAME:
+                strncpy(ifr->ifr_name, it->linux_name, LINUX_IFNAMSIZ - 1);
+                ifr->ifr_name[LINUX_IFNAMSIZ - 1] = '\0';
+                return 0;
+            case LINUX_SIOCGIFFLAGS:
+                ifr->ifr_ifru.ifru_flags = it->flags;
+                return 0;
+            case LINUX_SIOCSIFFLAGS:
+                return 0;
+            case LINUX_SIOCGIFADDR:
+                if (!it->has_ipv4) return -LINUX_EADDRNOTAVAIL;
+                memset(&ifr->ifr_ifru.ifru_addr, 0, sizeof(ifr->ifr_ifru.ifru_addr));
+                ifr->ifr_ifru.ifru_addr.sa_family = 2; /* AF_INET */
+                memcpy(&ifr->ifr_ifru.ifru_addr.sa_data[2], &it->ip, 4);
+                return 0;
+            case LINUX_SIOCSIFADDR:
+                return 0;
+            case LINUX_SIOCGIFNETMASK:
+                memset(&ifr->ifr_ifru.ifru_netmask, 0, sizeof(ifr->ifr_ifru.ifru_netmask));
+                ifr->ifr_ifru.ifru_netmask.sa_family = 2;
+                memcpy(&ifr->ifr_ifru.ifru_netmask.sa_data[2], &it->netmask, 4);
+                return 0;
+            case LINUX_SIOCSIFNETMASK:
+                return 0;
+            case LINUX_SIOCGIFBRDADDR:
+                memset(&ifr->ifr_ifru.ifru_broadaddr, 0, sizeof(ifr->ifr_ifru.ifru_broadaddr));
+                ifr->ifr_ifru.ifru_broadaddr.sa_family = 2;
+                memcpy(&ifr->ifr_ifru.ifru_broadaddr.sa_data[2], &it->broadcast, 4);
+                return 0;
+            case LINUX_SIOCSIFBRDADDR:
+                return 0;
+            case LINUX_SIOCGIFHWADDR:
+                memset(&ifr->ifr_ifru.ifru_hwaddr, 0, sizeof(ifr->ifr_ifru.ifru_hwaddr));
+                ifr->ifr_ifru.ifru_hwaddr.sa_family = it->arphdr_type;
+                memcpy(ifr->ifr_ifru.ifru_hwaddr.sa_data, it->mac, 6);
+                return 0;
+            case LINUX_SIOCGIFMTU:
+                ifr->ifr_ifru.ifru_mtu = (int32_t)it->mtu;
+                return 0;
+            case LINUX_SIOCSIFMTU:
+                return 0;
+            case LINUX_SIOCGIFINDEX:
+                ifr->ifr_ifru.ifru_ivalue = it->ifindex;
+                return 0;
+            case LINUX_SIOCGIFTXQLEN:
+                ifr->ifr_ifru.ifru_ivalue = 1000;
+                return 0;
+            case LINUX_SIOCSIFTXQLEN:
+                return 0;
+            case LINUX_SIOCGIFMETRIC:
+                ifr->ifr_ifru.ifru_ivalue = 0;
+                return 0;
+            default:
+                return -LINUX_EINVAL;
+        }
     }
 
     return -LINUX_ENOTTY;
@@ -1876,9 +2203,7 @@ int64_t handle_futex(uint32_t *uaddr, int op, uint32_t val,
     if (((uintptr_t)uaddr & 3) != 0) return -LINUX_EINVAL;
 
     int cmd = op & ~(LINUX_FUTEX_PRIVATE_FLAG | LINUX_FUTEX_CLOCK_REALTIME);
-    uint32_t bucket_idx = ((uintptr_t)uaddr >> 2) % FUTEX_BUCKETS;
-    futex_bucket_t *b = &g_futex_table[bucket_idx];
-    init_futex_bucket(b);
+    futex_bucket_t *b = get_futex_bucket(uaddr);
 
     if (cmd == LINUX_FUTEX_WAIT || cmd == LINUX_FUTEX_WAIT_BITSET) {
         if (cmd == LINUX_FUTEX_WAIT_BITSET && val3 == 0) {
@@ -1894,9 +2219,26 @@ int64_t handle_futex(uint32_t *uaddr, int op, uint32_t val,
         int r = 0;
         if (timeout) {
             struct timespec abstime;
-            if ((op & LINUX_FUTEX_CLOCK_REALTIME) || cmd == LINUX_FUTEX_WAIT_BITSET) {
+            if (op & LINUX_FUTEX_CLOCK_REALTIME) {
                 abstime.tv_sec = timeout->tv_sec;
                 abstime.tv_nsec = timeout->tv_nsec;
+            } else if (cmd == LINUX_FUTEX_WAIT_BITSET) {
+                /* Absolute CLOCK_MONOTONIC timeout: convert to CLOCK_REALTIME for Darwin */
+                struct timespec now_mono, now_real;
+                clock_gettime(CLOCK_MONOTONIC, &now_mono);
+                clock_gettime(CLOCK_REALTIME, &now_real);
+                int64_t diff_sec = timeout->tv_sec - now_mono.tv_sec;
+                int64_t diff_nsec = timeout->tv_nsec - now_mono.tv_nsec;
+                abstime.tv_sec = now_real.tv_sec + diff_sec;
+                abstime.tv_nsec = now_real.tv_nsec + diff_nsec;
+                if (abstime.tv_nsec >= 1000000000L) {
+                    abstime.tv_sec += abstime.tv_nsec / 1000000000L;
+                    abstime.tv_nsec %= 1000000000L;
+                } else if (abstime.tv_nsec < 0) {
+                    int64_t adj = ((-abstime.tv_nsec) + 999999999L) / 1000000000L;
+                    abstime.tv_sec -= adj;
+                    abstime.tv_nsec += adj * 1000000000L;
+                }
             } else {
                 struct timespec now;
                 clock_gettime(CLOCK_REALTIME, &now);
@@ -1977,10 +2319,11 @@ static void *ltm_thread_entry(void *arg) {
     pthread_cond_signal(&targ->cond);
     pthread_mutex_unlock(&targ->lock);
 
-    /* Unblock signals for this thread */
-    sigset_t empty_mask;
-    sigemptyset(&empty_mask);
-    pthread_sigmask(SIG_SETMASK, &empty_mask, NULL);
+    /* Ensure SIGTRAP is unblocked for LTM syscall and instruction trapping */
+    sigset_t unblock_mask;
+    sigemptyset(&unblock_mask);
+    sigaddset(&unblock_mask, SIGTRAP);
+    pthread_sigmask(SIG_UNBLOCK, &unblock_mask, NULL);
 
     ltm_log_debug("Thread %d started (guest SP=%p, PC=0x%llx, TLS=0x%lx)",
                   local.tid, (void *)local.state.__sp,
@@ -2532,6 +2875,12 @@ int64_t handle_utimensat(int dirfd, const char *pathname, const struct linux_tim
         ptimes = dtimes;
     }
 
+    if (!target) {
+        int ret = futimens(dirfd, ptimes);
+        if (ret < 0) return darwin_to_linux_errno(errno);
+        return 0;
+    }
+
     int dflags = 0;
     if (flags & LINUX_AT_SYMLINK_NOFOLLOW) {
         dflags |= AT_SYMLINK_NOFOLLOW;
@@ -2585,7 +2934,13 @@ int64_t handle_statfs(const char *pathname, struct linux_statfs *buf) {
     }
 
     memset(buf, 0, sizeof(*buf));
-    buf->f_type = 0xEF53; /* EXT4_SUPER_MAGIC */
+    if (res == 1 || (pathname && (strcmp(pathname, "/proc") == 0 || strncmp(pathname, "/proc/", 6) == 0))) {
+        buf->f_type = 0x9FA0; /* PROC_SUPER_MAGIC */
+    } else if (pathname && (strcmp(pathname, "/sys") == 0 || strncmp(pathname, "/sys/", 5) == 0)) {
+        buf->f_type = 0x62656572; /* SYSFS_MAGIC */
+    } else {
+        buf->f_type = 0xEF53; /* EXT4_SUPER_MAGIC */
+    }
     buf->f_bsize = dst.f_bsize > 0 ? dst.f_bsize : 4096;
     buf->f_blocks = dst.f_blocks;
     buf->f_bfree = dst.f_bfree;
@@ -2610,7 +2965,18 @@ int64_t handle_fstatfs(int fd, struct linux_statfs *buf) {
     }
 
     memset(buf, 0, sizeof(*buf));
-    buf->f_type = 0xEF53; /* EXT4_SUPER_MAGIC */
+    char fd_path[1024];
+    if (fcntl(fd, F_GETPATH, fd_path) == 0) {
+        if (strstr(fd_path, "/proc") != NULL) {
+            buf->f_type = 0x9FA0; /* PROC_SUPER_MAGIC */
+        } else if (strstr(fd_path, "/sys") != NULL) {
+            buf->f_type = 0x62656572; /* SYSFS_MAGIC */
+        } else {
+            buf->f_type = 0xEF53; /* EXT4_SUPER_MAGIC */
+        }
+    } else {
+        buf->f_type = 0xEF53; /* EXT4_SUPER_MAGIC */
+    }
     buf->f_bsize = dst.f_bsize > 0 ? dst.f_bsize : 4096;
     buf->f_blocks = dst.f_blocks;
     buf->f_bfree = dst.f_bfree;
@@ -2916,13 +3282,593 @@ static void translate_linux_to_darwin_sockopt(int level, int optname, int *dleve
     }
 }
 
+typedef struct {
+    int guest_fd;
+    int notify_fd;
+    int protocol;
+    uint32_t portid;
+    uint32_t groups;
+    bool in_use;
+    uint8_t *rx_buf;
+    size_t rx_len;
+    size_t rx_cap;
+} ltm_netlink_t;
+
+#define MAX_NETLINK_SOCKS 32
+static ltm_netlink_t g_netlink_socks[MAX_NETLINK_SOCKS];
+static pthread_mutex_t g_netlink_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+bool ltm_netlink_is_netlink(int fd) {
+    if (fd < 0) return false;
+    bool is_nl = false;
+    pthread_mutex_lock(&g_netlink_mutex);
+    for (int i = 0; i < MAX_NETLINK_SOCKS; i++) {
+        if (g_netlink_socks[i].in_use && g_netlink_socks[i].guest_fd == fd) {
+            is_nl = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_netlink_mutex);
+    return is_nl;
+}
+
+void ltm_netlink_close(int fd) {
+    if (fd < 0) return;
+    pthread_mutex_lock(&g_netlink_mutex);
+    for (int i = 0; i < MAX_NETLINK_SOCKS; i++) {
+        if (g_netlink_socks[i].in_use && g_netlink_socks[i].guest_fd == fd) {
+            if (g_netlink_socks[i].notify_fd >= 0) {
+                close(g_netlink_socks[i].notify_fd);
+                g_netlink_socks[i].notify_fd = -1;
+            }
+            if (g_netlink_socks[i].rx_buf) {
+                free(g_netlink_socks[i].rx_buf);
+                g_netlink_socks[i].rx_buf = NULL;
+            }
+            g_netlink_socks[i].rx_len = 0;
+            g_netlink_socks[i].rx_cap = 0;
+            g_netlink_socks[i].in_use = false;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_netlink_mutex);
+}
+
+static int64_t ltm_netlink_create(int protocol, int type) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) != 0) {
+        return darwin_to_linux_errno(errno);
+    }
+
+    int bufsize = 131072;
+    setsockopt(sv[0], SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+    setsockopt(sv[1], SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+
+    int fl0 = fcntl(sv[0], F_GETFL, 0);
+    fcntl(sv[0], F_SETFL, fl0 | O_NONBLOCK);
+    int fl1 = fcntl(sv[1], F_GETFL, 0);
+    fcntl(sv[1], F_SETFL, fl1 | O_NONBLOCK);
+
+    if (type & 02000000 /* LINUX_SOCK_CLOEXEC */) {
+        fcntl(sv[0], F_SETFD, FD_CLOEXEC);
+        fcntl(sv[1], F_SETFD, FD_CLOEXEC);
+    }
+
+    pthread_mutex_lock(&g_netlink_mutex);
+    int slot = -1;
+    for (int i = 0; i < MAX_NETLINK_SOCKS; i++) {
+        if (!g_netlink_socks[i].in_use) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot >= 0) {
+        g_netlink_socks[slot].in_use = true;
+        g_netlink_socks[slot].guest_fd = sv[0];
+        g_netlink_socks[slot].notify_fd = sv[1];
+        g_netlink_socks[slot].protocol = protocol;
+        g_netlink_socks[slot].portid = (uint32_t)getpid();
+        g_netlink_socks[slot].groups = 0;
+        g_netlink_socks[slot].rx_cap = 65536;
+        g_netlink_socks[slot].rx_buf = (uint8_t *)malloc(g_netlink_socks[slot].rx_cap);
+        g_netlink_socks[slot].rx_len = 0;
+    }
+    pthread_mutex_unlock(&g_netlink_mutex);
+
+    return sv[0];
+}
+
+static int ltm_netlink_bind(int fd, const void *addr, socklen_t len) {
+    if (!addr || len < 2) return -LINUX_EINVAL;
+    const struct linux_sockaddr_nl *snl = (const struct linux_sockaddr_nl *)addr;
+    if (snl->nl_family != LINUX_AF_NETLINK) return -LINUX_EINVAL;
+
+    pthread_mutex_lock(&g_netlink_mutex);
+    for (int i = 0; i < MAX_NETLINK_SOCKS; i++) {
+        if (g_netlink_socks[i].in_use && g_netlink_socks[i].guest_fd == fd) {
+            g_netlink_socks[i].portid = snl->nl_pid ? snl->nl_pid : (uint32_t)getpid();
+            g_netlink_socks[i].groups = snl->nl_groups;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_netlink_mutex);
+    return 0;
+}
+
+static int ltm_netlink_getsockname(int fd, void *addr, socklen_t *len) {
+    if (!addr || !len || *len < sizeof(struct linux_sockaddr_nl)) return -LINUX_EINVAL;
+    struct linux_sockaddr_nl *snl = (struct linux_sockaddr_nl *)addr;
+    memset(snl, 0, sizeof(*snl));
+    snl->nl_family = LINUX_AF_NETLINK;
+
+    pthread_mutex_lock(&g_netlink_mutex);
+    for (int i = 0; i < MAX_NETLINK_SOCKS; i++) {
+        if (g_netlink_socks[i].in_use && g_netlink_socks[i].guest_fd == fd) {
+            snl->nl_pid = g_netlink_socks[i].portid;
+            snl->nl_groups = g_netlink_socks[i].groups;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_netlink_mutex);
+    *len = sizeof(struct linux_sockaddr_nl);
+    return 0;
+}
+
+#define DARWIN_ROUNDUP(a) ((a) > 0 ? (1 + (((a) - 1) | (sizeof(uint32_t) - 1))) : sizeof(uint32_t))
+
+static int ltm_get_default_gateway(struct in_addr *gw, char *out_ifname, size_t ifnamesz) {
+    int mib[6] = {CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_DUMP, 0};
+    size_t needed = 0;
+    if (sysctl(mib, 6, NULL, &needed, NULL, 0) < 0 || needed == 0) return -1;
+    char *buf = (char *)malloc(needed);
+    if (!buf) return -1;
+    if (sysctl(mib, 6, buf, &needed, NULL, 0) < 0) {
+        free(buf);
+        return -1;
+    }
+
+    char *next = buf;
+    char *lim = buf + needed;
+    int found = 0;
+
+    while (next < lim) {
+        struct rt_msghdr *rtm = (struct rt_msghdr *)next;
+        if (rtm->rtm_msglen == 0) break;
+        if ((rtm->rtm_flags & RTF_GATEWAY) && (rtm->rtm_flags & RTF_UP)) {
+            char *cp = (char *)(rtm + 1);
+            struct sockaddr *sa_dst = NULL;
+            struct sockaddr *sa_gw = NULL;
+
+            for (int i = 0; i < RTAX_MAX; i++) {
+                if (rtm->rtm_addrs & (1 << i)) {
+                    struct sockaddr *sa = (struct sockaddr *)cp;
+                    if (i == RTAX_DST) sa_dst = sa;
+                    else if (i == RTAX_GATEWAY) sa_gw = sa;
+                    cp += DARWIN_ROUNDUP(sa->sa_len);
+                }
+            }
+
+            if (sa_dst && sa_gw && sa_gw->sa_family == AF_INET) {
+                struct sockaddr_in *sin_dst = (struct sockaddr_in *)sa_dst;
+                struct sockaddr_in *sin_gw = (struct sockaddr_in *)sa_gw;
+                if (sa_dst->sa_len == 0 || sin_dst->sin_addr.s_addr == 0) {
+                    if (gw) *gw = sin_gw->sin_addr;
+                    if (out_ifname && ifnamesz > 0) {
+                        char dname[32] = {0};
+                        if_indextoname(rtm->rtm_index, dname);
+                        darwin_to_linux_ifname(dname, out_ifname, ifnamesz);
+                    }
+                    found = 1;
+                    break;
+                }
+            }
+        }
+        next += rtm->rtm_msglen;
+    }
+
+    free(buf);
+    return found ? 0 : -1;
+}
+
+static void nl_add_done(char *resp_buf, size_t *resp_len, uint32_t seq, uint32_t pid) {
+    struct linux_nlmsghdr *done = (struct linux_nlmsghdr *)(resp_buf + *resp_len);
+    done->nlmsg_len = LINUX_NLMSG_LENGTH(sizeof(int));
+    done->nlmsg_type = LINUX_NLMSG_DONE;
+    done->nlmsg_flags = LINUX_NLM_F_MULTI;
+    done->nlmsg_seq = seq;
+    done->nlmsg_pid = pid;
+    int *done_err = (int *)LINUX_NLMSG_DATA(done);
+    *done_err = 0;
+    *resp_len += LINUX_NLMSG_ALIGN(done->nlmsg_len);
+}
+
+static void nl_add_rtattr(struct linux_nlmsghdr *nlh, size_t maxlen, uint16_t type, const void *data, size_t len) {
+    size_t rta_len = LINUX_RTA_LENGTH(len);
+    size_t new_len = LINUX_NLMSG_ALIGN(nlh->nlmsg_len) + LINUX_RTA_ALIGN(rta_len);
+    if (new_len > maxlen) return;
+
+    struct linux_rtattr *rta = (struct linux_rtattr *)(((char *)nlh) + LINUX_NLMSG_ALIGN(nlh->nlmsg_len));
+    rta->rta_type = type;
+    rta->rta_len = (uint16_t)rta_len;
+    if (len > 0 && data) {
+        memcpy(LINUX_RTA_DATA(rta), data, len);
+    }
+    size_t pad = LINUX_RTA_ALIGN(rta_len) - rta_len;
+    if (pad > 0) {
+        memset(((char *)rta) + rta_len, 0, pad);
+    }
+    nlh->nlmsg_len = (uint32_t)new_len;
+}
+
+ssize_t ltm_netlink_handle_send(int fd, const void *buf, size_t len) {
+    if (!buf || len < sizeof(struct linux_nlmsghdr)) return -LINUX_EINVAL;
+
+    const struct linux_nlmsghdr *req = (const struct linux_nlmsghdr *)buf;
+    uint32_t seq = req->nlmsg_seq;
+    uint32_t pid = req->nlmsg_pid ? req->nlmsg_pid : (uint32_t)getpid();
+    uint16_t type = req->nlmsg_type;
+
+    ltm_netif_info_t ifaces[16];
+    int if_count = ltm_collect_netifs(ifaces, 16);
+
+    char resp_buf[65536];
+    size_t resp_len = 0;
+
+    if (type == LINUX_RTM_GETLINK) {
+        for (int i = 0; i < if_count; i++) {
+            ltm_netif_info_t *it = &ifaces[i];
+            size_t msg_start = resp_len;
+            struct linux_nlmsghdr *nlh = (struct linux_nlmsghdr *)(resp_buf + msg_start);
+            nlh->nlmsg_len = LINUX_NLMSG_LENGTH(sizeof(struct linux_ifinfomsg));
+            nlh->nlmsg_type = LINUX_RTM_NEWLINK;
+            nlh->nlmsg_flags = LINUX_NLM_F_MULTI;
+            nlh->nlmsg_seq = seq;
+            nlh->nlmsg_pid = pid;
+
+            struct linux_ifinfomsg *ifi = (struct linux_ifinfomsg *)LINUX_NLMSG_DATA(nlh);
+            ifi->ifi_family = 0;
+            ifi->__ifi_pad = 0;
+            ifi->ifi_type = it->arphdr_type;
+            ifi->ifi_index = it->ifindex;
+            ifi->ifi_flags = (uint32_t)(uint16_t)it->flags;
+            ifi->ifi_change = 0;
+
+            nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_IFLA_IFNAME, it->linux_name, strlen(it->linux_name) + 1);
+            uint32_t txqlen = 1000;
+            nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_IFLA_TXQLEN, &txqlen, sizeof(txqlen));
+            uint8_t opstate = (it->flags & LINUX_IFF_UP) ? 6 /* IF_OPER_UP */ : 2 /* IF_OPER_DOWN */;
+            nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_IFLA_OPERSTATE, &opstate, sizeof(opstate));
+            uint8_t linkmode = 0;
+            nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_IFLA_LINKMODE, &linkmode, sizeof(linkmode));
+            uint32_t mtu = it->mtu;
+            nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_IFLA_MTU, &mtu, sizeof(mtu));
+
+            if (it->has_mac) {
+                nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_IFLA_ADDRESS, it->mac, 6);
+                unsigned char bcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+                nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_IFLA_BROADCAST, bcast, 6);
+            }
+
+            struct linux_rtnl_link_stats stats;
+            memset(&stats, 0, sizeof(stats));
+            stats.rx_bytes = (uint32_t)it->rx_bytes;
+            stats.rx_packets = (uint32_t)it->rx_packets;
+            stats.rx_errors = (uint32_t)it->rx_errors;
+            stats.rx_dropped = (uint32_t)it->rx_dropped;
+            stats.tx_bytes = (uint32_t)it->tx_bytes;
+            stats.tx_packets = (uint32_t)it->tx_packets;
+            stats.tx_errors = (uint32_t)it->tx_errors;
+            stats.collisions = (uint32_t)it->collisions;
+            stats.multicast = (uint32_t)it->multicast;
+            nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_IFLA_STATS, &stats, sizeof(stats));
+
+            resp_len += LINUX_NLMSG_ALIGN(nlh->nlmsg_len);
+        }
+
+        nl_add_done(resp_buf, &resp_len, seq, pid);
+
+    } else if (type == LINUX_RTM_GETADDR) {
+        for (int i = 0; i < if_count; i++) {
+            ltm_netif_info_t *it = &ifaces[i];
+            if (!it->has_ipv4) continue;
+
+            size_t msg_start = resp_len;
+            struct linux_nlmsghdr *nlh = (struct linux_nlmsghdr *)(resp_buf + msg_start);
+            nlh->nlmsg_len = LINUX_NLMSG_LENGTH(sizeof(struct linux_ifaddrmsg));
+            nlh->nlmsg_type = LINUX_RTM_NEWADDR;
+            nlh->nlmsg_flags = LINUX_NLM_F_MULTI;
+            nlh->nlmsg_seq = seq;
+            nlh->nlmsg_pid = pid;
+
+            struct linux_ifaddrmsg *ifa = (struct linux_ifaddrmsg *)LINUX_NLMSG_DATA(nlh);
+            ifa->ifa_family = 2; /* AF_INET */
+            uint32_t mask = ntohl(it->netmask.s_addr);
+            int pfx = 0;
+            while (mask & 0x80000000) { pfx++; mask <<= 1; }
+            ifa->ifa_prefixlen = pfx;
+            ifa->ifa_flags = 0x80; /* IFA_F_PERMANENT */
+            ifa->ifa_scope = (strcmp(it->linux_name, "lo") == 0) ? 254 /* RT_SCOPE_HOST */ : 0 /* RT_SCOPE_UNIVERSE */;
+            ifa->ifa_index = it->ifindex;
+
+            nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_IFA_ADDRESS, &it->ip, 4);
+            nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_IFA_LOCAL, &it->ip, 4);
+            nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_IFA_LABEL, it->linux_name, strlen(it->linux_name) + 1);
+            if (strcmp(it->linux_name, "lo") != 0 && it->broadcast.s_addr != 0) {
+                nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_IFA_BROADCAST, &it->broadcast, 4);
+            }
+            uint32_t ifa_flags = 0x80;
+            nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_IFA_FLAGS, &ifa_flags, sizeof(ifa_flags));
+            struct linux_ifa_cacheinfo ci = { 0xffffffff, 0xffffffff, 0, 0 };
+            nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_IFA_CACHEINFO, &ci, sizeof(ci));
+
+            resp_len += LINUX_NLMSG_ALIGN(nlh->nlmsg_len);
+        }
+
+        nl_add_done(resp_buf, &resp_len, seq, pid);
+
+    } else if (type == LINUX_RTM_GETROUTE) {
+        struct in_addr gw = {0};
+        char gw_ifname[LINUX_IFNAMSIZ] = {0};
+        bool has_gw = (ltm_get_default_gateway(&gw, gw_ifname, sizeof(gw_ifname)) == 0);
+
+        /* 1. Default route if available */
+        if (has_gw) {
+            int gw_ifindex = 1;
+            struct in_addr src_ip = {0};
+            for (int i = 0; i < if_count; i++) {
+                if (strcmp(ifaces[i].linux_name, gw_ifname) == 0) {
+                    gw_ifindex = ifaces[i].ifindex;
+                    src_ip = ifaces[i].ip;
+                    break;
+                }
+            }
+            if (gw_ifindex == 1 && if_count > 1) {
+                gw_ifindex = ifaces[1].ifindex;
+                src_ip = ifaces[1].ip;
+            }
+
+            size_t msg_start = resp_len;
+            struct linux_nlmsghdr *nlh = (struct linux_nlmsghdr *)(resp_buf + msg_start);
+            nlh->nlmsg_len = LINUX_NLMSG_LENGTH(sizeof(struct linux_rtmsg));
+            nlh->nlmsg_type = LINUX_RTM_NEWROUTE;
+            nlh->nlmsg_flags = LINUX_NLM_F_MULTI;
+            nlh->nlmsg_seq = seq;
+            nlh->nlmsg_pid = pid;
+
+            struct linux_rtmsg *rt = (struct linux_rtmsg *)LINUX_NLMSG_DATA(nlh);
+            rt->rtm_family = 2; /* AF_INET */
+            rt->rtm_dst_len = 0;
+            rt->rtm_src_len = 0;
+            rt->rtm_tos = 0;
+            rt->rtm_table = LINUX_RT_TABLE_MAIN;
+            rt->rtm_protocol = LINUX_RTPROT_BOOT;
+            rt->rtm_scope = LINUX_RT_SCOPE_UNIVERSE;
+            rt->rtm_type = LINUX_RTN_UNICAST;
+            rt->rtm_flags = 0;
+
+            nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_RTA_GATEWAY, &gw, sizeof(gw));
+            uint32_t oif = gw_ifindex;
+            nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_RTA_OIF, &oif, sizeof(oif));
+            if (src_ip.s_addr != 0) {
+                nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_RTA_PREFSRC, &src_ip, sizeof(src_ip));
+            }
+
+            resp_len += LINUX_NLMSG_ALIGN(nlh->nlmsg_len);
+        }
+
+        /* 2. Subnet routes for each interface with IPv4 */
+        for (int i = 0; i < if_count; i++) {
+            ltm_netif_info_t *it = &ifaces[i];
+            if (!it->has_ipv4) continue;
+            if (strcmp(it->linux_name, "lo") == 0) continue;
+
+            uint32_t mask = ntohl(it->netmask.s_addr);
+            int pfx = 0;
+            while (mask & 0x80000000) { pfx++; mask <<= 1; }
+            struct in_addr subnet;
+            subnet.s_addr = it->ip.s_addr & it->netmask.s_addr;
+
+            size_t msg_start = resp_len;
+            struct linux_nlmsghdr *nlh = (struct linux_nlmsghdr *)(resp_buf + msg_start);
+            nlh->nlmsg_len = LINUX_NLMSG_LENGTH(sizeof(struct linux_rtmsg));
+            nlh->nlmsg_type = LINUX_RTM_NEWROUTE;
+            nlh->nlmsg_flags = LINUX_NLM_F_MULTI;
+            nlh->nlmsg_seq = seq;
+            nlh->nlmsg_pid = pid;
+
+            struct linux_rtmsg *rt = (struct linux_rtmsg *)LINUX_NLMSG_DATA(nlh);
+            rt->rtm_family = 2; /* AF_INET */
+            rt->rtm_dst_len = pfx;
+            rt->rtm_src_len = 0;
+            rt->rtm_tos = 0;
+            rt->rtm_table = LINUX_RT_TABLE_MAIN;
+            rt->rtm_protocol = LINUX_RTPROT_KERNEL;
+            rt->rtm_scope = LINUX_RT_SCOPE_LINK;
+            rt->rtm_type = LINUX_RTN_UNICAST;
+            rt->rtm_flags = 0;
+
+            nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_RTA_DST, &subnet, sizeof(subnet));
+            uint32_t oif = it->ifindex;
+            nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_RTA_OIF, &oif, sizeof(oif));
+            nl_add_rtattr(nlh, sizeof(resp_buf) - msg_start, LINUX_RTA_PREFSRC, &it->ip, sizeof(it->ip));
+
+            resp_len += LINUX_NLMSG_ALIGN(nlh->nlmsg_len);
+        }
+
+        /* 3. Terminating DONE message */
+        nl_add_done(resp_buf, &resp_len, seq, pid);
+
+    } else {
+        nl_add_done(resp_buf, &resp_len, seq, pid);
+    }
+
+    pthread_mutex_lock(&g_netlink_mutex);
+    ltm_netlink_t *nl = NULL;
+    for (int i = 0; i < MAX_NETLINK_SOCKS; i++) {
+        if (g_netlink_socks[i].in_use && g_netlink_socks[i].guest_fd == fd) {
+            nl = &g_netlink_socks[i];
+            break;
+        }
+    }
+    if (!nl) {
+        pthread_mutex_unlock(&g_netlink_mutex);
+        return -LINUX_EBADF;
+    }
+
+    if (resp_len > nl->rx_cap) {
+        size_t new_cap = resp_len + 16384;
+        uint8_t *new_b = (uint8_t *)realloc(nl->rx_buf, new_cap);
+        if (new_b) {
+            nl->rx_buf = new_b;
+            nl->rx_cap = new_cap;
+        }
+    }
+    if (resp_len <= nl->rx_cap) {
+        memcpy(nl->rx_buf, resp_buf, resp_len);
+        nl->rx_len = resp_len;
+        char dummy[16];
+        while (read(fd, dummy, sizeof(dummy)) > 0) {}
+        char token = 1;
+        write(nl->notify_fd, &token, 1);
+    }
+    pthread_mutex_unlock(&g_netlink_mutex);
+
+    return (ssize_t)len;
+}
+
+int64_t ltm_netlink_recvmsg(int fd, void *msg, int flags) {
+    if (!msg) return -LINUX_EINVAL;
+    struct linux_msghdr *lmsg = (struct linux_msghdr *)msg;
+
+    pthread_mutex_lock(&g_netlink_mutex);
+    ltm_netlink_t *nl = NULL;
+    for (int i = 0; i < MAX_NETLINK_SOCKS; i++) {
+        if (g_netlink_socks[i].in_use && g_netlink_socks[i].guest_fd == fd) {
+            nl = &g_netlink_socks[i];
+            break;
+        }
+    }
+    if (!nl) {
+        pthread_mutex_unlock(&g_netlink_mutex);
+        return -LINUX_EBADF;
+    }
+
+    if (nl->rx_len == 0) {
+        pthread_mutex_unlock(&g_netlink_mutex);
+        int fl = fcntl(fd, F_GETFL, 0);
+        if (fl & O_NONBLOCK) return -LINUX_EAGAIN;
+        return 0;
+    }
+
+    size_t total_avail = nl->rx_len;
+    size_t copied = 0;
+
+    if (lmsg->msg_iov && lmsg->msg_iovlen > 0) {
+        for (size_t i = 0; i < lmsg->msg_iovlen && copied < total_avail; i++) {
+            size_t to_copy = lmsg->msg_iov[i].iov_len;
+            if (to_copy > total_avail - copied) {
+                to_copy = total_avail - copied;
+            }
+            if (to_copy > 0 && lmsg->msg_iov[i].iov_base) {
+                memcpy(lmsg->msg_iov[i].iov_base, nl->rx_buf + copied, to_copy);
+            }
+            copied += to_copy;
+        }
+    }
+
+    if (lmsg->msg_name && lmsg->msg_namelen >= sizeof(struct linux_sockaddr_nl)) {
+        struct linux_sockaddr_nl *snl = (struct linux_sockaddr_nl *)lmsg->msg_name;
+        memset(snl, 0, sizeof(*snl));
+        snl->nl_family = LINUX_AF_NETLINK;
+        snl->nl_pid = 0;
+        lmsg->msg_namelen = sizeof(struct linux_sockaddr_nl);
+    }
+
+    lmsg->msg_flags = 0;
+    if (copied < total_avail) {
+        lmsg->msg_flags |= LINUX_MSG_TRUNC;
+    }
+
+    int64_t ret_val = (flags & LINUX_MSG_TRUNC) ? (int64_t)total_avail : (int64_t)copied;
+
+    if (!(flags & LINUX_MSG_PEEK)) {
+        nl->rx_len = 0;
+        char dummy[16];
+        while (read(fd, dummy, sizeof(dummy)) > 0) {}
+    }
+
+    pthread_mutex_unlock(&g_netlink_mutex);
+    return ret_val;
+}
+
+int64_t ltm_netlink_recvfrom(int fd, void *buf, size_t len, int flags, void *src_addr, socklen_t *addrlen) {
+    pthread_mutex_lock(&g_netlink_mutex);
+    ltm_netlink_t *nl = NULL;
+    for (int i = 0; i < MAX_NETLINK_SOCKS; i++) {
+        if (g_netlink_socks[i].in_use && g_netlink_socks[i].guest_fd == fd) {
+            nl = &g_netlink_socks[i];
+            break;
+        }
+    }
+    if (!nl) {
+        pthread_mutex_unlock(&g_netlink_mutex);
+        return -LINUX_EBADF;
+    }
+
+    if (nl->rx_len == 0) {
+        pthread_mutex_unlock(&g_netlink_mutex);
+        int fl = fcntl(fd, F_GETFL, 0);
+        if (fl & O_NONBLOCK) return -LINUX_EAGAIN;
+        return 0;
+    }
+
+    size_t total_avail = nl->rx_len;
+    size_t to_copy = (len < total_avail) ? len : total_avail;
+    if (to_copy > 0 && buf) {
+        memcpy(buf, nl->rx_buf, to_copy);
+    }
+
+    if (src_addr && addrlen && *addrlen >= sizeof(struct linux_sockaddr_nl)) {
+        struct linux_sockaddr_nl *snl = (struct linux_sockaddr_nl *)src_addr;
+        memset(snl, 0, sizeof(*snl));
+        snl->nl_family = LINUX_AF_NETLINK;
+        snl->nl_pid = 0;
+        *addrlen = sizeof(struct linux_sockaddr_nl);
+    }
+
+    int64_t ret_val = (flags & LINUX_MSG_TRUNC) ? (int64_t)total_avail : (int64_t)to_copy;
+
+    if (!(flags & LINUX_MSG_PEEK)) {
+        nl->rx_len = 0;
+        char dummy[16];
+        while (read(fd, dummy, sizeof(dummy)) > 0) {}
+    }
+
+    pthread_mutex_unlock(&g_netlink_mutex);
+    return ret_val;
+}
+
+static int translate_linux_to_darwin_msg_flags(int lflags) {
+    int dflags = 0;
+    if (lflags & LINUX_MSG_OOB)       dflags |= MSG_OOB;
+    if (lflags & LINUX_MSG_PEEK)      dflags |= MSG_PEEK;
+    if (lflags & LINUX_MSG_DONTROUTE) dflags |= MSG_DONTROUTE;
+    if (lflags & LINUX_MSG_EOR)       dflags |= MSG_EOR;
+    if (lflags & LINUX_MSG_TRUNC)     dflags |= MSG_TRUNC;
+    if (lflags & LINUX_MSG_CTRUNC)    dflags |= MSG_CTRUNC;
+    if (lflags & LINUX_MSG_WAITALL)   dflags |= MSG_WAITALL;
+    if (lflags & LINUX_MSG_DONTWAIT)  dflags |= MSG_DONTWAIT;
+    return dflags;
+}
+
+
 int64_t handle_socket(int domain, int type, int protocol) {
     int ddomain = domain;
     if (domain == 1) ddomain = AF_UNIX;
     else if (domain == 2) ddomain = AF_INET;
     else if (domain == 10) ddomain = AF_INET6;
     else if (domain == 16) {
-        return -LINUX_EAFNOSUPPORT;
+        return ltm_netlink_create(protocol, type);
     }
 
     int dtype = type & 0xf;
@@ -2986,6 +3932,9 @@ int64_t handle_connect(int fd, const void *addr, socklen_t len) {
 
 int64_t handle_bind(int fd, const void *addr, socklen_t len) {
     if (!addr) return -LINUX_EINVAL;
+    if (ltm_netlink_is_netlink(fd)) {
+        return ltm_netlink_bind(fd, addr, len);
+    }
     struct sockaddr_storage daddr;
     socklen_t dlen = sizeof(daddr);
     int r = copy_linux_to_darwin_sockaddr(addr, len, &daddr, &dlen);
@@ -3041,6 +3990,9 @@ int64_t handle_accept4(int fd, void *addr, socklen_t *len, int flags) {
 
 int64_t handle_getsockname(int fd, void *addr, socklen_t *len) {
     if (!addr || !len) return -LINUX_EINVAL;
+    if (ltm_netlink_is_netlink(fd)) {
+        return ltm_netlink_getsockname(fd, addr, len);
+    }
     struct sockaddr_storage ss;
     socklen_t slen = sizeof(ss);
     int ret = getsockname(fd, (struct sockaddr *)&ss, &slen);
@@ -3068,15 +4020,19 @@ int64_t handle_getpeername(int fd, void *addr, socklen_t *len) {
 int64_t handle_sendto(int fd, const void *buf, size_t len, int flags, const void *dest_addr, socklen_t addrlen) {
     if (fd < 0) return -LINUX_EBADF;
     if (len > 0 && !buf) return -LINUX_EFAULT;
+    if (ltm_netlink_is_netlink(fd)) {
+        return ltm_netlink_handle_send(fd, buf, len);
+    }
+    int dflags = translate_linux_to_darwin_msg_flags(flags);
     if (dest_addr && addrlen > 0) {
         struct sockaddr_storage daddr;
         socklen_t dlen = sizeof(daddr);
         copy_linux_to_darwin_sockaddr(dest_addr, addrlen, &daddr, &dlen);
-        ssize_t ret = sendto(fd, buf, len, flags, (const struct sockaddr *)&daddr, dlen);
+        ssize_t ret = sendto(fd, buf, len, dflags, (const struct sockaddr *)&daddr, dlen);
         if (ret < 0) return darwin_to_linux_errno(errno);
         return ret;
     }
-    ssize_t ret = sendto(fd, buf, len, flags, NULL, 0);
+    ssize_t ret = sendto(fd, buf, len, dflags, NULL, 0);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return ret;
 }
@@ -3084,19 +4040,24 @@ int64_t handle_sendto(int fd, const void *buf, size_t len, int flags, const void
 int64_t handle_recvfrom(int fd, void *buf, size_t len, int flags, void *src_addr, socklen_t *addrlen) {
     if (fd < 0) return -LINUX_EBADF;
     if (len > 0 && !buf) return -LINUX_EFAULT;
+    if (ltm_netlink_is_netlink(fd)) {
+        return ltm_netlink_recvfrom(fd, buf, len, flags, src_addr, addrlen);
+    }
+
+    int dflags = translate_linux_to_darwin_msg_flags(flags);
     ssize_t ret;
 
     if (src_addr && addrlen && *addrlen > 0) {
         struct sockaddr_storage ss;
         socklen_t slen = sizeof(ss);
-        ret = recvfrom(fd, buf, len, flags, (struct sockaddr *)&ss, &slen);
+        ret = recvfrom(fd, buf, len, dflags, (struct sockaddr *)&ss, &slen);
         if (ret < 0) return darwin_to_linux_errno(errno);
 
         socklen_t lnamelen = *addrlen;
         copy_darwin_to_linux_sockaddr(&ss, slen, src_addr, &lnamelen);
         *addrlen = lnamelen;
     } else {
-        ret = recvfrom(fd, buf, len, flags, NULL, NULL);
+        ret = recvfrom(fd, buf, len, dflags, NULL, NULL);
         if (ret < 0) return darwin_to_linux_errno(errno);
     }
 
@@ -3125,6 +4086,12 @@ int64_t handle_recvfrom(int fd, void *buf, size_t len, int flags, void *src_addr
 int64_t handle_sendmsg(int fd, const void *msg, int flags) {
     if (!msg) return -LINUX_EINVAL;
     const struct linux_msghdr *lmsg = (const struct linux_msghdr *)msg;
+    if (ltm_netlink_is_netlink(fd)) {
+        if (lmsg->msg_iov && lmsg->msg_iovlen > 0) {
+            return ltm_netlink_handle_send(fd, (const void *)lmsg->msg_iov[0].iov_base, lmsg->msg_iov[0].iov_len);
+        }
+        return 0;
+    }
 
     struct msghdr dmsg;
     memset(&dmsg, 0, sizeof(dmsg));
@@ -3142,13 +4109,18 @@ int64_t handle_sendmsg(int fd, const void *msg, int flags) {
         dmsg.msg_namelen = sslen;
     }
 
-    ssize_t ret = sendmsg(fd, &dmsg, flags);
+    int dflags = translate_linux_to_darwin_msg_flags(flags);
+    ssize_t ret = sendmsg(fd, &dmsg, dflags);
     if (ret < 0) return darwin_to_linux_errno(errno);
     return ret;
 }
 
 int64_t handle_recvmsg(int fd, void *msg, int flags) {
     if (!msg) return -LINUX_EINVAL;
+    if (ltm_netlink_is_netlink(fd)) {
+        return ltm_netlink_recvmsg(fd, msg, flags);
+    }
+
     struct linux_msghdr *lmsg = (struct linux_msghdr *)msg;
 
     struct msghdr dmsg;
@@ -3168,7 +4140,8 @@ int64_t handle_recvmsg(int fd, void *msg, int flags) {
         dmsg.msg_namelen = sizeof(ss);
     }
 
-    ssize_t ret = recvmsg(fd, &dmsg, flags);
+    int dflags = translate_linux_to_darwin_msg_flags(flags);
+    ssize_t ret = recvmsg(fd, &dmsg, dflags);
     if (ret < 0) return darwin_to_linux_errno(errno);
 
     bool is_icmp = (fd >= 0 && fd < MAX_TRACKED_FDS && g_sock_is_icmp[fd]);
@@ -3247,6 +4220,7 @@ int64_t handle_recvmsg(int fd, void *msg, int flags) {
 int64_t handle_setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen) {
     if (fd < 0) return -LINUX_EBADF;
     if (optlen > 0 && !optval) return -LINUX_EFAULT;
+    if (ltm_netlink_is_netlink(fd)) return 0;
 
     if (level == 1 && (optname == 29 || optname == 35 || optname == 37)) {
         int on = (optval && optlen >= sizeof(int)) ? *(const int *)optval : 1;
@@ -3276,6 +4250,7 @@ int64_t handle_setsockopt(int fd, int level, int optname, const void *optval, so
 int64_t handle_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen) {
     if (fd < 0) return -LINUX_EBADF;
     if (!optval || !optlen) return -LINUX_EFAULT;
+    if (ltm_netlink_is_netlink(fd)) return 0;
     if (level == 1 && (optname == 29 || optname == 35 || optname == 37)) {
         if (*optlen >= sizeof(int)) {
             int on = (fd >= 0 && fd < MAX_TRACKED_FDS) ? g_sock_so_timestamp[fd] : 0;
@@ -6637,9 +7612,7 @@ int64_t handle_futex_requeue(volatile uint32_t *uaddr, unsigned long mask, int n
     (void)mask;
     if (!uaddr || !uaddr2) return -LINUX_EFAULT;
     if (nr_wake < 0 || nr_requeue < 0) return -LINUX_EINVAL;
-    uint32_t bucket_idx = ((uintptr_t)uaddr >> 2) % FUTEX_BUCKETS;
-    futex_bucket_t *b = &g_futex_table[bucket_idx];
-    init_futex_bucket(b);
+    futex_bucket_t *b = get_futex_bucket((uint32_t *)uaddr);
     pthread_mutex_lock(&b->mutex);
     pthread_cond_broadcast(&b->cond);
     pthread_mutex_unlock(&b->mutex);

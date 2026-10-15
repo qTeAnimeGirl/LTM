@@ -429,6 +429,14 @@ Below is the complete, canonical catalog of all 316 official Linux ARM64 system 
 - **CPU Telemetry**: `/proc/cpuinfo` and `sysinfo` dynamically invoke Darwin `sysctlbyname("machdep.cpu.brand_string")` and `sysctlbyname("hw.ncpu")`, returning the real host CPU (`Apple M3`) and active core count (8 cores).
 - **Memory Telemetry**: `/proc/meminfo` queries Darwin's Mach VM subsystem via `host_statistics64(mach_host_self(), HOST_VM_INFO64, ...)` to extract real-time wired, active, inactive, and free physical memory.
 
+### 4.6 AF_NETLINK & Network Interface Emulation
+- **The Challenge**: Linux network administration tools (`ip`, `ifconfig`) rely on `AF_NETLINK` (family 16) and `NETLINK_ROUTE` raw sockets to query link statuses (`RTM_GETLINK`), IP addresses (`RTM_GETADDR`), and routes (`RTM_GETROUTE`), as well as `/proc/net/dev` and ioctls (`SIOCGIFCONF`, `SIOCGIFFLAGS`, `SIOCGIFADDR`, `SIOCGIFNETMASK`, `SIOCGIFHWADDR`, `SIOCGIFMTU`). Darwin has no native Netlink protocol.
+- **LTM Implementation**:
+  - `AF_NETLINK` sockets are intercepted in `handle_socket()` and connected via a local synthetic socketpair buffer.
+  - On `sendto()` / `sendmsg()`, LTM intercepts Netlink requests, queries live network interfaces using Darwin `getifaddrs()`, and constructs compliant Linux Netlink messages with proper headers (`struct nlmsghdr`, `struct ifinfomsg`, `struct ifaddrmsg`, `struct rtattr`), terminating multipart dumps with an `NLMSG_DONE` carrying a 4-byte `int` error payload (`NLMSG_LENGTH(sizeof(int))`) required by `iproute2`.
+  - In `handle_ioctl`, LTM handles `SIOCGIFCONF` and individual interface queries, packing standard 32-byte/40-byte Linux `ifconf` and `ifreq` structures.
+  - In `src/sandbox.c`, `/proc/net/dev`, `/proc/net/route`, and `/proc/net/arp` are virtualized dynamically with live interface statistics.
+
 ---
 
 ## 5. Verification: How Syscalls Are Tested
@@ -445,4 +453,4 @@ Run the full automated verification harness with:
 ./run_tests.sh
 ```
 
-All 328 test suites execute and pass cleanly in under 4 seconds.
+All 329 test suites execute and pass cleanly in under 4 seconds.

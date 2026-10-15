@@ -106,7 +106,7 @@ done
 for c_file in "$SCRIPT_DIR"/*.c; do
     if [ -f "$c_file" ]; then
         c_name="$(basename "$c_file" .c)"
-        if [ "$c_name" = "test_glibc" ]; then
+        if [ "$c_name" = "test_glibc" ] || [ "$c_name" = "test_concurrency_stress" ]; then
             build_glibc "$c_file"
         elif [ "$c_name" != "syscall_test" ]; then
             build_c "$c_file"

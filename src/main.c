@@ -5,6 +5,7 @@
 #include "rootfs_installer.h"
 
 #include <termios.h>
+#include <sys/file.h>
 
 ltm_runtime_t g_ltm = {0};
 
@@ -34,6 +35,7 @@ static void print_usage(const char *progname) {
         "  -e, --env <KEY=VAL>        Set environment variable in guest (can be specified multiple times)\n"
         "  --preserve-env             Inherit host environment variables (default: isolated clean env)\n"
         "  -i, --install-rootfs [type] Automatically download & install rootfs ('arch' [default] or 'alpine')\n"
+        "  --unlock, --unlock-pacman  Remove stale /var/lib/pacman/db.lck if present\n"
         "  -v, --verbose              Enable verbose debug logging (or set LTM_DEBUG=1)\n"
         "  -s, --strace               Enable syscall tracing (or set LTM_STRACE=1)\n"
         "  -h, --help                 Display this help message and exit\n\n"
@@ -233,6 +235,25 @@ int main(int argc, char **argv, char **envp) {
             }
             rootfs_arg = argv[arg_idx++];
             rootfs_explicit = true;
+        } else if (strcmp(argv[arg_idx], "--unlock") == 0 ||
+                   strcmp(argv[arg_idx], "--unlock-pacman") == 0 ||
+                   strcmp(argv[arg_idx], "--clean-locks") == 0) {
+            const char *target_rootfs = rootfs_arg ? rootfs_arg : "arch_rootfs";
+            char lock_file[1024];
+            snprintf(lock_file, sizeof(lock_file), "%s/var/lib/pacman/db.lck", target_rootfs);
+            if (access(lock_file, F_OK) == 0) {
+                if (unlink(lock_file) == 0) {
+                    printf("[LTM:INFO] Stale pacman lock removed: %s\n", lock_file);
+                } else {
+                    fprintf(stderr, "[LTM:ERROR] Failed to remove pacman lock %s: %s\n", lock_file, strerror(errno));
+                }
+            } else {
+                printf("[LTM:INFO] No pacman lock file found at %s\n", lock_file);
+            }
+            arg_idx++;
+            if (arg_idx >= argc) {
+                return 0;
+            }
         } else if (strcmp(argv[arg_idx], "-h") == 0 || strcmp(argv[arg_idx], "--help") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -372,10 +393,75 @@ int main(int argc, char **argv, char **envp) {
         }
     }
 
+    /* Stale lock detection & auto-recovery for pacman */
+    if (strstr(binary_arg, "pacman") != NULL && g_ltm.host_rootfs[0] != '\0') {
+        char lock_file[1024];
+        snprintf(lock_file, sizeof(lock_file), "%s/var/lib/pacman/db.lck", g_ltm.host_rootfs);
+        if (access(lock_file, F_OK) == 0) {
+            char session_lock[1024];
+            snprintf(session_lock, sizeof(session_lock), "%s/.ltm_session.lck", g_ltm.host_rootfs);
+            int sl_fd = open(session_lock, O_CREAT | O_RDWR, 0644);
+            if (sl_fd >= 0) {
+                if (flock(sl_fd, LOCK_EX | LOCK_NB) == 0) {
+                    unlink(lock_file);
+                    printf("[LTM:NOTICE] Detected stale pacman lock (%s) from prior session; automatically recovered.\n", lock_file);
+                    flock(sl_fd, LOCK_UN);
+                }
+                close(sl_fd);
+            }
+        }
+    }
+
     /* Prepare guest argc / argv / envp */
     g_ltm.guest_argc = argc - arg_idx;
     g_ltm.guest_argv = &argv[arg_idx];
     g_ltm.guest_envp = build_guest_env(envp, preserve_env);
+
+    /* Check if target executable is a script with shebang (#!) */
+    int sfd = open(g_ltm.binary_path, O_RDONLY);
+    if (sfd >= 0) {
+        char sbuf[2];
+        if (read(sfd, sbuf, 2) == 2 && sbuf[0] == '#' && sbuf[1] == '!') {
+            char sline[1024];
+            ssize_t sr = read(sfd, sline, sizeof(sline) - 1);
+            if (sr > 0) {
+                sline[sr] = '\0';
+                char *nl = strchr(sline, '\n');
+                if (nl) *nl = '\0';
+                char *p = sline;
+                while (*p == ' ' || *p == '\t') p++;
+                char *interp = p;
+                while (*p && *p != ' ' && *p != '\t') p++;
+                char interp_arg[512] = {0};
+                if (*p) {
+                    *p++ = '\0';
+                    while (*p == ' ' || *p == '\t') p++;
+                    strncpy(interp_arg, p, sizeof(interp_arg) - 1);
+                }
+                char resolved_interp[1024];
+                if (sandbox_resolve_path(LINUX_AT_FDCWD, interp, resolved_interp, sizeof(resolved_interp), 0) == 0) {
+                    close(sfd);
+                    int orig_argc = argc - arg_idx;
+                    int new_argc = orig_argc + 2 + (interp_arg[0] != '\0' ? 1 : 0);
+                    char **new_guest_argv = malloc((new_argc + 1) * sizeof(char *));
+                    int na = 0;
+                    new_guest_argv[na++] = strdup(interp);
+                    if (interp_arg[0] != '\0') new_guest_argv[na++] = strdup(interp_arg);
+                    new_guest_argv[na++] = strdup(binary_arg);
+                    for (int i = 1; i < orig_argc; i++) {
+                        new_guest_argv[na++] = argv[arg_idx + i];
+                    }
+                    new_guest_argv[na] = NULL;
+                    g_ltm.guest_argc = na;
+                    g_ltm.guest_argv = new_guest_argv;
+                    strncpy(g_ltm.binary_path, resolved_interp, sizeof(g_ltm.binary_path) - 1);
+                    goto skip_shebang_check;
+                }
+            }
+        }
+        close(sfd);
+    }
+skip_shebang_check:
 
     /* Initialize syscall trap handling */
     if (syscall_dispatcher_init() != 0) {
