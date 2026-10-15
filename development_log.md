@@ -3279,4 +3279,46 @@ During fresh install validation in an empty directory (`./ltm /usr/bin/bash`), t
   - `pacman -Q` and `pacman -Sw --noconfirm fastfetch` verified with 100% key validation and package integrity.
   - `fastfetch` renders authentic system telemetry, Arch Linux ARM metadata, and live host memory.
 
+---
+
+## [Sprint 11: Hook Execution, Safe Thread Unwinding & Signal Engine Hardening]
+
+### 1. Root Cause Analysis: Post-Transaction Hook Crash Loop
+During `pacman -Syy fastfetch` or package installations with active post-transaction hooks (such as `(1/1) Arming ConditionNeedsUpdate...`), pacman executes hooks by calling `fork()` and `execv()` on shell scripts (`/usr/share/libalpm/scripts/systemd-hook update`).
+Two architectural defects were identified:
+1. **Thread Termination on Darwin Signal Stack**:
+   - Worker threads spawned during package downloading via `libcurl` call `sys_exit` (93).
+   - In LTM, syscalls execute inside `ltm_sig_handler` on an alternate signal stack (`sigaltstack`).
+   - Calling `pthread_exit(NULL)` directly while `sp` is on an alternate stack or outside the pthread's native stack bounds causes Darwin's `libsystem_pthread.dylib` to fault with `EXC_BAD_ACCESS` / `SIGSEGV`.
+2. **Unconditional `SA_NODEFER` & Signal Recursion**:
+   - Guest signal actions registered `ltm_host_signal_handler` with unconditional `SA_NODEFER`.
+   - When a host fault occurred, `ltm_host_signal_handler` attempted to push a guest sigframe and resume execution into the guest handler via `ltm_resume_context`.
+   - Because the fault re-triggered on resume, Darwin delivered `SIGSEGV` recursively without blocking the signal, generating an infinite crash loop.
+3. **Child Process Mutex Lock-in**:
+   - Multithreaded programs calling `fork()` in Darwin inherit only the calling thread, leaving any mutex held by worker threads (`g_patcher_mutex`, `g_futex_table`, `g_thread_table_mutex`) permanently locked in the child.
+
+### 2. Implementation & Fixes
+1. **Clean Thread Unwinding via `sigsetjmp` / `siglongjmp`**:
+   - `ltm_thread_entry` initializes `sigjmp_buf s_thread_exit_jmp`.
+   - `handle_exit` uses `siglongjmp(s_thread_exit_jmp, 1)` to unwind the signal handler and guest stack completely back to Darwin's native pthread stack.
+   - The thread cleanly disables `sigaltstack`, frees resources, and returns `NULL` from `ltm_thread_entry`.
+2. **Signal Engine Hardening**:
+   - Added thread-local `s_crash_depth` recursion detection to `ltm_host_signal_handler`. Any recursive crash signal terminates immediately with `_exit(128 + l_sig)`.
+   - Enforced stack pointer validation before writing `struct ltm_sigframe`.
+   - Only set `SA_NODEFER` on Darwin `sigaction` if the guest binary explicitly requested `LINUX_SA_NODEFER` (`0x40000000`).
+   - Signal mask preservation during guest signal handler execution.
+3. **Process Fork Reset Engine (`ltm_reset_on_fork`)**:
+   - Added `ltm_reset_on_fork()` called immediately upon child creation in `handle_clone`.
+   - Reinitializes all global subsystem mutexes (`g_thread_table_mutex`, `g_eventfd_mutex`, `g_timerfd_mutex`, `g_signalfd_mutex`, `g_brk_mutex`, `g_netlink_mutex`, `g_inotify_mutex`, `g_timer_mutex`, `g_mq_global_lock`, `g_pidfd_lock`, `g_patcher_mutex`, `g_futex_table`).
+4. **Signal Status Translation in `wait4` & `waitid`**:
+   - Bidirectional translation of termination and stop signals between Darwin and Linux formats for child processes.
+
+### 3. Verification & Live Test Results
+- **Full Regression Test Suite**: All 329 tests pass with 100% pass rate (`./run_tests.sh`).
+- **Live Pacman Verification in `Test_LTM`**:
+  - `pacman -S --noconfirm tree`: Downloaded from remote mirror, verified, installed, and completed post-transaction hook `(1/1) Arming ConditionNeedsUpdate...` with exit code 0.
+  - Native `tree /etc -L 1` ran cleanly inside `Test_LTM` (44 directories, 59 files).
+  - Native `fastfetch` 2.70.0-1 verified and operational.
+
+
 

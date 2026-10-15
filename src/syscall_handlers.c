@@ -24,6 +24,7 @@
 #include <ctype.h>
 #include <net/route.h>
 #include <sys/sysctl.h>
+#include <setjmp.h>
 
 #define LTM_MAX_THREADS 256
 
@@ -42,6 +43,11 @@ static __thread uintptr_t s_guest_tls = 0;
 static __thread int *s_child_tid_ptr = NULL;
 static __thread int s_thread_tid = 0;
 static __thread int s_is_main_thread = 1;
+static __thread sigjmp_buf s_thread_exit_jmp;
+static __thread bool s_has_exit_jmp = false;
+static __thread int s_crash_depth = 0;
+
+static void ltm_reset_on_fork(void);
 
 uintptr_t ltm_get_guest_tls(void) {
     return s_guest_tls;
@@ -1752,6 +1758,23 @@ static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) 
     ucontext_t *uc = (ucontext_t *)ucontext;
     arm_thread_state64_t *cur_state = &uc->uc_mcontext->__ss;
 
+    /* Recursion protection for fatal exception signals */
+    if (l_sig == 4 || l_sig == 7 || l_sig == 8 || l_sig == 11 || l_sig == 31) {
+        if (s_crash_depth > 0) {
+            ltm_log_error("Recursive crash signal %d delivered (depth=%d): PC=0x%llx. Terminating cleanly.",
+                          l_sig, s_crash_depth, (unsigned long long)cur_state->__pc);
+            _exit(128 + l_sig);
+        }
+        s_crash_depth++;
+    }
+
+    /* Validate stack pointer before attempting to write guest sigframe */
+    if (cur_state->__sp < 0x1000 || (cur_state->__sp & 0x7) != 0) {
+        ltm_log_error("Guest crash signal %d with invalid SP=0x%llx. Terminating cleanly.",
+                      l_sig, (unsigned long long)cur_state->__sp);
+        _exit(128 + l_sig);
+    }
+
     /* Push saved state and siginfo onto guest stack */
     uintptr_t sp = cur_state->__sp;
     sp -= sizeof(struct ltm_sigframe);
@@ -1835,10 +1858,12 @@ static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) 
     target_state.__pc = (uintptr_t)act->l_handler;
     target_state.__x[16] = (uintptr_t)act->l_handler;
 
-    /* Unmask the signal so subsequent signals can be delivered */
-    sigset_t set;
-    sigemptyset(&set);
-    pthread_sigmask(SIG_SETMASK, &set, NULL);
+    /* Unmask the signal only if SA_NODEFER was explicitly requested */
+    if (act->l_flags & 0x40000000ULL /* LINUX_SA_NODEFER */) {
+        sigset_t set;
+        sigemptyset(&set);
+        pthread_sigmask(SIG_SETMASK, &set, NULL);
+    }
 
     /* Resume execution into guest handler bypassing Darwin signal trampoline */
     ltm_resume_context(&target_state);
@@ -1870,7 +1895,13 @@ int64_t handle_rt_sigaction(int signum, const struct linux_sigaction *act, struc
                 sigaction(d_sig, &d_sa, NULL);
             } else {
                 d_sa.sa_sigaction = ltm_host_signal_handler;
-                d_sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+                d_sa.sa_flags = SA_SIGINFO;
+                if (act->l_flags & 0x40000000ULL /* LINUX_SA_NODEFER */) {
+                    d_sa.sa_flags |= SA_NODEFER;
+                }
+                if (act->l_flags & 0x08000000ULL /* LINUX_SA_ONSTACK */) {
+                    d_sa.sa_flags |= SA_ONSTACK;
+                }
                 sigemptyset(&d_sa.sa_mask);
                 sigaction(d_sig, &d_sa, NULL);
             }
@@ -2301,6 +2332,8 @@ int64_t handle_exit(int status) {
     int remaining = atomic_fetch_sub(&g_active_thread_count, 1) - 1;
     if (remaining <= 0) {
         exit(status);
+    } else if (s_has_exit_jmp) {
+        siglongjmp(s_thread_exit_jmp, 1);
     } else {
         pthread_exit(NULL);
     }
@@ -2451,6 +2484,17 @@ static void *ltm_thread_entry(void *arg) {
                   (unsigned long long)local.state.__pc,
                   (unsigned long)ltm_get_guest_tls());
 
+    s_has_exit_jmp = true;
+    if (sigsetjmp(s_thread_exit_jmp, 1) != 0) {
+        /* Thread has terminated via handle_exit! We are safely back on Darwin native pthread stack */
+        stack_t ss = { .ss_flags = SS_DISABLE };
+        sigaltstack(&ss, NULL);
+        if (alt_stack != MAP_FAILED) {
+            munmap(alt_stack, 1024 * 1024);
+        }
+        return NULL;
+    }
+
     /* Resume guest execution on this native pthread */
     ltm_resume_context(&local.state);
 
@@ -2550,10 +2594,13 @@ int64_t handle_clone(uint64_t flags, void *stack, int *ptid, void *tls, int *cti
         /* Child process: reset thread state and re-init dispatcher */
         s_is_main_thread = 1;
         s_thread_tid = 0;
+        s_crash_depth = 0;
+        s_has_exit_jmp = false;
         atomic_store(&g_active_thread_count, 1);
         atomic_store(&g_next_thread_tid, 0);
         memset(g_thread_table, 0, sizeof(g_thread_table));
 
+        ltm_reset_on_fork();
         syscall_dispatcher_init();
 
         if (state) {
@@ -2642,7 +2689,17 @@ int64_t handle_wait4(pid_t pid, int *status, int options, void *rusage) {
         return darwin_to_linux_errno(errno);
     }
     if (status) {
-        *status = dstatus;
+        if (WIFSIGNALED(dstatus)) {
+            int d_sig = WTERMSIG(dstatus);
+            int l_sig = darwin_to_linux_signal(d_sig);
+            *status = (dstatus & ~0x7f) | (l_sig & 0x7f);
+        } else if (WIFSTOPPED(dstatus)) {
+            int d_sig = WSTOPSIG(dstatus);
+            int l_sig = darwin_to_linux_signal(d_sig);
+            *status = (dstatus & ~0xff00) | ((l_sig & 0xff) << 8);
+        } else {
+            *status = dstatus;
+        }
     }
     return ret;
 }
@@ -5704,11 +5761,21 @@ int64_t handle_waitid(int which, id_t id, struct linux_siginfo *infop, int optio
 
     if (infop) {
         memset(infop, 0, sizeof(*infop));
-        infop->si_signo = dinfo.si_signo;
+        infop->si_signo = darwin_to_linux_signal(dinfo.si_signo);
         infop->si_code = dinfo.si_code;
         infop->_sifields._sigchld._pid = dinfo.si_pid;
         infop->_sifields._sigchld._uid = dinfo.si_uid;
-        infop->_sifields._sigchld._status = dinfo.si_status;
+        if (WIFSIGNALED(dinfo.si_status)) {
+            int d_sig = WTERMSIG(dinfo.si_status);
+            int l_sig = darwin_to_linux_signal(d_sig);
+            infop->_sifields._sigchld._status = (dinfo.si_status & ~0x7f) | (l_sig & 0x7f);
+        } else if (WIFSTOPPED(dinfo.si_status)) {
+            int d_sig = WSTOPSIG(dinfo.si_status);
+            int l_sig = darwin_to_linux_signal(d_sig);
+            infop->_sifields._sigchld._status = (dinfo.si_status & ~0xff00) | ((l_sig & 0xff) << 8);
+        } else {
+            infop->_sifields._sigchld._status = dinfo.si_status;
+        }
     }
     return 0;
 }
@@ -8046,6 +8113,22 @@ int64_t handle_mseal(unsigned long start, size_t len, unsigned long flags) {
     if (start & 0x3FFF) return -LINUX_EINVAL;
     return 0;
 }
+
+static void ltm_reset_on_fork(void) {
+    pthread_mutex_init(&g_thread_table_mutex, NULL);
+    pthread_mutex_init(&g_eventfd_mutex, NULL);
+    pthread_mutex_init(&g_timerfd_mutex, NULL);
+    pthread_mutex_init(&g_signalfd_mutex, NULL);
+    pthread_mutex_init(&g_brk_mutex, NULL);
+    pthread_mutex_init(&g_netlink_mutex, NULL);
+    pthread_mutex_init(&g_inotify_mutex, NULL);
+    pthread_mutex_init(&g_timer_mutex, NULL);
+    pthread_mutex_init(&g_mq_global_lock, NULL);
+    pthread_mutex_init(&g_pidfd_lock, NULL);
+    patcher_reset_on_fork();
+    init_all_futex_buckets();
+}
+
 
 
 

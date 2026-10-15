@@ -17,4 +17,7 @@ size_t patcher_patch_executable_range(void *addr, size_t size);
 /* Synchronizes/invalidates the instruction and data caches for the given range */
 void patcher_invalidate_cache(void *addr, size_t size);
 
+/* Reinitializes patcher mutex in child process after fork */
+void patcher_reset_on_fork(void);
+
 #endif /* PATCHER_H */

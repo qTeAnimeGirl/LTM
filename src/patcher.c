@@ -70,3 +70,8 @@ size_t patcher_patch_executable_range(void *addr, size_t size) {
     ltm_log_debug("Patched %zu svc instructions at [%p, %p)", count, addr, (char *)addr + size);
     return count;
 }
+
+void patcher_reset_on_fork(void) {
+    pthread_mutex_init(&g_patcher_mutex, NULL);
+}
+
