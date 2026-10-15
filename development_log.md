@@ -3406,5 +3406,49 @@ Shebang scripts with Windows/DOS line endings (`\r\n`) or trailing whitespace pr
      - Native macOS: 3475 ms vs LTM Linux ELF: 3491 ms (**99.5% efficiency**).
      - Multi-core scaling speedup: 5.85x on Apple M3.
 
+---
+
+## [Phase 11: Architectural Fix - Arch Linux Post-Transaction Hook & `rt_sigreturn` Trampoline Preservation]
+
+### 1. Incident Overview & Root Cause
+- **Issue**: During pacman package installation in Arch Linux ARM rootfs (`printf "pacman -Syy\npacman -Syy fastfetch\ny\n" | ./ltm /usr/bin/bash`), pacman succeeded and the post-transaction hook `(1/1) Arming ConditionNeedsUpdate...` finished, but the parent shell (`bash`) immediately terminated with `SIGSEGV` (signal 11, `fault_addr=0x0`).
+- **Minimal Reproducer**:
+  - `printf "/usr/bin/true\n/usr/bin/true\n" | ./ltm /usr/bin/bash` triggered the identical crash on the *second* external command execution.
+- **Root Cause Mechanics**:
+  - In `src/syscall_handlers.c`, `handle_rt_sigreturn` and `ltm_host_signal_handler` previously resumed guest execution by calling `ltm_resume_context(&frame->saved_state)` directly (`mov sp, x1; br x16;`).
+  - By directly jumping out of Darwin's signal handler:
+    1. Darwin's XNU kernel signal trampoline (`_sigtramp`) was completely bypassed. The Darwin kernel still believed that `SIGTRAP`/`SIGCHLD` was active on the alternate stack (`SS_ONSTACK`), corrupting signal frame bookkeeping.
+    2. In `src/syscall_dispatcher.c:ltm_sig_handler`, `ltm_set_in_host_syscall(0)` was bypassed for `SYS_rt_sigreturn` (139), leaving `s_in_host_syscall = 1` permanently for the thread.
+  - On the second signal delivery (`SIGCHLD` after the second subshell command completed), Darwin's alternate stack and signal return frame were corrupted. When `_sigtramp` returned, it failed and jumped to `lr = 0x0`, causing `SIGSEGV at 0x0`.
+
+### 2. Solutions Implemented & Architectural Invariants
+1. **Direct Trap State Restoration in `handle_rt_sigreturn` (`src/syscall_handlers.c`)**:
+   - Replaced direct `ltm_resume_context` bypass with trap state assignment:
+     `*cur_state = frame->saved_state; return 0;`
+   - Allowed execution to return naturally through Darwin's `_sigtramp` so XNU properly pops the signal frame, clears `SS_ONSTACK`, and unmasks signals.
+2. **Signal Delivery Return in `ltm_host_signal_handler` (`src/syscall_handlers.c`)**:
+   - Replaced direct `ltm_resume_context` bypass with `*cur_state = target_state; return;`.
+3. **Selective PC Advance in `src/syscall_dispatcher.c`**:
+   - In `ltm_sig_handler`:
+     ```c
+     if (num == 139 && ret == 0) {
+         // Successfully restored guest frame via rt_sigreturn; do not overwrite x0 or advance pc
+         ltm_set_in_host_syscall(0);
+         return;
+     }
+     ```
+   - Only skips `pc += 4` when `rt_sigreturn` successfully restores a frame (`ret == 0`). Direct invocations returning `-EINVAL` advance PC normally, preventing infinite `brk #0` loops.
+
+### 3. Verification & Validation
+- **Minimal Reproducer**:
+  - `printf "/usr/bin/true\n/usr/bin/true\n" | ./ltm /usr/bin/bash` -> **PASS (Exit 0)**
+  - Multiple subshell commands: `printf "touch /tmp/test1\ntouch /tmp/test2\ntouch /tmp/test3\n" | ./ltm /usr/bin/bash` -> **PASS (Exit 0)**
+- **Full Pacman Installation Workflow**:
+  - `printf "pacman -Syy\npacman -Syy fastfetch\ny\n" | ./ltm /usr/bin/bash` -> **PASS (Exit 0)**
+  - All post-transaction hooks execute cleanly to completion.
+- **Full Regression Test Suite (`./run_tests.sh`)**:
+  - Total Tests: **329 / 329 Passed (100% Pass Rate)** with zero failures or hangs.
+
+
 
 

@@ -1928,8 +1928,9 @@ static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) 
         pthread_sigmask(SIG_SETMASK, &set, NULL);
     }
 
-    /* Resume execution into guest handler bypassing Darwin signal trampoline */
-    ltm_resume_context(&target_state);
+    /* Resume execution into guest handler via Darwin signal trampoline */
+    *cur_state = target_state;
+    return;
 }
 
 int64_t handle_rt_sigaction(int signum, const struct linux_sigaction *act, struct linux_sigaction *oldact, size_t sigsetsize) {
@@ -2003,8 +2004,8 @@ int64_t handle_rt_sigreturn(void *state_ptr) {
     sigemptyset(&set);
     pthread_sigmask(SIG_SETMASK, &set, NULL);
 
-    /* Restore all integer registers, condition flags, SP, and PC via ltm_resume_context */
-    ltm_resume_context(&frame->saved_state);
+    /* Restore all integer registers, condition flags, SP, and PC directly into trap context */
+    *cur_state = frame->saved_state;
     return 0;
 }
 

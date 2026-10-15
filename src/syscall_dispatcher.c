@@ -122,6 +122,11 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
     int64_t ret = syscall_dispatch(num, a0, a1, a2, a3, a4, a5, state);
     ltm_set_in_host_syscall(0);
 
+    if (num == 139 /* rt_sigreturn */ && ret == 0) {
+        /* Guest context has been fully restored from sigframe into state */
+        return;
+    }
+
     /* Set guest return value in x0 */
     state->__x[0] = (uint64_t)ret;
 
