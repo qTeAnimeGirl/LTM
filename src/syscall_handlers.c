@@ -1314,6 +1314,39 @@ int64_t handle_fcntl(int fd, int cmd, unsigned long arg) {
         return 0;
     }
 
+    /*
+     * Traceability Requirement: Fixes crash at fault_addr=0x50012b31e / 0x50012ee7d where missing
+     * flag translation in F_GETFL/F_SETFL causes Linux O_NONBLOCK (0x800) to be dropped by Darwin
+     * or cause EINVAL, corrupting network stream buffering and libcurl/libz decompression state.
+     */
+    if (cmd == LINUX_F_GETFL) {
+        int dflags = fcntl(fd, F_GETFL, 0);
+        if (dflags < 0) return darwin_to_linux_errno(errno);
+        int lflags = 0;
+        int acc = dflags & 3;
+        if (acc == O_RDONLY) lflags |= LINUX_O_RDONLY;
+        else if (acc == O_WRONLY) lflags |= LINUX_O_WRONLY;
+        else if (acc == O_RDWR) lflags |= LINUX_O_RDWR;
+        if (dflags & O_NONBLOCK) lflags |= LINUX_O_NONBLOCK;
+        if (dflags & O_APPEND)   lflags |= LINUX_O_APPEND;
+        if (dflags & O_ASYNC)    lflags |= LINUX_O_ASYNC;
+        return lflags;
+    }
+
+    if (cmd == LINUX_F_SETFL) {
+        int dflags = 0;
+        int acc = arg & 3;
+        if (acc == LINUX_O_RDONLY) dflags |= O_RDONLY;
+        else if (acc == LINUX_O_WRONLY) dflags |= O_WRONLY;
+        else if (acc == LINUX_O_RDWR) dflags |= O_RDWR;
+        if (arg & LINUX_O_NONBLOCK) dflags |= O_NONBLOCK;
+        if (arg & LINUX_O_APPEND)   dflags |= O_APPEND;
+        if (arg & LINUX_O_ASYNC)    dflags |= O_ASYNC;
+        int ret = fcntl(fd, F_SETFL, dflags);
+        if (ret < 0) return darwin_to_linux_errno(errno);
+        return 0;
+    }
+
     int dcmd = cmd;
     if (cmd == LINUX_F_DUPFD_CLOEXEC) {
         dcmd = F_DUPFD_CLOEXEC;

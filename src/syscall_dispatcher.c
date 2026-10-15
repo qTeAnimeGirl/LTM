@@ -186,6 +186,20 @@ int syscall_dispatcher_init(void) {
     signal(SIGTTOU, SIG_IGN);
     signal(SIGTTIN, SIG_IGN);
 
+    /* Reset any inherited ignored signals across execve (e.g. from interactive bash) to SIG_DFL */
+    for (int s = 1; s < NSIG; s++) {
+        if (s == SIGKILL || s == SIGSTOP || s == SIGTRAP) continue;
+        struct sigaction cur_sa;
+        if (sigaction(s, NULL, &cur_sa) == 0) {
+            if (cur_sa.sa_handler == SIG_IGN && s != SIGTTOU && s != SIGTTIN) {
+                struct sigaction dfl_sa;
+                memset(&dfl_sa, 0, sizeof(dfl_sa));
+                dfl_sa.sa_handler = SIG_DFL;
+                sigaction(s, &dfl_sa, NULL);
+            }
+        }
+    }
+
     /* Allocate alternate stack for safe signal handling */
     g_alt_stack = mmap(NULL, ALT_STACK_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (g_alt_stack == MAP_FAILED) {

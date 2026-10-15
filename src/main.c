@@ -378,25 +378,6 @@ int main(int argc, char **argv, char **envp) {
         }
     }
 
-    /* Stale lock detection & auto-recovery for pacman */
-    if (strstr(binary_arg, "pacman") != NULL && g_ltm.host_rootfs[0] != '\0') {
-        char lock_file[1024];
-        snprintf(lock_file, sizeof(lock_file), "%s/var/lib/pacman/db.lck", g_ltm.host_rootfs);
-        if (access(lock_file, F_OK) == 0) {
-            char session_lock[1024];
-            snprintf(session_lock, sizeof(session_lock), "%s/.ltm_session.lck", g_ltm.host_rootfs);
-            int sl_fd = open(session_lock, O_CREAT | O_RDWR, 0644);
-            if (sl_fd >= 0) {
-                if (flock(sl_fd, LOCK_EX | LOCK_NB) == 0) {
-                    unlink(lock_file);
-                    printf("[LTM:NOTICE] Detected stale pacman lock (%s) from prior session; automatically recovered.\n", lock_file);
-                    flock(sl_fd, LOCK_UN);
-                }
-                close(sl_fd);
-            }
-        }
-    }
-
     /* Prepare guest argc / argv / envp */
     g_ltm.guest_argc = argc - arg_idx;
     g_ltm.guest_argv = &argv[arg_idx];
