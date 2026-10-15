@@ -49,7 +49,6 @@ uintptr_t ltm_get_guest_tls(void) {
 
 void ltm_set_guest_tls(uintptr_t val) {
     s_guest_tls = val;
-    g_ltm.guest_tls = val;
     __asm__ volatile("msr tpidr_el0, %0" : : "r"(val));
 }
 
@@ -1665,12 +1664,74 @@ int64_t handle_sigaltstack(const void *ss, void *oss) {
 static struct linux_sigaction g_guest_sigactions[LINUX_NSIG];
 
 struct ltm_sigframe {
-    struct linux_siginfo siginfo;
-    arm_thread_state64_t saved_state;
-    uint64_t magic;
+    struct linux_siginfo  siginfo;
+    struct linux_ucontext uc;
+    arm_thread_state64_t  saved_state;
+    arm_neon_state64_t    saved_neon;
+    uint64_t              magic;
 };
 
 #define LTM_SIGFRAME_MAGIC 0x4c544d5f534947ULL /* "LTM_SIG" */
+
+static __thread int s_in_host_syscall = 0;
+static __thread sig_atomic_t s_pending_signal = 0;
+static __thread siginfo_t s_pending_siginfo;
+
+void ltm_set_in_host_syscall(int in_sys) {
+    s_in_host_syscall = in_sys;
+}
+
+void ltm_check_and_deliver_pending_signals(void *state_ptr) {
+    if (!s_pending_signal) return;
+    int l_sig = (int)s_pending_signal;
+    s_pending_signal = 0;
+
+    if (l_sig <= 0 || l_sig >= LINUX_NSIG) return;
+    struct linux_sigaction *act = &g_guest_sigactions[l_sig];
+    if (!act->l_handler || act->l_handler == (void (*)(int))SIG_DFL || act->l_handler == (void (*)(int))SIG_IGN) {
+        return;
+    }
+
+    arm_thread_state64_t *state = (arm_thread_state64_t *)state_ptr;
+    uintptr_t sp = state->__sp;
+    sp -= sizeof(struct ltm_sigframe);
+    sp &= ~0xfULL;
+
+    struct ltm_sigframe *frame = (struct ltm_sigframe *)sp;
+    memset(&frame->siginfo, 0, sizeof(frame->siginfo));
+    frame->siginfo.si_signo = l_sig;
+    frame->siginfo.si_code = s_pending_siginfo.si_code;
+    if (l_sig == 17 /* LINUX_SIGCHLD */) {
+        frame->siginfo._sifields._sigchld._pid = s_pending_siginfo.si_pid;
+        frame->siginfo._sifields._sigchld._status = s_pending_siginfo.si_status;
+    }
+    if (l_sig == 4 || l_sig == 7 || l_sig == 11) {
+        frame->siginfo._sifields._sigfault._addr = s_pending_siginfo.si_addr;
+    }
+
+    memcpy(&frame->saved_state, state, sizeof(arm_thread_state64_t));
+    frame->magic = LTM_SIGFRAME_MAGIC;
+
+    memset(&frame->uc, 0, sizeof(frame->uc));
+    frame->uc.uc_stack.ss_sp = (void *)state->__sp;
+    for (int i = 0; i < 31; i++) {
+        frame->uc.uc_mcontext.regs[i] = state->__x[i];
+    }
+    frame->uc.uc_mcontext.sp = state->__sp;
+    frame->uc.uc_mcontext.pc = state->__pc;
+    frame->uc.uc_mcontext.pstate = state->__cpsr;
+
+    state->__x[0] = l_sig;
+    state->__x[1] = (uintptr_t)&frame->siginfo;
+    state->__x[2] = (uintptr_t)&frame->uc;
+    state->__sp = sp;
+    uintptr_t restorer = ((act->l_flags & 0x04000000ULL) && act->l_restorer)
+                         ? (uintptr_t)act->l_restorer
+                         : (uintptr_t)ltm_sigreturn_stub;
+    state->__lr = restorer;
+    state->__pc = (uintptr_t)act->l_handler;
+    state->__x[16] = (uintptr_t)act->l_handler;
+}
 
 static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) {
     int l_sig = darwin_to_linux_signal(d_sig);
@@ -1678,6 +1739,13 @@ static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) 
 
     struct linux_sigaction *act = &g_guest_sigactions[l_sig];
     if (!act->l_handler || act->l_handler == (void (*)(int))SIG_DFL || act->l_handler == (void (*)(int))SIG_IGN) {
+        return;
+    }
+
+    /* If the signal arrived while the host is executing a blocking syscall, defer delivery to avoid clobbering host C frame */
+    if (s_in_host_syscall) {
+        s_pending_signal = l_sig;
+        if (info) s_pending_siginfo = *info;
         return;
     }
 
@@ -1697,9 +1765,26 @@ static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) 
         frame->siginfo._sifields._sigchld._pid = info->si_pid;
         frame->siginfo._sifields._sigchld._status = info->si_status;
     }
+    if (info && (l_sig == 4 || l_sig == 7 || l_sig == 11)) {
+        frame->siginfo._sifields._sigfault._addr = info->si_addr;
+    }
 
     memcpy(&frame->saved_state, cur_state, sizeof(arm_thread_state64_t));
+    memcpy(&frame->saved_neon, &uc->uc_mcontext->__ns, sizeof(arm_neon_state64_t));
     frame->magic = LTM_SIGFRAME_MAGIC;
+
+    /* Populate standard Linux ARM64 ucontext */
+    memset(&frame->uc, 0, sizeof(frame->uc));
+    frame->uc.uc_stack.ss_sp = (void *)cur_state->__sp;
+    for (int i = 0; i < 31; i++) {
+        frame->uc.uc_mcontext.regs[i] = cur_state->__x[i];
+    }
+    frame->uc.uc_mcontext.sp = cur_state->__sp;
+    frame->uc.uc_mcontext.pc = cur_state->__pc;
+    frame->uc.uc_mcontext.pstate = cur_state->__cpsr;
+    if (info && (l_sig == 4 || l_sig == 7 || l_sig == 11)) {
+        frame->uc.uc_mcontext.fault_address = (uint64_t)info->si_addr;
+    }
 
     /* Only log crash dumps for fatal exception signals */
     if (l_sig == 4 /* SIGILL */ || l_sig == 7 /* SIGBUS */ ||
@@ -1741,13 +1826,14 @@ static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) 
     arm_thread_state64_t target_state = *cur_state;
     target_state.__x[0] = l_sig;                          /* signo */
     target_state.__x[1] = (uintptr_t)&frame->siginfo;     /* siginfo_t * */
-    target_state.__x[2] = sp;                             /* ucontext_t * */
+    target_state.__x[2] = (uintptr_t)&frame->uc;          /* ucontext_t * */
     target_state.__sp = sp;
     uintptr_t restorer = ((act->l_flags & 0x04000000ULL) && act->l_restorer)
                          ? (uintptr_t)act->l_restorer
                          : (uintptr_t)ltm_sigreturn_stub;
     target_state.__lr = restorer;
     target_state.__pc = (uintptr_t)act->l_handler;
+    target_state.__x[16] = (uintptr_t)act->l_handler;
 
     /* Unmask the signal so subsequent signals can be delivered */
     sigset_t set;
@@ -1797,10 +1883,24 @@ int64_t handle_rt_sigaction(int signum, const struct linux_sigaction *act, struc
 int64_t handle_rt_sigreturn(void *state_ptr) {
     arm_thread_state64_t *cur_state = (arm_thread_state64_t *)state_ptr;
     uintptr_t sp = cur_state->__sp;
-    struct ltm_sigframe *frame = (struct ltm_sigframe *)sp;
+    if (sp < 0x1000 || (sp & 0x7) != 0) return -LINUX_EINVAL;
 
+    mach_vm_address_t vaddr = (mach_vm_address_t)sp;
+    mach_vm_size_t vsize = 0;
+    vm_region_basic_info_data_64_t vinfo;
+    mach_msg_type_number_t vcount = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t obj = MACH_PORT_NULL;
+    kern_return_t kr = mach_vm_region(mach_task_self(), &vaddr, &vsize,
+                                      VM_REGION_BASIC_INFO_64,
+                                      (vm_region_info_t)&vinfo, &vcount, &obj);
+    if (kr != KERN_SUCCESS || (mach_vm_address_t)sp < vaddr ||
+        (mach_vm_address_t)sp + sizeof(struct ltm_sigframe) > vaddr + vsize ||
+        !(vinfo.protection & VM_PROT_READ)) {
+        return -LINUX_EINVAL;
+    }
+
+    struct ltm_sigframe *frame = (struct ltm_sigframe *)sp;
     if (frame->magic != LTM_SIGFRAME_MAGIC) {
-        ltm_log_error("rt_sigreturn: invalid frame magic 0x%llx", (unsigned long long)frame->magic);
         return -LINUX_EINVAL;
     }
 
@@ -1809,8 +1909,9 @@ int64_t handle_rt_sigreturn(void *state_ptr) {
     sigemptyset(&set);
     pthread_sigmask(SIG_SETMASK, &set, NULL);
 
+    /* Restore all integer registers, condition flags, SP, and PC via ltm_resume_context */
     ltm_resume_context(&frame->saved_state);
-    return 0; /* Unreachable */
+    return 0;
 }
 
 int64_t handle_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, size_t sigsetsize) {
@@ -1867,6 +1968,20 @@ int64_t handle_brk(uintptr_t brk_addr) {
         uintptr_t page_new = PAGE_ROUND_UP(brk_addr);
 
         if (page_new > page_cur) {
+            mach_vm_address_t check_addr = (mach_vm_address_t)page_cur;
+            mach_vm_size_t check_size = 0;
+            vm_region_basic_info_data_64_t info;
+            mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+            mach_port_t object_name;
+            kern_return_t kr = mach_vm_region(mach_task_self(), &check_addr, &check_size,
+                                              VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count, &object_name);
+            if (kr == KERN_SUCCESS && check_addr < (mach_vm_address_t)page_new) {
+                /* Collision detected with an existing mapping; reject expansion per Linux ABI */
+                int64_t ret = (int64_t)g_ltm.brk_current;
+                pthread_mutex_unlock(&g_brk_mutex);
+                return ret;
+            }
+
             void *p = mmap((void *)page_cur, page_new - page_cur,
                            PROT_READ | PROT_WRITE,
                            MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0);
@@ -2161,10 +2276,16 @@ int64_t handle_nanosleep(const struct linux_timespec *req, struct linux_timespec
 int64_t handle_exit(int status) {
     ltm_trace("sys_exit(%d) on thread %lld", status, (long long)ltm_get_thread_tid());
 
+    /* Clean up robust futex lists for terminating thread */
+    ltm_exit_robust_list();
+
     int *tid_ptr = ltm_get_child_tid_ptr();
     if (tid_ptr) {
-        *tid_ptr = 0;
-        handle_futex((uint32_t *)tid_ptr, LINUX_FUTEX_WAKE, 1, NULL, NULL, 0);
+        mach_vm_address_t vaddr = (mach_vm_address_t)tid_ptr;
+        if (mach_vm_protect(mach_task_self(), vaddr, sizeof(int), FALSE, VM_PROT_READ | VM_PROT_WRITE) == KERN_SUCCESS) {
+            *tid_ptr = 0;
+            handle_futex((uint32_t *)tid_ptr, LINUX_FUTEX_WAKE, 1, NULL, NULL, 0);
+        }
     }
 
     int my_tid = (int)ltm_get_thread_tid();
@@ -5014,7 +5135,11 @@ int64_t handle_close_range(unsigned int first, unsigned int last, unsigned int f
     if (first > last) return -LINUX_EINVAL;
     if (flags & ~(LINUX_CLOSE_RANGE_UNSHARE | LINUX_CLOSE_RANGE_CLOEXEC)) return -LINUX_EINVAL;
 
-    unsigned int max_fd = 1024;
+    struct rlimit rl;
+    unsigned int max_fd = 10240;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur > 0) {
+        max_fd = (unsigned int)rl.rlim_cur;
+    }
     if (last > max_fd) last = max_fd;
 
     for (unsigned int fd = first; fd <= last; fd++) {
@@ -5022,9 +5147,7 @@ int64_t handle_close_range(unsigned int first, unsigned int last, unsigned int f
         if (flags & LINUX_CLOSE_RANGE_CLOEXEC) {
             fcntl((int)fd, F_SETFD, FD_CLOEXEC);
         } else {
-            if (fd > 2) {
-                handle_close((int)fd);
-            }
+            handle_close((int)fd);
         }
     }
     return 0;
@@ -5411,7 +5534,13 @@ int64_t handle_splice(int fd_in, off_t *off_in, int fd_out, off_t *off_out, size
 int64_t handle_tee(int fd_in, int fd_out, size_t len, unsigned int flags) {
     (void)flags;
     if (fd_in < 0 || fd_out < 0) return -LINUX_EBADF;
+    if (fd_in == fd_out) return -LINUX_EINVAL;
     if (len == 0) return 0;
+
+    struct stat st_in, st_out;
+    if (fstat(fd_in, &st_in) != 0) return darwin_to_linux_errno(errno);
+    if (fstat(fd_out, &st_out) != 0) return darwin_to_linux_errno(errno);
+    if (!S_ISFIFO(st_in.st_mode) || !S_ISFIFO(st_out.st_mode)) return -LINUX_EINVAL;
 
     char buf[65536];
     size_t chunk = len > sizeof(buf) ? sizeof(buf) : len;
@@ -5693,14 +5822,29 @@ int64_t handle_setdomainname(const char *name, size_t len) {
 }
 
 int64_t handle_mremap(unsigned long old_address, unsigned long old_size, unsigned long new_size, unsigned long flags, unsigned long new_address) {
-    (void)flags; (void)new_address;
     if ((old_address & 0x3FFF) != 0) return -LINUX_EINVAL;
     if (old_size == 0 || new_size == 0) return -LINUX_EINVAL;
+    if (flags & ~(1UL | 2UL | 4UL)) return -LINUX_EINVAL;
+    if ((flags & 2UL /* MREMAP_FIXED */) && !(flags & 1UL /* MREMAP_MAYMOVE */)) return -LINUX_EINVAL;
 
     size_t aligned_old = (old_size + 0x3FFF) & ~0x3FFFULL;
     size_t aligned_new = (new_size + 0x3FFF) & ~0x3FFFULL;
 
-    if (aligned_new == aligned_old) return old_address;
+    if (flags & 2UL /* MREMAP_FIXED */) {
+        if ((new_address & 0x3FFF) != 0) return -LINUX_EINVAL;
+        if (new_address == old_address) return -LINUX_EINVAL;
+    }
+
+    if (aligned_new == aligned_old) {
+        if (flags & 2UL) {
+            void *new_addr = mmap((void *)new_address, aligned_new, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0);
+            if (new_addr == MAP_FAILED) return darwin_to_linux_errno(errno);
+            memcpy(new_addr, (const void *)old_address, old_size);
+            if (!(flags & 4UL /* MREMAP_DONTUNMAP */)) munmap((void *)old_address, aligned_old);
+            return (int64_t)(uintptr_t)new_addr;
+        }
+        return old_address;
+    }
 
     if (aligned_new < aligned_old) {
         /* Shrinking */
@@ -5708,11 +5852,44 @@ int64_t handle_mremap(unsigned long old_address, unsigned long old_size, unsigne
         return old_address;
     }
 
-    /* Growing */
-    void *new_addr = mmap(NULL, aligned_new, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    /* Growing: attempt in-place expansion if not MREMAP_FIXED */
+    if (!(flags & 2UL)) {
+        mach_vm_address_t check_addr = (mach_vm_address_t)(old_address + aligned_old);
+        mach_vm_size_t check_size = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object_name;
+        kern_return_t kr = mach_vm_region(mach_task_self(), &check_addr, &check_size,
+                                          VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count, &object_name);
+        bool can_grow_in_place = (kr != KERN_SUCCESS || check_addr >= (mach_vm_address_t)(old_address + aligned_new));
+
+        if (can_grow_in_place) {
+            void *p = mmap((void *)(old_address + aligned_old), aligned_new - aligned_old,
+                           PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0);
+            if (p != MAP_FAILED) {
+                return old_address;
+            }
+        }
+    }
+
+    if (!(flags & 1UL /* MREMAP_MAYMOVE */)) {
+        return -LINUX_ENOMEM;
+    }
+
+    void *target_dest = NULL;
+    int map_flags = MAP_ANON | MAP_PRIVATE;
+    if (flags & 2UL /* MREMAP_FIXED */) {
+        target_dest = (void *)new_address;
+        map_flags |= MAP_FIXED;
+    }
+
+    void *new_addr = mmap(target_dest, aligned_new, PROT_READ | PROT_WRITE, map_flags, -1, 0);
     if (new_addr == MAP_FAILED) return darwin_to_linux_errno(errno);
+
     memcpy(new_addr, (const void *)old_address, old_size);
-    munmap((void *)old_address, aligned_old);
+    if (!(flags & 4UL /* MREMAP_DONTUNMAP */)) {
+        munmap((void *)old_address, aligned_old);
+    }
     return (int64_t)(uintptr_t)new_addr;
 }
 
@@ -6174,7 +6351,44 @@ int64_t handle_msgctl(int msqid, int cmd, void *buf) {
     if (cmd == 0) dcmd = IPC_RMID;
     else if (cmd == 1) dcmd = IPC_SET;
     else if (cmd == 2) dcmd = IPC_STAT;
-    int r = msgctl(msqid, dcmd, (struct msqid_ds *)buf);
+
+    if (dcmd == IPC_STAT) {
+        if (!buf) return -LINUX_EFAULT;
+        struct msqid_ds ds;
+        int r = msgctl(msqid, IPC_STAT, &ds);
+        if (r == -1) return darwin_to_linux_errno(errno);
+
+        struct linux_msqid_ds *l = (struct linux_msqid_ds *)buf;
+        memset(l, 0, sizeof(*l));
+        l->msg_perm.uid = ds.msg_perm.uid;
+        l->msg_perm.gid = ds.msg_perm.gid;
+        l->msg_perm.cuid = ds.msg_perm.cuid;
+        l->msg_perm.cgid = ds.msg_perm.cgid;
+        l->msg_perm.mode = ds.msg_perm.mode;
+        l->msg_stime = ds.msg_stime;
+        l->msg_rtime = ds.msg_rtime;
+        l->msg_ctime = ds.msg_ctime;
+        l->msg_cbytes = ds.msg_cbytes;
+        l->msg_qnum = ds.msg_qnum;
+        l->msg_qbytes = ds.msg_qbytes;
+        l->msg_lspid = ds.msg_lspid;
+        l->msg_lrpid = ds.msg_lrpid;
+        return 0;
+    } else if (dcmd == IPC_SET) {
+        if (!buf) return -LINUX_EFAULT;
+        struct linux_msqid_ds *l = (struct linux_msqid_ds *)buf;
+        struct msqid_ds ds;
+        memset(&ds, 0, sizeof(ds));
+        ds.msg_perm.uid = l->msg_perm.uid;
+        ds.msg_perm.gid = l->msg_perm.gid;
+        ds.msg_perm.mode = l->msg_perm.mode;
+        ds.msg_qbytes = l->msg_qbytes;
+        int r = msgctl(msqid, IPC_SET, &ds);
+        if (r == -1) return darwin_to_linux_errno(errno);
+        return 0;
+    }
+
+    int r = msgctl(msqid, dcmd, NULL);
     if (r == -1) return darwin_to_linux_errno(errno);
     return 0;
 }
@@ -6215,6 +6429,39 @@ int64_t handle_semctl(int semid, int semnum, int cmd, unsigned long arg) {
         case 17: dcmd = SETALL; break;
         default: break;
     }
+
+    if (dcmd == IPC_STAT) {
+        void *buf = (void *)arg;
+        if (!buf) return -LINUX_EFAULT;
+        struct semid_ds ds;
+        int r = semctl(semid, semnum, IPC_STAT, &ds);
+        if (r == -1) return darwin_to_linux_errno(errno);
+
+        struct linux_semid_ds *l = (struct linux_semid_ds *)buf;
+        memset(l, 0, sizeof(*l));
+        l->sem_perm.uid = ds.sem_perm.uid;
+        l->sem_perm.gid = ds.sem_perm.gid;
+        l->sem_perm.cuid = ds.sem_perm.cuid;
+        l->sem_perm.cgid = ds.sem_perm.cgid;
+        l->sem_perm.mode = ds.sem_perm.mode;
+        l->sem_otime = ds.sem_otime;
+        l->sem_ctime = ds.sem_ctime;
+        l->sem_nsems = ds.sem_nsems;
+        return 0;
+    } else if (dcmd == IPC_SET) {
+        void *buf = (void *)arg;
+        if (!buf) return -LINUX_EFAULT;
+        struct linux_semid_ds *l = (struct linux_semid_ds *)buf;
+        struct semid_ds ds;
+        memset(&ds, 0, sizeof(ds));
+        ds.sem_perm.uid = l->sem_perm.uid;
+        ds.sem_perm.gid = l->sem_perm.gid;
+        ds.sem_perm.mode = l->sem_perm.mode;
+        int r = semctl(semid, semnum, IPC_SET, &ds);
+        if (r == -1) return darwin_to_linux_errno(errno);
+        return 0;
+    }
+
     int r = semctl(semid, semnum, dcmd, (void *)arg);
     if (r == -1) return darwin_to_linux_errno(errno);
     return r;
@@ -6313,7 +6560,10 @@ int64_t handle_statx(int dirfd, const char *pathname, int flags, unsigned int ma
         int r = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), (flags & 0x100) ? AT_SYMLINK_NOFOLLOW : 0);
         if (r < 0) return r;
 
-        if (flags & 0x100) { /* AT_SYMLINK_NOFOLLOW */
+        if (r == 1) {
+            int vres = sandbox_virtual_stat(host_path, &st);
+            if (vres < 0) return vres;
+        } else if (flags & 0x100) { /* AT_SYMLINK_NOFOLLOW */
             if (lstat(host_path, &st) != 0) return darwin_to_linux_errno(errno);
         } else {
             if (stat(host_path, &st) != 0) return darwin_to_linux_errno(errno);
@@ -6342,6 +6592,10 @@ int64_t handle_statx(int dirfd, const char *pathname, int flags, unsigned int ma
 
     statxbuf->stx_dev_major = major(st.st_dev);
     statxbuf->stx_dev_minor = minor(st.st_dev);
+    if (S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode)) {
+        statxbuf->stx_rdev_major = major(st.st_rdev);
+        statxbuf->stx_rdev_minor = minor(st.st_rdev);
+    }
 
     return 0;
 }
@@ -7083,6 +7337,44 @@ int64_t handle_get_robust_list(int pid, struct linux_robust_list_head **head_ptr
     return 0;
 }
 
+#define LINUX_FUTEX_OWNER_DIED 0x40000000U
+#define LINUX_FUTEX_WAITERS    0x80000000U
+#define LINUX_FUTEX_TID_MASK   0x3fffffffU
+
+void ltm_exit_robust_list(void) {
+    if (!g_robust_head) return;
+    int tid = (int)ltm_get_thread_tid();
+    struct linux_robust_list_head *head = g_robust_head;
+    long futex_offset = head->futex_offset;
+    struct linux_robust_list *entry = head->list.next;
+    int limit = 1024;
+
+    while (entry && entry != &head->list && limit-- > 0) {
+        uint32_t *uaddr = (uint32_t *)((uintptr_t)entry + futex_offset);
+        mach_vm_address_t vaddr = (mach_vm_address_t)uaddr;
+        if (mach_vm_protect(mach_task_self(), vaddr, sizeof(uint32_t), FALSE, VM_PROT_READ | VM_PROT_WRITE) == KERN_SUCCESS) {
+            uint32_t val = *uaddr;
+            if ((val & LINUX_FUTEX_TID_MASK) == (uint32_t)tid) {
+                *uaddr = (val & LINUX_FUTEX_WAITERS) | LINUX_FUTEX_OWNER_DIED;
+                handle_futex(uaddr, LINUX_FUTEX_WAKE, 1, NULL, NULL, 0);
+            }
+        }
+        entry = entry->next;
+    }
+
+    if (head->list_op_pending) {
+        uint32_t *uaddr = (uint32_t *)((uintptr_t)head->list_op_pending + futex_offset);
+        mach_vm_address_t vaddr = (mach_vm_address_t)uaddr;
+        if (mach_vm_protect(mach_task_self(), vaddr, sizeof(uint32_t), FALSE, VM_PROT_READ | VM_PROT_WRITE) == KERN_SUCCESS) {
+            uint32_t val = *uaddr;
+            if ((val & LINUX_FUTEX_TID_MASK) == (uint32_t)tid) {
+                *uaddr = (val & LINUX_FUTEX_WAITERS) | LINUX_FUTEX_OWNER_DIED;
+                handle_futex(uaddr, LINUX_FUTEX_WAKE, 1, NULL, NULL, 0);
+            }
+        }
+    }
+}
+
 int64_t handle_kexec_load(unsigned long entry, unsigned long nr_segments, struct linux_kexec_segment *segments, unsigned long flags) {
     (void)entry; (void)flags;
     if (nr_segments > 16) return -LINUX_EINVAL;
@@ -7405,17 +7697,33 @@ int64_t handle_clone3(struct linux_clone_args *cl_args, size_t size, void *state
     if (!cl_args) return -LINUX_EFAULT;
     if (size < 64) return -LINUX_EINVAL;
 
+    struct linux_clone_args kargs;
+    memset(&kargs, 0, sizeof(kargs));
+    size_t copy_sz = size < sizeof(kargs) ? size : sizeof(kargs);
+    memcpy(&kargs, cl_args, copy_sz);
+
     void *stack = NULL;
-    if (cl_args->stack) {
-        stack = (void *)(cl_args->stack + cl_args->stack_size);
+    if (kargs.stack) {
+        stack = (void *)(kargs.stack + kargs.stack_size);
     }
 
-    return handle_clone(cl_args->flags | cl_args->exit_signal,
-                        stack,
-                        (int *)cl_args->parent_tid,
-                        (void *)cl_args->tls,
-                        (int *)cl_args->child_tid,
-                        state);
+    uint64_t flags = (kargs.flags & ~0xffULL) | (kargs.exit_signal & 0xffULL);
+
+    int64_t res = handle_clone(flags,
+                               stack,
+                               (int *)kargs.parent_tid,
+                               (void *)kargs.tls,
+                               (int *)kargs.child_tid,
+                               state);
+
+    if (res > 0 && (kargs.flags & 0x00001000ULL /* CLONE_PIDFD */) && kargs.pidfd) {
+        int pfd = handle_pidfd_open((pid_t)res, 0);
+        if (pfd >= 0) {
+            *(int *)kargs.pidfd = pfd;
+        }
+    }
+
+    return res;
 }
 
 /* ========================================================================= */
@@ -7550,18 +7858,95 @@ int64_t handle_process_mrelease(int pidfd, unsigned int flags) {
 }
 
 int64_t handle_futex_waitv(struct linux_futex_waitv *waiters, unsigned int nr_futexes, unsigned int flags, const void *timeout, clockid_t clockid) {
-    (void)timeout; (void)clockid;
+    (void)clockid;
     if (!waiters) return -LINUX_EFAULT;
     if (nr_futexes == 0 || nr_futexes > 128) return -LINUX_EINVAL;
     if (flags != 0) return -LINUX_EINVAL;
+
     for (unsigned int i = 0; i < nr_futexes; i++) {
         if (!waiters[i].uaddr) return -LINUX_EFAULT;
+        if ((waiters[i].uaddr & 3) != 0) return -LINUX_EINVAL;
         volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)waiters[i].uaddr;
         if (*p != (uint32_t)waiters[i].val) {
             return -LINUX_EAGAIN;
         }
     }
-    return 0;
+
+    /* If single-threaded with no timeout, avoid indefinite deadlock and return 0 */
+    if (atomic_load(&g_active_thread_count) <= 1 && !timeout) {
+        return 0;
+    }
+
+    if (nr_futexes == 1) {
+        int64_t r = handle_futex((uint32_t *)waiters[0].uaddr, LINUX_FUTEX_WAIT, waiters[0].val, (const struct linux_timespec *)timeout, NULL, 0);
+        if (r < 0) return r;
+        return 0;
+    }
+
+    const struct linux_timespec *ts = (const struct linux_timespec *)timeout;
+    struct timespec deadline;
+    bool has_timeout = false;
+    if (ts) {
+        has_timeout = true;
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        deadline.tv_sec = now.tv_sec + ts->tv_sec;
+        deadline.tv_nsec = now.tv_nsec + ts->tv_nsec;
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_sec += 1;
+            deadline.tv_nsec -= 1000000000L;
+        }
+    }
+
+    futex_bucket_t *b = get_futex_bucket((void *)(uintptr_t)waiters[0].uaddr);
+    pthread_mutex_lock(&b->mutex);
+
+    while (1) {
+        for (unsigned int i = 0; i < nr_futexes; i++) {
+            volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)waiters[i].uaddr;
+            if (*p != (uint32_t)waiters[i].val) {
+                pthread_mutex_unlock(&b->mutex);
+                return (int64_t)i;
+            }
+        }
+
+        if (has_timeout) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            if (now.tv_sec > deadline.tv_sec ||
+               (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
+                pthread_mutex_unlock(&b->mutex);
+                return -LINUX_ETIMEDOUT;
+            }
+            struct timespec step;
+            step.tv_sec = now.tv_sec;
+            step.tv_nsec = now.tv_nsec + 5000000L;
+            if (step.tv_nsec >= 1000000000L) { step.tv_sec++; step.tv_nsec -= 1000000000L; }
+            if (step.tv_sec > deadline.tv_sec || (step.tv_sec == deadline.tv_sec && step.tv_nsec > deadline.tv_nsec)) {
+                step = deadline;
+            }
+            int rc = pthread_cond_timedwait(&b->cond, &b->mutex, &step);
+            if (rc == ETIMEDOUT && (now.tv_sec >= deadline.tv_sec)) {
+                for (unsigned int i = 0; i < nr_futexes; i++) {
+                    volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)waiters[i].uaddr;
+                    if (*p != (uint32_t)waiters[i].val) {
+                        pthread_mutex_unlock(&b->mutex);
+                        return (int64_t)i;
+                    }
+                }
+                pthread_mutex_unlock(&b->mutex);
+                return -LINUX_ETIMEDOUT;
+            }
+        } else {
+            struct timespec now;
+            clock_gettime(CLOCK_REALTIME, &now);
+            struct timespec step;
+            step.tv_sec = now.tv_sec;
+            step.tv_nsec = now.tv_nsec + 10000000L;
+            if (step.tv_nsec >= 1000000000L) { step.tv_sec++; step.tv_nsec -= 1000000000L; }
+            pthread_cond_timedwait(&b->cond, &b->mutex, &step);
+        }
+    }
 }
 
 int64_t handle_set_mempolicy_home_node(unsigned long start, unsigned long len, unsigned long home_node, unsigned long flags) {

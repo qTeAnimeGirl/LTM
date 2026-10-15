@@ -90,17 +90,6 @@ static char **build_guest_env(char **host_envp, bool preserve_env) {
             }
         }
 
-        bool has_armcap = false;
-        for (int i = 0; i < n; i++) {
-            if (strncmp(guest_env[i], "OPENSSL_armcap=", 15) == 0) {
-                has_armcap = true;
-                break;
-            }
-        }
-        if (!has_armcap) {
-            guest_env[n++] = strdup("OPENSSL_armcap=0");
-        }
-
         guest_env[n] = NULL;
         return guest_env;
     }
@@ -124,7 +113,6 @@ static char **build_guest_env(char **host_envp, bool preserve_env) {
         "LC_ALL=C.UTF-8",
         "HOSTNAME=ltm-mac",
         "PWD=/root",
-        "OPENSSL_armcap=0",
         NULL
     };
 
@@ -164,9 +152,6 @@ static char **build_guest_env(char **host_envp, bool preserve_env) {
 }
 
 int main(int argc, char **argv, char **envp) {
-    /* Prevent OpenSSL from executing unsupported ARMv8 crypto instructions during CPUID probes */
-    setenv("OPENSSL_armcap", "0", 0);
-
     if (argc < 2) {
         print_usage(argv[0]);
         return 1;

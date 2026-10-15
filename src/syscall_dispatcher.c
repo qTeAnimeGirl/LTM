@@ -32,12 +32,52 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
     }
 
     if (sig == SIGILL) {
-        /* Check if it's mrs Xt, MIDR_EL1 (0xd5380000 | reg) */
-        if ((insn & ~0x1fU) == 0xd5380000U) {
-            uint32_t reg = insn & 0x1fU;
-            if (reg < 31) {
-                state->__x[reg] = 0x610f0300ULL; /* Apple Silicon M-series MIDR */
-            }
+        uint32_t op = insn & ~0x1fU;
+        uint32_t reg = insn & 0x1fU;
+
+        if (op == 0xd5380000U) {
+            /* mrs Xt, MIDR_EL1 */
+            if (reg < 31) state->__x[reg] = 0x610f0300ULL; /* Apple Silicon M-series */
+            state->__pc += 4;
+            return;
+        } else if (op == 0xd53b0020U) {
+            /* mrs Xt, CTR_EL0 */
+            if (reg < 31) state->__x[reg] = 0x8444c004ULL; /* 64-byte I/D cache lines */
+            state->__pc += 4;
+            return;
+        } else if (op == 0xd5380600U) {
+            /* mrs Xt, ID_AA64ISAR0_EL1 */
+            if (reg < 31) state->__x[reg] = 0x00011120ULL; /* AES, SHA1, SHA2, CRC32, ATOMICS */
+            state->__pc += 4;
+            return;
+        } else if (op == 0xd5380620U) {
+            /* mrs Xt, ID_AA64ISAR1_EL1 */
+            if (reg < 31) state->__x[reg] = 0x00000022ULL; /* DP, FCMA, JSCVT */
+            state->__pc += 4;
+            return;
+        } else if (op == 0xd5380400U) {
+            /* mrs Xt, ID_AA64PFR0_EL1 */
+            if (reg < 31) state->__x[reg] = 0x00000011ULL; /* FP, AdvSIMD, AArch64 */
+            state->__pc += 4;
+            return;
+        } else if (op == 0xd5380420U) {
+            /* mrs Xt, ID_AA64PFR1_EL1 */
+            if (reg < 31) state->__x[reg] = 0x0ULL;
+            state->__pc += 4;
+            return;
+        } else if (op == 0xd5380700U) {
+            /* mrs Xt, ID_AA64MMFR0_EL1 */
+            if (reg < 31) state->__x[reg] = 0x00000005ULL; /* 48-bit VA, 16KB/4KB granule */
+            state->__pc += 4;
+            return;
+        } else if (op == 0xd5380720U) {
+            /* mrs Xt, ID_AA64MMFR1_EL1 */
+            if (reg < 31) state->__x[reg] = 0x0ULL;
+            state->__pc += 4;
+            return;
+        } else if (op == 0xd5380500U) {
+            /* mrs Xt, ID_AA64DFR0_EL1 */
+            if (reg < 31) state->__x[reg] = 0x00000006ULL;
             state->__pc += 4;
             return;
         }
@@ -78,13 +118,18 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
     uint64_t a4 = state->__x[4];
     uint64_t a5 = state->__x[5];
 
+    ltm_set_in_host_syscall(1);
     int64_t ret = syscall_dispatch(num, a0, a1, a2, a3, a4, a5, state);
+    ltm_set_in_host_syscall(0);
 
     /* Set guest return value in x0 */
     state->__x[0] = (uint64_t)ret;
 
     /* Advance PC past brk #0 (4 bytes) */
     state->__pc += 4;
+
+    /* Check for signals that arrived while executing host syscall */
+    ltm_check_and_deliver_pending_signals(state);
 }
 
 static void ltm_crash_handler(int sig, siginfo_t *si, void *ctx) {

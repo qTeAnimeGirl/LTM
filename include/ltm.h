@@ -21,6 +21,7 @@
 #include <sys/ucontext.h>
 #include <poll.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <sys/time.h>
 #include <time.h>
 #include <pthread.h>
@@ -514,10 +515,12 @@
 #define LINUX_AT_HWCAP        16
 #define LINUX_AT_CLKTCK       17
 #define LINUX_AT_SECURE       23
+#define LINUX_AT_BASE_PLATFORM 24
 #define LINUX_AT_RANDOM       25
 #define LINUX_AT_HWCAP2       26
 #define LINUX_AT_EXECFN       31
 #define LINUX_AT_SYSINFO_EHDR 33
+#define LINUX_AT_MINSIGSTKSZ   51
 
 /* Linux ARM64 HWCAP capabilities (asm/hwcap.h) */
 #define LINUX_HWCAP_FP          (1 << 0)

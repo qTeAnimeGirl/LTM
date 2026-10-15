@@ -295,7 +295,7 @@ static int open_proc_cpuinfo(void) {
         int written = snprintf(buf + offset, sizeof(buf) - offset,
             "processor\t: %d\n"
             "BogoMIPS\t: 48.00\n"
-            "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm ssbs sb paca pacg dcpodp flagm2 frint\n"
+            "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 asimdfhm dit uscat ilrcpc flagm ssbs sb paca pacg dcpodp flagm2 frint\n"
             "CPU implementer\t: 0x61\n"
             "CPU architecture: 8\n"
             "CPU variant\t: 0x0\n"

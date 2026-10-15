@@ -152,8 +152,76 @@ struct linux_siginfo {
             int32_t _status;
             int32_t __pad1;
         } _sigchld;
+        struct {
+            void *_addr;
+            int16_t _addr_lsb;
+        } _sigfault;
         uint8_t _pad[112];
     } _sifields;
+};
+
+/* Linux ARM64 sigcontext (AAPCS64 standard) */
+struct linux_sigcontext {
+    uint64_t fault_address;
+    uint64_t regs[31];
+    uint64_t sp;
+    uint64_t pc;
+    uint64_t pstate;
+    uint8_t  __reserved[4096] __attribute__((__aligned__(16)));
+};
+
+/* Linux ARM64 ucontext */
+struct linux_ucontext {
+    unsigned long uc_flags;
+    struct linux_ucontext *uc_link;
+    struct {
+        void *ss_sp;
+        int ss_flags;
+        size_t ss_size;
+    } uc_stack;
+    uint64_t uc_sigmask;
+    uint8_t  __pad_unused[1024 / 8 - sizeof(uint64_t)];
+    struct linux_sigcontext uc_mcontext;
+};
+
+/* Linux System V IPC structures */
+struct linux_ipc_perm {
+    key_t          __key;
+    uid_t          uid;
+    gid_t          gid;
+    uid_t          cuid;
+    gid_t          cgid;
+    unsigned short mode;
+    unsigned short __pad1;
+    unsigned short __seq;
+    unsigned short __pad2;
+    unsigned long  __glibc_reserved1;
+    unsigned long  __glibc_reserved2;
+};
+
+struct linux_msqid_ds {
+    struct linux_ipc_perm msg_perm;
+    time_t         msg_stime;
+    time_t         msg_rtime;
+    time_t         msg_ctime;
+    unsigned long  msg_cbytes;
+    unsigned long  msg_qnum;
+    unsigned long  msg_qbytes;
+    pid_t          msg_lspid;
+    pid_t          msg_lrpid;
+    unsigned long  __glibc_reserved4;
+    unsigned long  __glibc_reserved5;
+};
+
+struct linux_semid_ds {
+    struct linux_ipc_perm sem_perm;
+    time_t         sem_otime;
+    unsigned long  __glibc_reserved1;
+    time_t         sem_ctime;
+    unsigned long  __glibc_reserved2;
+    unsigned long  sem_nsems;
+    unsigned long  __glibc_reserved3;
+    unsigned long  __glibc_reserved4;
 };
 
 /* Linux sched_param */
@@ -315,6 +383,8 @@ void ltm_sigreturn_stub(void);
 int64_t handle_rt_sigaction(int signum, const struct linux_sigaction *act, struct linux_sigaction *oldact, size_t sigsetsize);
 int64_t handle_rt_sigreturn(void *state);
 int64_t handle_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, size_t sigsetsize);
+void ltm_set_in_host_syscall(int in_sys);
+void ltm_check_and_deliver_pending_signals(void *state);
 
 int64_t handle_brk(uintptr_t brk_addr);
 int64_t handle_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
@@ -687,6 +757,7 @@ int64_t handle_acct(const char *filename);
 int64_t handle_unshare(int flags);
 int64_t handle_set_robust_list(struct linux_robust_list_head *head, size_t len);
 int64_t handle_get_robust_list(int pid, struct linux_robust_list_head **head_ptr, size_t *len_ptr);
+void ltm_exit_robust_list(void);
 int64_t handle_kexec_load(unsigned long entry, unsigned long nr_segments, struct linux_kexec_segment *segments, unsigned long flags);
 int64_t handle_init_module(void *module_image, unsigned long len, const char *param_values);
 int64_t handle_delete_module(const char *name_user, unsigned int flags);
