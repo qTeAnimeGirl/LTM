@@ -106,6 +106,27 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
             } else {
                 ltm_set_guest_tls(0); /* xzr */
             }
+        } else if (imm == 0x301U) {
+            /* Virtualized inflate_fast: add w1, [x8, #0x3c], w21
+             * TRACEABILITY: Addresses guest crash Signal 11 (fault_addr=0x50012b31e / 0x50012a4b1).
+             * On Apple Silicon Darwin ARM64, register x18 is platform-reserved. The XNU kernel
+             * scheduler clears x18 to 0 during preemptive thread context switches.
+             * In libz's inflate_fast, w18 holds wsize (loaded once before the loop). When XNU
+             * wipes w18 to 0, w1 = w18 + w21 becomes 0 + (-dist) = 0xffff..., computing an address
+             * 4GB above the 32KB window buffer (0x400130000 + 0xffffb07e = 0x50012b31e) and faulting.
+             * By intercepting via JIT trap, we safely read wsize from inflate_state [x8, #0x3c],
+             * calculate w1 = wsize + w21, and restore x18 in the guest register state. */
+            uint32_t wsize = *(uint32_t *)(state->__x[8] + 0x3c);
+            state->__x[1] = (uint32_t)(wsize + (uint32_t)state->__x[21]);
+            state->__x[18] = wsize;
+            state->__pc += 4;
+            return;
+        } else if (imm == 0x302U) {
+            /* Virtualized inflate_fast: add w1, [x8, #0x3c], w15
+             * TRACEABILITY: Same as above for alternate history window offset calculation. */
+            uint32_t wsize = *(uint32_t *)(state->__x[8] + 0x3c);
+            state->__x[1] = (uint32_t)(wsize + (uint32_t)state->__x[15]);
+            state->__x[18] = wsize;
             state->__pc += 4;
             return;
         }
