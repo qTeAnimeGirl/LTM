@@ -25,6 +25,7 @@
 #include <net/route.h>
 #include <sys/sysctl.h>
 #include <setjmp.h>
+#include <dlfcn.h>
 
 #define LTM_MAX_THREADS 256
 
@@ -1738,17 +1739,21 @@ struct ltm_sigframe {
 #define LTM_SIGFRAME_MAGIC 0x4c544d5f534947ULL /* "LTM_SIG" */
 
 static __thread int s_in_host_syscall = 0;
-static __thread sig_atomic_t s_pending_signal = 0;
-static __thread siginfo_t s_pending_siginfo;
+static __thread uint64_t s_guest_sigmask = 0;
+static __thread uint64_t s_pending_signals = 0;
+static __thread siginfo_t s_pending_siginfos[LINUX_NSIG];
 
 void ltm_set_in_host_syscall(int in_sys) {
     s_in_host_syscall = in_sys;
 }
 
 void ltm_check_and_deliver_pending_signals(void *state_ptr) {
-    if (!s_pending_signal) return;
-    int l_sig = (int)s_pending_signal;
-    s_pending_signal = 0;
+    if (!state_ptr) return;
+    uint64_t deliverable = s_pending_signals & ~s_guest_sigmask;
+    if (!deliverable) return;
+
+    int l_sig = __builtin_ctzll(deliverable) + 1;
+    s_pending_signals &= ~(1ULL << (l_sig - 1));
 
     if (l_sig <= 0 || l_sig >= LINUX_NSIG) return;
     struct linux_sigaction *act = &g_guest_sigactions[l_sig];
@@ -1764,13 +1769,13 @@ void ltm_check_and_deliver_pending_signals(void *state_ptr) {
     struct ltm_sigframe *frame = (struct ltm_sigframe *)sp;
     memset(&frame->siginfo, 0, sizeof(frame->siginfo));
     frame->siginfo.si_signo = l_sig;
-    frame->siginfo.si_code = s_pending_siginfo.si_code;
+    frame->siginfo.si_code = s_pending_siginfos[l_sig].si_code;
     if (l_sig == 17 /* LINUX_SIGCHLD */) {
-        frame->siginfo._sifields._sigchld._pid = s_pending_siginfo.si_pid;
-        frame->siginfo._sifields._sigchld._status = s_pending_siginfo.si_status;
+        frame->siginfo._sifields._sigchld._pid = s_pending_siginfos[l_sig].si_pid;
+        frame->siginfo._sifields._sigchld._status = s_pending_siginfos[l_sig].si_status;
     }
     if (l_sig == 4 || l_sig == 7 || l_sig == 11) {
-        frame->siginfo._sifields._sigfault._addr = s_pending_siginfo.si_addr;
+        frame->siginfo._sifields._sigfault._addr = s_pending_siginfos[l_sig].si_addr;
     }
 
     memcpy(&frame->saved_state, state, sizeof(arm_thread_state64_t));
@@ -1785,6 +1790,16 @@ void ltm_check_and_deliver_pending_signals(void *state_ptr) {
     frame->uc.uc_mcontext.sp = state->__sp;
     frame->uc.uc_mcontext.pc = state->__pc;
     frame->uc.uc_mcontext.pstate = state->__cpsr;
+    frame->uc.uc_sigmask = s_guest_sigmask;
+    if (l_sig == 4 || l_sig == 7 || l_sig == 11) {
+        frame->uc.uc_mcontext.fault_address = (uint64_t)s_pending_siginfos[l_sig].si_addr;
+    }
+
+    /* Apply handler signal mask */
+    s_guest_sigmask |= act->l_mask;
+    if (!(act->l_flags & 0x40000000ULL /* LINUX_SA_NODEFER */)) {
+        s_guest_sigmask |= (1ULL << (l_sig - 1));
+    }
 
     state->__x[0] = l_sig;
     state->__x[1] = (uintptr_t)&frame->siginfo;
@@ -1810,9 +1825,12 @@ static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) 
     ucontext_t *uc = (ucontext_t *)ucontext;
     arm_thread_state64_t *cur_state = &uc->uc_mcontext->__ss;
 
-    /* If the signal arrived while the host is executing a blocking syscall or host C code, defer delivery to avoid clobbering host C frame */
-    if (s_in_host_syscall || cur_state->__pc < 0x400000000ULL) {
-        if (l_sig == 4 || l_sig == 7 || l_sig == 8 || l_sig == 11 || l_sig == 31) {
+    Dl_info dlinfo;
+    bool in_host = (s_in_host_syscall != 0) || (dladdr((void *)cur_state->__pc, &dlinfo) != 0);
+
+    /* If the signal is blocked by the guest thread, OR if we are executing host C code, defer delivery */
+    if ((s_guest_sigmask & (1ULL << (l_sig - 1))) || in_host) {
+        if (in_host && (l_sig == 4 || l_sig == 7 || l_sig == 8 || l_sig == 11 || l_sig == 31)) {
             ltm_log_error("Fatal signal %d delivered during host execution: PC=0x%llx, fault_addr=%p",
                           l_sig, (unsigned long long)cur_state->__pc, info ? info->si_addr : NULL);
             for (int i = 0; i < 31; i += 2) {
@@ -1842,8 +1860,8 @@ static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) 
             }
             _exit(128 + l_sig);
         }
-        s_pending_signal = l_sig;
-        if (info) s_pending_siginfo = *info;
+        s_pending_signals |= (1ULL << (l_sig - 1));
+        if (info) s_pending_siginfos[l_sig] = *info;
         return;
     }
 
@@ -1894,13 +1912,13 @@ static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) 
     frame->uc.uc_mcontext.sp = cur_state->__sp;
     frame->uc.uc_mcontext.pc = cur_state->__pc;
     frame->uc.uc_mcontext.pstate = cur_state->__cpsr;
+    frame->uc.uc_sigmask = s_guest_sigmask;
     if (info && (l_sig == 4 || l_sig == 7 || l_sig == 11)) {
         frame->uc.uc_mcontext.fault_address = (uint64_t)info->si_addr;
     }
 
     /* Only log crash dumps for fatal exception signals */
-    if (l_sig == 4 /* SIGILL */ || l_sig == 7 /* SIGBUS */ ||
-        l_sig == 8 /* SIGFPE */ || l_sig == 11 /* SIGSEGV */ || l_sig == 31 /* SIGSYS */) {
+    if (l_sig == 4 || l_sig == 7 || l_sig == 8 || l_sig == 11 || l_sig == 31) {
         uint32_t fault_insn = 0;
         if (cur_state->__pc >= 0x1000) {
             fault_insn = *(uint32_t *)cur_state->__pc;
@@ -1932,6 +1950,12 @@ static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) 
                 depth++;
             }
         }
+    }
+
+    /* Apply handler signal mask */
+    s_guest_sigmask |= act->l_mask;
+    if (!(act->l_flags & 0x40000000ULL /* LINUX_SA_NODEFER */)) {
+        s_guest_sigmask |= (1ULL << (l_sig - 1));
     }
 
     /* Setup registers to execute guest signal handler preserving callee-saved context */
@@ -2022,15 +2046,13 @@ int64_t handle_rt_sigreturn(void *state_ptr, void *neon_ptr) {
         return -LINUX_EINVAL;
     }
 
-    /* Ensure signals are not masked when returning to main execution */
-    sigset_t set;
-    sigemptyset(&set);
-    pthread_sigmask(SIG_SETMASK, &set, NULL);
+    /* Restore guest signal mask from sigframe */
+    s_guest_sigmask = frame->uc.uc_sigmask;
 
     /* Restore all integer registers, condition flags, SP, and PC directly into trap context */
     *cur_state = frame->saved_state;
     if (neon_ptr) {
-        *(arm_neon_state64_t *)neon_ptr = frame->saved_neon;
+        memcpy(neon_ptr, &frame->saved_neon, sizeof(arm_neon_state64_t));
     }
     return 0;
 }
@@ -2038,36 +2060,24 @@ int64_t handle_rt_sigreturn(void *state_ptr, void *neon_ptr) {
 int64_t handle_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, size_t sigsetsize) {
     if (sigsetsize != 8) return -LINUX_EINVAL;
     if (oldset) {
-        sigset_t cur;
-        sigemptyset(&cur);
-        pthread_sigmask(SIG_SETMASK, NULL, &cur);
-        uint64_t l_old = 0;
-        for (int i = 1; i < 32; i++) {
-            if (sigismember(&cur, i)) {
-                int l_sig = darwin_to_linux_signal(i);
-                if (l_sig > 0 && l_sig < 64) {
-                    l_old |= (1ULL << (l_sig - 1));
-                }
-            }
-        }
-        *oldset = l_old;
+        *oldset = s_guest_sigmask;
     }
     if (set) {
-        if (how != 0 /* SIG_BLOCK */ && how != 1 /* SIG_UNBLOCK */ && how != 2 /* SIG_SETMASK */) {
+        uint64_t mask = *set;
+        /* Linux forbids blocking SIGKILL (9) and SIGSTOP (19) */
+        mask &= ~((1ULL << (9 - 1)) | (1ULL << (19 - 1)));
+        /* SIGTRAP (5) is reserved for LTM syscall trapping */
+        mask &= ~(1ULL << (5 - 1));
+
+        if (how == 0 /* LINUX_SIG_BLOCK */) {
+            s_guest_sigmask |= mask;
+        } else if (how == 1 /* LINUX_SIG_UNBLOCK */) {
+            s_guest_sigmask &= ~mask;
+        } else if (how == 2 /* LINUX_SIG_SETMASK */) {
+            s_guest_sigmask = mask;
+        } else {
             return -LINUX_EINVAL;
         }
-        sigset_t d_set;
-        sigemptyset(&d_set);
-        for (int i = 1; i < 64; i++) {
-            if (*set & (1ULL << (i - 1))) {
-                int d_sig = linux_to_darwin_signal(i);
-                if (d_sig > 0 && d_sig != SIGKILL && d_sig != SIGSTOP) {
-                    sigaddset(&d_set, d_sig);
-                }
-            }
-        }
-        int d_how = (how == 0) ? SIG_BLOCK : (how == 1 ? SIG_UNBLOCK : SIG_SETMASK);
-        pthread_sigmask(d_how, &d_set, NULL);
     }
     return 0;
 }
@@ -2521,6 +2531,7 @@ struct ltm_thread_arg {
     void *tls;
     int *ctid;
     int tid;
+    uint64_t sigmask;
     pthread_mutex_t lock;
     pthread_cond_t cond;
     int started;
@@ -2546,6 +2557,8 @@ static void *ltm_thread_entry(void *arg) {
     /* Initialize thread-local state */
     s_is_main_thread = 0;
     s_thread_tid = local.tid;
+    s_guest_sigmask = local.sigmask;
+    s_pending_signals = 0;
     if ((local.flags & LINUX_CLONE_SETTLS) && local.tls) {
         ltm_set_guest_tls((uintptr_t)local.tls);
     }
@@ -2560,11 +2573,10 @@ static void *ltm_thread_entry(void *arg) {
     pthread_cond_signal(&targ->cond);
     pthread_mutex_unlock(&targ->lock);
 
-    /* Ensure SIGTRAP is unblocked for LTM syscall and instruction trapping */
+    /* Ensure all Darwin signals are unblocked on this native pthread */
     sigset_t unblock_mask;
     sigemptyset(&unblock_mask);
-    sigaddset(&unblock_mask, SIGTRAP);
-    pthread_sigmask(SIG_UNBLOCK, &unblock_mask, NULL);
+    pthread_sigmask(SIG_SETMASK, &unblock_mask, NULL);
 
     ltm_log_debug("Thread %d started (guest SP=%p, PC=0x%llx, TLS=0x%lx)",
                   local.tid, (void *)local.state.__sp,
@@ -2609,6 +2621,7 @@ int64_t handle_clone(uint64_t flags, void *stack, int *ptid, void *tls, int *cti
         targ.tls = tls;
         targ.ctid = ctid;
         targ.tid = child_tid;
+        targ.sigmask = s_guest_sigmask;
         targ.started = 0;
         if (state) {
             targ.state = *state;
@@ -2701,10 +2714,14 @@ int64_t handle_clone(uint64_t flags, void *stack, int *ptid, void *tls, int *cti
         s_crash_depth = 0;
         s_has_exit_jmp = false;
         s_in_host_syscall = 0;
-        s_pending_signal = 0;
+        s_pending_signals = 0;
         atomic_store(&g_active_thread_count, 1);
         atomic_store(&g_next_thread_tid, 0);
         memset(g_thread_table, 0, sizeof(g_thread_table));
+
+        sigset_t empty_mask;
+        sigemptyset(&empty_mask);
+        sigprocmask(SIG_SETMASK, &empty_mask, NULL);
 
         ltm_reset_on_fork();
 

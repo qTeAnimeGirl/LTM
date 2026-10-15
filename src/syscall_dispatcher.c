@@ -146,9 +146,9 @@ static void ltm_crash_handler(int sig, siginfo_t *si, void *ctx) {
     uint64_t cur_tpidr = 0;
     __asm__ volatile("mrs %0, tpidr_el0" : "=r"(cur_tpidr));
 
-    fprintf(stderr, "\n[LTM:CRASH] Fatal signal %d (%s) at address %p (tpidr_el0=0x%llx)\n",
-            sig, sig == SIGSEGV ? "SIGSEGV" : (sig == SIGBUS ? "SIGBUS" : (sig == SIGILL ? "SIGILL" : "UNKNOWN")),
-            si->si_addr, cur_tpidr);
+    fprintf(stderr, "\n[LTM:CRASH] [pid=%d] Fatal signal %d (%s) at address %p (PC=0x%llx, tpidr_el0=0x%llx)\n",
+            getpid(), sig, sig == SIGSEGV ? "SIGSEGV" : (sig == SIGBUS ? "SIGBUS" : (sig == SIGILL ? "SIGILL" : "UNKNOWN")),
+            si->si_addr, (unsigned long long)state->__pc, cur_tpidr);
     for (int i = 0; i < 31; i += 2) {
         fprintf(stderr, "  x%-2d = 0x%016llx  x%-2d = 0x%016llx\n",
                 i, (unsigned long long)state->__x[i],
