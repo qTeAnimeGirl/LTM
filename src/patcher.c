@@ -31,19 +31,7 @@ size_t patcher_scan_and_patch(void *addr, size_t size) {
             uint32_t imm = 0x200U | rt;
             code[i] = 0xd4200000U | (imm << 5);
             count++;
-        } else if (insn == 0x0b150241U && (i + 1 < num_instrs) && code[i + 1] == 0x8b010201U) {
-            /* TRACEABILITY: Addresses guest crash Signal 11 (fault_addr=0x50012b31e).
-             * inflate_fast: add w1, w18, w21 followed by add x1, x16, x1.
-             * On Darwin ARM64, register x18 is platform-reserved and clobbered by XNU scheduler.
-             * Patch to brk #(0x301) to safely compute w1 from [x8, #0x3c] + w21 and restore x18. */
-            code[i] = 0xd4200000U | (0x301U << 5);
-            count++;
-        } else if (insn == 0x0b0f0241U && (i + 3 < num_instrs) && code[i + 3] == 0x8b010201U) {
-            /* TRACEABILITY: Addresses guest crash Signal 11 (fault_addr=0x50012b31e).
-             * inflate_fast: add w1, w18, w15 followed by add x1, x16, x1.
-             * Patch to brk #(0x302) to safely compute w1 from [x8, #0x3c] + w15 and restore x18. */
-            code[i] = 0xd4200000U | (0x302U << 5);
-            count++;
+
         } else if (insn == 0xf9401412U && (i + 1 < num_instrs) && code[i + 1] == 0xf9401245U) {
             /* TRACEABILITY: Addresses Glibc _int_malloc Signal 11 crash at 0x97f9c (str x3, [x18, #32]).
              * On Darwin ARM64, register x18 is platform-reserved and clobbered by XNU scheduler

@@ -122,20 +122,6 @@ void ltm_sig_handler_impl(int sig, siginfo_t *si, void *ctx) {
             }
             state->__pc += 4;
             ltm_resume_context(state, neon);
-        } else if (imm == 0x301U) {
-            /* Virtualized inflate_fast: add w1, [x8, #0x3c], w21 */
-            uint32_t wsize = *(uint32_t *)(state->__x[8] + 0x3c);
-            state->__x[1] = (uint32_t)(wsize + (uint32_t)state->__x[21]);
-            state->__x[18] = wsize;
-            state->__pc += 4;
-            ltm_resume_context(state, neon);
-        } else if (imm == 0x302U) {
-            /* Virtualized inflate_fast: add w1, [x8, #0x3c], w15 */
-            uint32_t wsize = *(uint32_t *)(state->__x[8] + 0x3c);
-            state->__x[1] = (uint32_t)(wsize + (uint32_t)state->__x[15]);
-            state->__x[18] = wsize;
-            state->__pc += 4;
-            ltm_resume_context(state, neon);
         }
     }
 
