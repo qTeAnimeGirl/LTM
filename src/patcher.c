@@ -73,6 +73,28 @@ size_t patcher_scan_and_patch(void *addr, size_t size) {
             }
             ltm_log_info("Patcher: rewrote Glibc _int_malloc x18 sequence to x2 at %p", &code[i]);
             count++;
+        } else if (insn == 0x52800012U && (i + 4 < num_instrs) && (code[i + 4] == 0x787258a8U || code[i + 4] == (0xd4200000U | (0x1802U << 5)))) {
+            /* TRACEABILITY: Addresses guest crash SIGBUS at 0x104a3adc8 in libz.so.1 inflate_table.
+             * In inflate_table (inftrees.c line 221):
+             *   ad90: mov w18, #0                   (0x52800012)
+             *   ada0: ldrh w8, [x5, w18, uxtw #1]   (0x787258a8)
+             * Darwin XNU wipes physical register x18 during preemption and interrupts,
+             * causing the symbol counter w18 to reset mid-loop and underflow count[len].
+             * Rewrite to virtualized w18 brk traps backed by thread-local memory: */
+            code[i] = 0xd4200000U | (0x1801U << 5);     /* brk #0x1801: set s_guest_x18 = 0 */
+            code[i + 4] = 0xd4200000U | (0x1802U << 5); /* brk #0x1802: ldrh w8, [x5, s_guest_x18 * 2] */
+            ltm_log_info("Patcher: virtualized libz inflate_table w18 init/read to brk #0x1801/0x1802 at %p", &code[i]);
+            count += 2;
+        } else if (insn == 0x11000652U && (i + 8 < num_instrs) && (code[i + 8] == 0x787258a2U || code[i + 8] == (0xd4200000U | (0x1804U << 5)))) {
+            /* TRACEABILITY: Addresses guest crash SIGBUS at 0x104a3adc8 in libz.so.1 inflate_table.
+             * In inflate_table (inftrees.c line 221):
+             *   ae34: add w18, w18, #1              (0x11000652)
+             *   ae54: ldrh w2, [x5, w18, uxtw #1]   (0x787258a2)
+             * Rewrite to virtualized w18 brk traps backed by thread-local memory: */
+            code[i] = 0xd4200000U | (0x1803U << 5);     /* brk #0x1803: s_guest_x18++ */
+            code[i + 8] = 0xd4200000U | (0x1804U << 5); /* brk #0x1804: ldrh w2, [x5, s_guest_x18 * 2] */
+            ltm_log_info("Patcher: virtualized libz inflate_table w18 inc/read to brk #0x1803/0x1804 at %p", &code[i]);
+            count += 2;
         }
     }
 

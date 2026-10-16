@@ -41,6 +41,7 @@ static _Atomic int g_next_thread_tid = 0;
 static _Atomic int g_active_thread_count = 1;
 
 static __thread uintptr_t s_guest_tls = 0;
+static __thread uint64_t s_guest_x18 = 0;
 static __thread int *s_child_tid_ptr = NULL;
 static __thread int s_thread_tid = 0;
 static __thread int s_is_main_thread = 1;
@@ -57,6 +58,14 @@ uintptr_t ltm_get_guest_tls(void) {
 void ltm_set_guest_tls(uintptr_t val) {
     s_guest_tls = val;
     __asm__ volatile("msr tpidr_el0, %0" : : "r"(val));
+}
+
+uint64_t ltm_get_guest_x18(void) {
+    return s_guest_x18;
+}
+
+void ltm_set_guest_x18(uint64_t val) {
+    s_guest_x18 = val;
 }
 
 int *ltm_get_child_tid_ptr(void) {

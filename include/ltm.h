@@ -638,6 +638,8 @@
 /* Thread-Local State Accessors */
 uintptr_t ltm_get_guest_tls(void);
 void ltm_set_guest_tls(uintptr_t val);
+uint64_t ltm_get_guest_x18(void);
+void ltm_set_guest_x18(uint64_t val);
 int *ltm_get_child_tid_ptr(void);
 void ltm_set_child_tid_ptr(int *ptr);
 int64_t ltm_get_thread_tid(void);
