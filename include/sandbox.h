@@ -25,4 +25,10 @@ ssize_t sandbox_virtual_readlink(const char *path, char *buf, size_t bufsiz);
 /* Populates stat structure for virtual files */
 int sandbox_virtual_stat(const char *path, struct stat *st);
 
+/* User & Group credential resolution and file ownership helpers */
+bool ltm_lookup_passwd_user(const char *username, uid_t *out_uid, gid_t *out_gid, char *out_home, size_t home_len, char *out_shell, size_t shell_len);
+bool ltm_lookup_passwd_uid(uid_t uid, char *out_name, size_t name_len, gid_t *out_gid, char *out_home, size_t home_len, char *out_shell, size_t shell_len);
+int ltm_get_user_groups(const char *username, gid_t base_gid, gid_t *out_groups, int max_groups);
+void ltm_get_file_owner(const char *host_path, int fd, uid_t *out_uid, gid_t *out_gid);
+
 #endif /* SANDBOX_H */

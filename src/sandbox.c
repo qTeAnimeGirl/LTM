@@ -7,6 +7,8 @@
 #include <ctype.h>
 #include <net/route.h>
 #include <sys/sysctl.h>
+#include <sys/xattr.h>
+#include <fcntl.h>
 
 static int create_mem_fd(const void *data, size_t len) {
     char tmppath[] = "/tmp/ltm_vfs_XXXXXX";
@@ -25,6 +27,201 @@ static int create_mem_fd(const void *data, size_t len) {
         lseek(fd, 0, SEEK_SET);
     }
     return fd;
+}
+
+bool ltm_lookup_passwd_user(const char *username, uid_t *out_uid, gid_t *out_gid, char *out_home, size_t home_len, char *out_shell, size_t shell_len) {
+    if (!username || !username[0]) return false;
+    char passwd_path[1024];
+    snprintf(passwd_path, sizeof(passwd_path), "%s/etc/passwd", g_ltm.host_rootfs);
+    FILE *f = fopen(passwd_path, "r");
+    if (!f) return false;
+
+    char line[512];
+    bool found = false;
+    while (fgets(line, sizeof(line), f)) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        char *u = strtok(line, ":");
+        if (!u) continue;
+        char *pass = strtok(NULL, ":");
+        char *s_uid = strtok(NULL, ":");
+        char *s_gid = strtok(NULL, ":");
+        char *gecos = strtok(NULL, ":");
+        char *home = strtok(NULL, ":");
+        char *shell = strtok(NULL, ":");
+        (void)pass; (void)gecos;
+
+        if (s_uid && s_gid && strcmp(u, username) == 0) {
+            if (out_uid) *out_uid = (uid_t)strtoul(s_uid, NULL, 10);
+            if (out_gid) *out_gid = (gid_t)strtoul(s_gid, NULL, 10);
+            if (out_home && home && home_len > 0) {
+                strncpy(out_home, home, home_len - 1);
+                out_home[home_len - 1] = '\0';
+            }
+            if (out_shell && shell && shell_len > 0) {
+                strncpy(out_shell, shell, shell_len - 1);
+                out_shell[shell_len - 1] = '\0';
+            }
+            found = true;
+            break;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+bool ltm_lookup_passwd_uid(uid_t uid, char *out_name, size_t name_len, gid_t *out_gid, char *out_home, size_t home_len, char *out_shell, size_t shell_len) {
+    char passwd_path[1024];
+    snprintf(passwd_path, sizeof(passwd_path), "%s/etc/passwd", g_ltm.host_rootfs);
+    FILE *f = fopen(passwd_path, "r");
+    if (!f) return false;
+
+    char line[512];
+    bool found = false;
+    while (fgets(line, sizeof(line), f)) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        char *u = strtok(line, ":");
+        if (!u) continue;
+        char *pass = strtok(NULL, ":");
+        char *s_uid = strtok(NULL, ":");
+        char *s_gid = strtok(NULL, ":");
+        char *gecos = strtok(NULL, ":");
+        char *home = strtok(NULL, ":");
+        char *shell = strtok(NULL, ":");
+        (void)pass; (void)gecos;
+
+        if (s_uid && s_gid && (uid_t)strtoul(s_uid, NULL, 10) == uid) {
+            if (out_name && name_len > 0) {
+                strncpy(out_name, u, name_len - 1);
+                out_name[name_len - 1] = '\0';
+            }
+            if (out_gid) *out_gid = (gid_t)strtoul(s_gid, NULL, 10);
+            if (out_home && home && home_len > 0) {
+                strncpy(out_home, home, home_len - 1);
+                out_home[home_len - 1] = '\0';
+            }
+            if (out_shell && shell && shell_len > 0) {
+                strncpy(out_shell, shell, shell_len - 1);
+                out_shell[shell_len - 1] = '\0';
+            }
+            found = true;
+            break;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+int ltm_get_user_groups(const char *username, gid_t base_gid, gid_t *out_groups, int max_groups) {
+    if (!username || !username[0] || max_groups <= 0 || !out_groups) return 0;
+    int count = 0;
+    out_groups[count++] = base_gid;
+
+    char group_path[1024];
+    snprintf(group_path, sizeof(group_path), "%s/etc/group", g_ltm.host_rootfs);
+    FILE *f = fopen(group_path, "r");
+    if (!f) return count;
+
+    char line[512];
+    while (fgets(line, sizeof(line), f) && count < max_groups) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        char *gname = strtok(line, ":");
+        if (!gname) continue;
+        char *pass = strtok(NULL, ":");
+        char *s_gid = strtok(NULL, ":");
+        char *members = strtok(NULL, ":");
+        (void)pass;
+        if (!s_gid) continue;
+        gid_t gid = (gid_t)strtoul(s_gid, NULL, 10);
+        if (gid == base_gid) continue;
+
+        if (members) {
+            char *m = members;
+            while (*m) {
+                while (*m == ' ' || *m == ',') m++;
+                char *start = m;
+                while (*m && *m != ',') m++;
+                size_t mlen = (size_t)(m - start);
+                if (mlen == strlen(username) && strncmp(start, username, mlen) == 0) {
+                    bool already = false;
+                    for (int i = 0; i < count; i++) {
+                        if (out_groups[i] == gid) { already = true; break; }
+                    }
+                    if (!already && count < max_groups) {
+                        out_groups[count++] = gid;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    fclose(f);
+    return count;
+}
+
+void ltm_get_file_owner(const char *host_path, int fd, uid_t *out_uid, gid_t *out_gid) {
+    if (out_uid) *out_uid = 0;
+    if (out_gid) *out_gid = 0;
+
+    uint32_t xuid = 0, xgid = 0;
+    bool has_uid = false, has_gid = false;
+
+    if (fd >= 0) {
+        if (fgetxattr(fd, "user.ltm.uid", &xuid, sizeof(xuid), 0, 0) == sizeof(xuid)) {
+            if (out_uid) *out_uid = (uid_t)xuid;
+            has_uid = true;
+        }
+        if (fgetxattr(fd, "user.ltm.gid", &xgid, sizeof(xgid), 0, 0) == sizeof(xgid)) {
+            if (out_gid) *out_gid = (gid_t)xgid;
+            has_gid = true;
+        }
+    } else if (host_path) {
+        if (getxattr(host_path, "user.ltm.uid", &xuid, sizeof(xuid), 0, XATTR_NOFOLLOW) == sizeof(xuid)) {
+            if (out_uid) *out_uid = (uid_t)xuid;
+            has_uid = true;
+        }
+        if (getxattr(host_path, "user.ltm.gid", &xgid, sizeof(xgid), 0, XATTR_NOFOLLOW) == sizeof(xgid)) {
+            if (out_gid) *out_gid = (gid_t)xgid;
+            has_gid = true;
+        }
+    }
+
+    if (!has_uid || !has_gid) {
+        char path_buf[1024];
+        const char *p = host_path;
+        if (!p && fd >= 0) {
+            if (fcntl(fd, F_GETPATH, path_buf) == 0) {
+                p = path_buf;
+            }
+        }
+        if (p) {
+            size_t rlen = strlen(g_ltm.host_rootfs);
+            if (rlen > 0 && strncmp(p, g_ltm.host_rootfs, rlen) == 0) {
+                const char *guest_sub = p + rlen;
+                if (strncmp(guest_sub, "/home/", 6) == 0) {
+                    const char *uname = guest_sub + 6;
+                    char user_part[64] = {0};
+                    const char *slash = strchr(uname, '/');
+                    if (slash) {
+                        size_t ulen = (size_t)(slash - uname);
+                        if (ulen < sizeof(user_part)) {
+                            memcpy(user_part, uname, ulen);
+                        }
+                    } else {
+                        strncpy(user_part, uname, sizeof(user_part) - 1);
+                    }
+                    uid_t p_uid = 0;
+                    gid_t p_gid = 0;
+                    if (ltm_lookup_passwd_user(user_part, &p_uid, &p_gid, NULL, 0, NULL, 0)) {
+                        if (!has_uid && out_uid) *out_uid = p_uid;
+                        if (!has_gid && out_gid) *out_gid = p_gid;
+                    }
+                }
+            }
+        }
+    }
 }
 
 int sandbox_init(const char *rootfs_dir) {
@@ -659,17 +856,31 @@ static int open_proc_pid_file(int pid, const char *subfile) {
 
     if (strcmp(subfile, "status") == 0) {
         char buf[1024];
+        char grp_buf[256] = {0};
+        if (g_ltm.ngroups > 0) {
+            char gtmp[32];
+            snprintf(grp_buf, sizeof(grp_buf), "Groups:\t");
+            for (int i = 0; i < g_ltm.ngroups; i++) {
+                snprintf(gtmp, sizeof(gtmp), "%s%u", (i == 0) ? "" : " ", (unsigned int)g_ltm.groups[i]);
+                strncat(grp_buf, gtmp, sizeof(grp_buf) - strlen(grp_buf) - 1);
+            }
+            strncat(grp_buf, "\n", sizeof(grp_buf) - strlen(grp_buf) - 1);
+        }
         int len = snprintf(buf, sizeof(buf),
             "Name:\t%s\n"
             "State:\t%s\n"
             "Tgid:\t%d\n"
             "Pid:\t%d\n"
             "PPid:\t%d\n"
-            "Uid:\t0\t0\t0\t0\n"
-            "Gid:\t0\t0\t0\t0\n"
+            "Uid:\t%u\t%u\t%u\t%u\n"
+            "Gid:\t%u\t%u\t%u\t%u\n"
+            "%s"
             "FDSize:\t256\n"
             "Threads:\t1\n",
-            comm, state_str, pid, pid, ppid);
+            comm, state_str, pid, pid, ppid,
+            (unsigned int)g_ltm.uid, (unsigned int)g_ltm.euid, (unsigned int)g_ltm.suid, (unsigned int)g_ltm.fsuid,
+            (unsigned int)g_ltm.gid, (unsigned int)g_ltm.egid, (unsigned int)g_ltm.sgid, (unsigned int)g_ltm.fsgid,
+            grp_buf);
         return create_mem_fd(buf, len);
     }
 

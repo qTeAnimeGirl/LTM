@@ -667,6 +667,17 @@ typedef struct {
     uintptr_t guest_tls;          /* Virtualized Linux TPIDR_EL0 thread pointer */
     bool debug_enabled;           /* LTM_DEBUG enabled */
     bool trace_syscalls;          /* LTM_STRACE enabled */
+    /* POSIX Process Credentials */
+    uid_t uid;                    /* Real UID */
+    uid_t euid;                   /* Effective UID */
+    uid_t suid;                   /* Saved UID */
+    uid_t fsuid;                  /* Filesystem UID */
+    gid_t gid;                    /* Real GID */
+    gid_t egid;                   /* Effective GID */
+    gid_t sgid;                   /* Saved GID */
+    gid_t fsgid;                  /* Filesystem GID */
+    int ngroups;                  /* Supplementary groups count */
+    gid_t groups[64];             /* Supplementary groups */
 } ltm_runtime_t;
 
 extern ltm_runtime_t g_ltm;

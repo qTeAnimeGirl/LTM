@@ -3728,3 +3728,69 @@ During comprehensive user validation on Arch Linux ARM inside LTM, three critica
 - **Automated Regression Suite (`./run_tests.sh`)**:
   - **329 / 329 Tests Passed (100% Pass Rate)**.
 
+---
+
+### [Sprint 16: Full POSIX Credential Subsystem, Multi-User Isolation, `su` / `sudo` Setuid Engine, and Virtual File Ownership Tracking]
+- **Target**: Implement complete POSIX process credentials (`uid`, `euid`, `suid`, `fsuid`, `gid`, `egid`, `sgid`, `fsgid`, `groups`), dynamic `su` user switching (`su - alarm`), `execve` credential serialization and propagation, standard setuid binary privilege escalation (`04755` emulation for `sudo`, `su`, `passwd`), extended attribute file ownership tracking (`user.ltm.uid`/`user.ltm.gid`), container DAC permission checking, and dynamic `/proc/<pid>/status` credential reporting.
+- **Author**: The Brilliant Coder & Diligent Tester
+- **Status**: Completed (100% Pass: 329/329 Tests Passing, Verified in `Test_LTM`)
+
+#### 1. Root Cause Analysis
+1. **Stubbed Credential Syscalls**:
+   - `LINUX_SYS_setuid`, `setgid`, `setreuid`, `setregid`, `setresuid`, `setresgid` in `src/syscall_dispatcher.c` were hardcoded to immediately return `0` without updating any process credentials.
+   - `handle_getuid()`, `handle_geteuid()`, `handle_getgid()`, `handle_getegid()`, `handle_getresuid()`, `handle_getresgid()` in `src/syscall_handlers.c` were hardcoded to return `0` (`root`).
+   - Consequently, running `su - alarm` or `su alarm` succeeded inside `su`, but spawned a shell that still reported `whoami` as `root` and displayed `[root@ltm-mac ~]#`.
+2. **Missing Credential Propagation Across `execve`**:
+   - Re-execution of `ltm` in `handle_execve()` restarted `ltm` without passing process credentials, defaulting back to `root`.
+3. **Hardcoded Root File Ownership in `stat`**:
+   - `copy_stat_to_linux` and `handle_statx` unconditionally set `st_uid = 0` and `st_gid = 0`.
+   - On mode `0700` user directories (such as `/home/alarm`), Linux tools perceived the owner as `root`, causing non-root users to receive permission denied errors on their own directories.
+4. **Hardcoded `/proc/<pid>/status`**:
+   - `/proc/<pid>/status` hardcoded `Uid:\t0\t0\t0\t0\n` and `Gid:\t0\t0\t0\t0\n`.
+
+#### 2. Architectural Implementation
+1. **Process Credential Model (`include/ltm.h`)**:
+   - Added `uid_t uid, euid, suid, fsuid;`, `gid_t gid, egid, sgid, fsgid;`, `int ngroups;`, and `gid_t groups[64];` to `ltm_runtime_t`.
+2. **POSIX Identity Handlers (`src/syscall_handlers.c`, `include/syscalls.h`, `src/syscall_dispatcher.c`)**:
+   - Implemented `handle_getuid`, `handle_geteuid`, `handle_getgid`, `handle_getegid`, `handle_getresuid`, `handle_getresgid`.
+   - Implemented `handle_getgroups` and `handle_setgroups` (restricted to root `euid == 0`).
+   - Implemented `handle_setuid`, `handle_setgid`, `handle_setreuid`, `handle_setregid`, `handle_setresuid`, `handle_setresgid`, `handle_setfsuid`, `handle_setfsgid` with full POSIX privilege validation.
+   - Routed all credential syscalls in `syscall_dispatch()`.
+3. **Setuid Execution & Credential Serialization Across `execve` (`handle_execve`)**:
+   - In `handle_execve()`: detected `S_ISUID` bit and standard setuid binaries (`sudo`, `su`, `passwd`, `chsh`, `chfn`, `newgrp`, `gpasswd`, `pkexec`).
+   - If setuid: elevated `next_euid = file_owner; next_fsuid = file_owner; next_suid = file_owner;` while preserving `next_ruid = g_ltm.uid;`.
+   - Formatted `--creds <ruid>:<euid>:<suid>:<fsuid>:<rgid>:<egid>:<sgid>:<fsgid>[;<g1>,<g2>...]` and passed to `new_argv`.
+4. **CLI User Login & Environment Configuration (`src/main.c`)**:
+   - Parsed `--creds <string>` in `main()` to unpack process credentials upon `execve`.
+   - Added `-u, --user <user/uid>` CLI option.
+   - Looked up users in `<rootfs>/etc/passwd` and supplementary groups in `/etc/group`.
+   - In `build_guest_env()`: when running as non-root and `!preserve_env`, populated `HOME`, `USER`, `LOGNAME`, `SHELL`, `PWD` from `/etc/passwd`.
+   - Configured container default working directory to user home directory (`/home/<user>`) instead of `/root`.
+5. **File Ownership Tracking & DAC Access Checks (`src/sandbox.c`, `src/syscall_handlers.c`)**:
+   - Implemented `ltm_get_file_owner`: reads extended attributes `user.ltm.uid`/`user.ltm.gid` via Darwin `fgetxattr`/`getxattr`, falls back to `/home/<username>` mapping, and defaults to `0:0`.
+   - Implemented `check_guest_access`: evaluates owner, group, and other permission bits against `g_ltm.euid`, `g_ltm.egid`, and `g_ltm.groups`, granting `CAP_DAC_OVERRIDE` to root.
+   - In `handle_openat`: enforced DAC permissions and stamped `user.ltm.uid`/`gid` on newly created files (`O_CREAT`).
+   - In `handle_faccessat` & `handle_faccessat2`: evaluated guest DAC permissions before Darwin access.
+   - In `handle_fchown` & `handle_fchownat`: enforced root check and wrote `user.ltm.uid`/`user.ltm.gid` xattrs.
+   - In `copy_stat_to_linux` & `handle_statx`: populated dynamic UID/GID and simulated `S_ISUID` (04000) on standard setuid binaries.
+6. **Virtual `/proc/<pid>/status` (`src/sandbox.c`)**:
+   - Formatted live `Uid:\t%u\t%u\t%u\t%u\n`, `Gid:\t%u\t%u\t%u\t%u\n`, and `Groups:\t...`.
+
+#### 3. Live Verification & Test Results
+- **Root Verification**:
+  - `./ltm /usr/bin/whoami` -> `root`
+  - `./ltm /usr/bin/id` -> `uid=0(root) gid=0(root) groups=0(root)`
+- **CLI User Verification**:
+  - `./ltm -u alarm /usr/bin/whoami` -> `alarm`
+  - `./ltm -u alarm /usr/bin/id` -> `uid=1000(alarm) gid=1000(alarm) groups=1000(alarm),998(wheel)`
+- **Dynamic `su - alarm` Login**:
+  - `./ltm /usr/bin/bash -c "su - alarm -c 'whoami; id'"` -> `alarm`, `uid=1000(alarm) gid=1000(alarm) groups=1000(alarm),998(wheel)`
+- **File Ownership & DAC Isolation**:
+  - Creating file as `alarm` -> owned by `alarm:alarm` (`-rw-r--r-- 1 alarm alarm`).
+  - Accessing `/root` as `alarm` -> `ls: cannot open directory '/root': Permission denied` (exit code 2).
+  - Accessing `/root` as `root` -> successful directory listing.
+  - Setuid binary permissions: `/bin/su` displays `-rwsr-xr-x 1 root root`.
+- **Regression Suite**:
+  - **329 / 329 Tests Passed (100% Pass Rate)** verified with automated timer.
+
+

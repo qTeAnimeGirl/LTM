@@ -32,6 +32,7 @@ static void print_usage(const char *progname) {
         "  --arch                     Use Arch Linux ARM rootfs (arch_rootfs, default)\n"
         "  --alpine                   Use Alpine Linux rootfs (rootfs)\n"
         "  -r, --rootfs <dir>         Set custom guest root directory (or set LTM_ROOTFS=<dir>)\n"
+        "  -u, --user <user/uid>      Run as specified guest user or numeric UID\n"
         "  -e, --env <KEY=VAL>        Set environment variable in guest (can be specified multiple times)\n"
         "  --preserve-env             Inherit host environment variables (default: isolated clean env)\n"
         "  -i, --install-rootfs [type] Automatically download & install rootfs ('arch' [default] or 'alpine')\n"
@@ -41,12 +42,13 @@ static void print_usage(const char *progname) {
         "  -h, --help                 Display this help message and exit\n\n"
         "Examples:\n"
         "  %s /bin/bash\n"
+        "  %s -u alarm /bin/bash\n"
         "  %s /usr/bin/pacman -Syu\n"
         "  %s -e FOO=BAR /bin/sh -c 'echo $FOO'\n"
         "  %s --alpine /usr/bin/fastfetch\n"
         "  %s --install-rootfs arch\n"
         "  %s ./tests/bin/test_hello\n",
-        progname, progname, progname, progname, progname, progname, progname);
+        progname, progname, progname, progname, progname, progname, progname, progname);
 }
 
 static int run_install_rootfs(const char *flavor, const char *target_dir) {
@@ -56,6 +58,37 @@ static int run_install_rootfs(const char *flavor, const char *target_dir) {
 #define MAX_CUSTOM_ENV 256
 static char *g_custom_env[MAX_CUSTOM_ENV];
 static int g_custom_env_count = 0;
+
+static void parse_creds(const char *str) {
+    unsigned int ruid = 0, euid = 0, suid = 0, fsuid = 0;
+    unsigned int rgid = 0, egid = 0, sgid = 0, fsgid = 0;
+    char groups_str[256] = {0};
+    int matched = sscanf(str, "%u:%u:%u:%u:%u:%u:%u:%u;%255s",
+                         &ruid, &euid, &suid, &fsuid,
+                         &rgid, &egid, &sgid, &fsgid, groups_str);
+    if (matched >= 8) {
+        g_ltm.uid = (uid_t)ruid;
+        g_ltm.euid = (uid_t)euid;
+        g_ltm.suid = (uid_t)suid;
+        g_ltm.fsuid = (uid_t)fsuid;
+        g_ltm.gid = (gid_t)rgid;
+        g_ltm.egid = (gid_t)egid;
+        g_ltm.sgid = (gid_t)sgid;
+        g_ltm.fsgid = (gid_t)fsgid;
+        g_ltm.ngroups = 0;
+        if (matched == 9 && groups_str[0] != '\0') {
+            char *p = groups_str;
+            while (*p && g_ltm.ngroups < 64) {
+                char *end = NULL;
+                unsigned long g = strtoul(p, &end, 10);
+                if (end == p) break;
+                g_ltm.groups[g_ltm.ngroups++] = (gid_t)g;
+                if (*end == ',') p = end + 1;
+                else break;
+            }
+        }
+    }
+}
 
 static char **build_guest_env(char **host_envp, bool preserve_env) {
     if (preserve_env) {
@@ -102,17 +135,36 @@ static char **build_guest_env(char **host_envp, bool preserve_env) {
     char term_buf[256];
     snprintf(term_buf, sizeof(term_buf), "TERM=%s", term_val);
 
+    char home_buf[512] = "HOME=/root";
+    char user_buf[128] = "USER=root";
+    char logname_buf[128] = "LOGNAME=root";
+    char shell_buf[256] = "SHELL=/bin/bash";
+    char pwd_buf[512] = "PWD=/root";
+
+    if (g_ltm.euid != 0) {
+        char uname[64] = "alarm";
+        char uhome[256] = "/home/alarm";
+        char ushell[256] = "/bin/bash";
+        if (ltm_lookup_passwd_uid(g_ltm.euid, uname, sizeof(uname), NULL, uhome, sizeof(uhome), ushell, sizeof(ushell))) {
+            snprintf(home_buf, sizeof(home_buf), "HOME=%s", uhome);
+            snprintf(user_buf, sizeof(user_buf), "USER=%s", uname);
+            snprintf(logname_buf, sizeof(logname_buf), "LOGNAME=%s", uname);
+            snprintf(shell_buf, sizeof(shell_buf), "SHELL=%s", ushell);
+            snprintf(pwd_buf, sizeof(pwd_buf), "PWD=%s", uhome);
+        }
+    }
+
     const char *defaults[] = {
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        "HOME=/root",
-        "USER=root",
-        "LOGNAME=root",
-        "SHELL=/bin/bash",
+        home_buf,
+        user_buf,
+        logname_buf,
+        shell_buf,
         term_buf,
         "LANG=C.UTF-8",
         "LC_ALL=C.UTF-8",
         "HOSTNAME=ltm-mac",
-        "PWD=/root",
+        pwd_buf,
         NULL
     };
 
@@ -163,6 +215,7 @@ int main(int argc, char **argv, char **envp) {
     bool preserve_env = false;
     const char *rootfs_arg = getenv("LTM_ROOTFS");
     bool rootfs_explicit = (rootfs_arg != NULL);
+    const char *user_arg = NULL;
 
     while (arg_idx < argc && argv[arg_idx][0] == '-') {
         if (strcmp(argv[arg_idx], "-i") == 0 ||
@@ -193,6 +246,16 @@ int main(int argc, char **argv, char **envp) {
             rootfs_arg = "rootfs";
             rootfs_explicit = true;
             arg_idx++;
+        } else if (strcmp(argv[arg_idx], "--creds") == 0) {
+            arg_idx++;
+            if (arg_idx < argc) {
+                parse_creds(argv[arg_idx++]);
+            }
+        } else if (strcmp(argv[arg_idx], "-u") == 0 || strcmp(argv[arg_idx], "--user") == 0) {
+            arg_idx++;
+            if (arg_idx < argc) {
+                user_arg = argv[arg_idx++];
+            }
         } else if (strcmp(argv[arg_idx], "-e") == 0 || strcmp(argv[arg_idx], "--env") == 0) {
             arg_idx++;
             if (arg_idx >= argc) {
@@ -343,6 +406,30 @@ int main(int argc, char **argv, char **envp) {
         ensure_rootfs_configured(g_ltm.host_rootfs);
     }
 
+    if (user_arg) {
+        uid_t target_uid = 0;
+        gid_t target_gid = 0;
+        char uname[64] = {0};
+        char *endptr = NULL;
+        unsigned long num_uid = strtoul(user_arg, &endptr, 10);
+        if (endptr && *endptr == '\0') {
+            target_uid = (uid_t)num_uid;
+            ltm_lookup_passwd_uid(target_uid, uname, sizeof(uname), &target_gid, NULL, 0, NULL, 0);
+        } else {
+            strncpy(uname, user_arg, sizeof(uname) - 1);
+            ltm_lookup_passwd_user(uname, &target_uid, &target_gid, NULL, 0, NULL, 0);
+        }
+        g_ltm.uid = target_uid;
+        g_ltm.euid = target_uid;
+        g_ltm.suid = target_uid;
+        g_ltm.fsuid = target_uid;
+        g_ltm.gid = target_gid;
+        g_ltm.egid = target_gid;
+        g_ltm.sgid = target_gid;
+        g_ltm.fsgid = target_gid;
+        g_ltm.ngroups = ltm_get_user_groups(uname[0] ? uname : user_arg, target_gid, g_ltm.groups, 64);
+    }
+
     /* If binary_arg is a relative host path or within host_root/host_rootfs, resolve directly */
     if (binary_arg[0] != '/' && access(binary_arg, F_OK) == 0 && realpath(binary_arg, g_ltm.binary_path)) {
         /* Local relative host path (e.g. ./tests/bin/test_hello) */
@@ -360,17 +447,25 @@ int main(int argc, char **argv, char **envp) {
         }
     }
 
-    /* If running inside guest container rootfs, ensure working directory defaults to /root */
+    /* If running inside guest container rootfs, ensure working directory defaults to user home or /root */
     if (is_container_path) {
         char cur_cwd[1024];
         if (getcwd(cur_cwd, sizeof(cur_cwd))) {
             size_t rootfs_len = strlen(g_ltm.host_rootfs);
             if (strncmp(cur_cwd, g_ltm.host_rootfs, rootfs_len) != 0) {
-                char root_home[1024];
-                snprintf(root_home, sizeof(root_home), "%s/root", g_ltm.host_rootfs);
+                char target_home[1024];
+                char user_home[512] = {0};
+                if (g_ltm.euid != 0) {
+                    ltm_lookup_passwd_uid(g_ltm.euid, NULL, 0, NULL, user_home, sizeof(user_home), NULL, 0);
+                }
+                if (user_home[0] != '\0') {
+                    snprintf(target_home, sizeof(target_home), "%s%s", g_ltm.host_rootfs, user_home);
+                } else {
+                    snprintf(target_home, sizeof(target_home), "%s/root", g_ltm.host_rootfs);
+                }
                 struct stat st;
-                if (stat(root_home, &st) == 0 && S_ISDIR(st.st_mode)) {
-                    chdir(root_home);
+                if (stat(target_home, &st) == 0 && S_ISDIR(st.st_mode)) {
+                    chdir(target_home);
                 } else {
                     chdir(g_ltm.host_rootfs);
                 }

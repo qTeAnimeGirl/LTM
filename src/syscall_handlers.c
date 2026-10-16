@@ -203,6 +203,9 @@ int64_t handle_write(int fd, const void *buf, size_t count) {
     return ret;
 }
 
+static bool ltm_user_in_group(gid_t gid);
+static int check_guest_access(mode_t file_mode, uid_t file_uid, gid_t file_gid, int req_mode);
+
 int64_t handle_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
     if (!pathname) return -LINUX_EFAULT;
 
@@ -231,6 +234,39 @@ int64_t handle_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
         return sandbox_open_virtual(host_path, dflags, mode);
     }
 
+    /* Guest DAC access check if not root */
+    if (g_ltm.fsuid != 0) {
+        struct stat st;
+        if (lstat(host_path, &st) == 0) {
+            uid_t fuid = 0; gid_t fgid = 0;
+            ltm_get_file_owner(host_path, -1, &fuid, &fgid);
+            int req = 0;
+            if (acc == LINUX_O_RDONLY) req = R_OK;
+            else if (acc == LINUX_O_WRONLY) req = W_OK;
+            else if (acc == LINUX_O_RDWR) req = R_OK | W_OK;
+            if (flags & LINUX_O_TRUNC) req |= W_OK;
+            int chk = check_guest_access(st.st_mode, fuid, fgid, req);
+            if (chk < 0) return chk;
+        } else if (flags & LINUX_O_CREAT) {
+            /* Check parent directory write permission */
+            char parent[1024];
+            strncpy(parent, host_path, sizeof(parent) - 1);
+            parent[sizeof(parent) - 1] = '\0';
+            char *last_slash = strrchr(parent, '/');
+            if (last_slash) {
+                if (last_slash == parent) *(last_slash + 1) = '\0';
+                else *last_slash = '\0';
+                struct stat pst;
+                if (stat(parent, &pst) == 0) {
+                    uid_t puid = 0; gid_t pgid = 0;
+                    ltm_get_file_owner(parent, -1, &puid, &pgid);
+                    int chk = check_guest_access(pst.st_mode, puid, pgid, W_OK | X_OK);
+                    if (chk < 0) return chk;
+                }
+            }
+        }
+    }
+
     int fd = open(host_path, dflags, mode);
     if (fd < 0 && errno == EACCES && (dflags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC))) {
         struct stat st;
@@ -243,6 +279,13 @@ int64_t handle_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
         }
     }
     if (fd < 0) return darwin_to_linux_errno(errno);
+
+    if ((dflags & O_CREAT) && (g_ltm.fsuid != 0 || g_ltm.fsgid != 0)) {
+        uint32_t u = g_ltm.fsuid;
+        uint32_t g = g_ltm.fsgid;
+        fsetxattr(fd, "user.ltm.uid", &u, sizeof(u), 0, 0);
+        fsetxattr(fd, "user.ltm.gid", &g, sizeof(g), 0, 0);
+    }
     return fd;
 }
 
@@ -361,14 +404,73 @@ int64_t handle_close(int fd) {
     return 0;
 }
 
-static void copy_stat_to_linux(const struct stat *st, struct linux_stat *statbuf) {
+static bool ltm_user_in_group(gid_t gid) {
+    if (g_ltm.egid == gid) return true;
+    for (int i = 0; i < g_ltm.ngroups; i++) {
+        if (g_ltm.groups[i] == gid) return true;
+    }
+    return false;
+}
+
+static int check_guest_access(mode_t file_mode, uid_t file_uid, gid_t file_gid, int req_mode) {
+    if (g_ltm.euid == 0) {
+        /* Root has CAP_DAC_OVERRIDE / CAP_DAC_READ_SEARCH */
+        if ((req_mode & X_OK) && !S_ISDIR(file_mode) && !(file_mode & 0111)) {
+            return -LINUX_EACCES;
+        }
+        return 0;
+    }
+
+    if (g_ltm.euid == file_uid) {
+        if ((req_mode & R_OK) && !(file_mode & S_IRUSR)) return -LINUX_EACCES;
+        if ((req_mode & W_OK) && !(file_mode & S_IWUSR)) return -LINUX_EACCES;
+        if ((req_mode & X_OK) && !(file_mode & S_IXUSR)) return -LINUX_EACCES;
+        return 0;
+    }
+
+    if (ltm_user_in_group(file_gid)) {
+        if ((req_mode & R_OK) && !(file_mode & S_IRGRP)) return -LINUX_EACCES;
+        if ((req_mode & W_OK) && !(file_mode & S_IWGRP)) return -LINUX_EACCES;
+        if ((req_mode & X_OK) && !(file_mode & S_IXGRP)) return -LINUX_EACCES;
+        return 0;
+    }
+
+    if ((req_mode & R_OK) && !(file_mode & S_IROTH)) return -LINUX_EACCES;
+    if ((req_mode & W_OK) && !(file_mode & S_IWOTH)) return -LINUX_EACCES;
+    if ((req_mode & X_OK) && !(file_mode & S_IXOTH)) return -LINUX_EACCES;
+    return 0;
+}
+
+static void copy_stat_to_linux(const struct stat *st, struct linux_stat *statbuf, const char *host_path, int fd) {
     memset(statbuf, 0, sizeof(*statbuf));
     statbuf->st_dev = st->st_dev;
     statbuf->st_ino = st->st_ino;
-    statbuf->st_mode = st->st_mode;
+    mode_t mode = st->st_mode;
+
+    const char *p = host_path;
+    char path_buf[1024];
+    if (!p && fd >= 0) {
+        if (fcntl(fd, F_GETPATH, path_buf) == 0) p = path_buf;
+    }
+    if (p) {
+        const char *base = strrchr(p, '/');
+        base = base ? base + 1 : p;
+        if (strcmp(base, "sudo") == 0 || strcmp(base, "su") == 0 ||
+            strcmp(base, "passwd") == 0 || strcmp(base, "chsh") == 0 ||
+            strcmp(base, "chfn") == 0 || strcmp(base, "newgrp") == 0 ||
+            strcmp(base, "gpasswd") == 0 || strcmp(base, "pkexec") == 0) {
+            mode |= S_ISUID;
+        }
+    }
+    statbuf->st_mode = mode;
     statbuf->st_nlink = st->st_nlink;
-    statbuf->st_uid = 0;
-    statbuf->st_gid = 0;
+
+    uid_t fuid = 0;
+    gid_t fgid = 0;
+    ltm_get_file_owner(p, fd, &fuid, &fgid);
+    statbuf->st_uid = fuid;
+    statbuf->st_gid = fgid;
+
     statbuf->st_rdev = st->st_rdev;
     statbuf->st_size = st->st_size;
     statbuf->st_blksize = st->st_blksize > 0 ? st->st_blksize : 4096;
@@ -388,7 +490,7 @@ int64_t handle_fstat(int fd, struct linux_stat *statbuf) {
     if (fstat(fd, &st) != 0) {
         return darwin_to_linux_errno(errno);
     }
-    copy_stat_to_linux(&st, statbuf);
+    copy_stat_to_linux(&st, statbuf, NULL, fd);
     return 0;
 }
 
@@ -401,7 +503,7 @@ int64_t handle_newfstatat(int dirfd, const char *pathname, struct linux_stat *st
         if (dirfd < 0) return -LINUX_EBADF;
         struct stat st;
         if (fstat(dirfd, &st) != 0) return darwin_to_linux_errno(errno);
-        copy_stat_to_linux(&st, statbuf);
+        copy_stat_to_linux(&st, statbuf, NULL, dirfd);
         return 0;
     }
 
@@ -413,7 +515,7 @@ int64_t handle_newfstatat(int dirfd, const char *pathname, struct linux_stat *st
         struct stat st;
         int vres = sandbox_virtual_stat(host_path, &st);
         if (vres < 0) return vres;
-        copy_stat_to_linux(&st, statbuf);
+        copy_stat_to_linux(&st, statbuf, host_path, -1);
         return 0;
     }
 
@@ -424,7 +526,7 @@ int64_t handle_newfstatat(int dirfd, const char *pathname, struct linux_stat *st
     if (fstatat(AT_FDCWD, host_path, &st, dflags) != 0) {
         return darwin_to_linux_errno(errno);
     }
-    copy_stat_to_linux(&st, statbuf);
+    copy_stat_to_linux(&st, statbuf, host_path, -1);
     return 0;
 }
 
@@ -2498,51 +2600,198 @@ int64_t handle_getppid(void) {
 }
 
 int64_t handle_getuid(void) {
-    return 0;
+    return g_ltm.uid;
 }
 
 int64_t handle_geteuid(void) {
-    return 0;
+    return g_ltm.euid;
 }
 
 int64_t handle_getgid(void) {
-    return 0;
+    return g_ltm.gid;
 }
 
 int64_t handle_getegid(void) {
-    return 0;
+    return g_ltm.egid;
 }
 
 int64_t handle_getresuid(uid_t *ruid, uid_t *euid, uid_t *suid) {
     if (!ruid || !euid || !suid) return -LINUX_EFAULT;
-    *ruid = 0;
-    *euid = 0;
-    *suid = 0;
+    *ruid = g_ltm.uid;
+    *euid = g_ltm.euid;
+    *suid = g_ltm.suid;
     return 0;
 }
 
 int64_t handle_getresgid(gid_t *rgid, gid_t *egid, gid_t *sgid) {
     if (!rgid || !egid || !sgid) return -LINUX_EFAULT;
-    *rgid = 0;
-    *egid = 0;
-    *sgid = 0;
+    *rgid = g_ltm.gid;
+    *egid = g_ltm.egid;
+    *sgid = g_ltm.sgid;
     return 0;
 }
 
 int64_t handle_getgroups(int size, gid_t list[]) {
     if (size < 0) return -LINUX_EINVAL;
-    if (size == 0) return 1; /* Linux root group count */
+    if (g_ltm.ngroups == 0) {
+        if (size == 0) return 1;
+        if (!list) return -LINUX_EFAULT;
+        list[0] = g_ltm.egid;
+        return 1;
+    }
+    if (size == 0) return g_ltm.ngroups;
+    if (size < g_ltm.ngroups) return -LINUX_EINVAL;
     if (!list) return -LINUX_EFAULT;
-    list[0] = 0;
-    return 1;
+    for (int i = 0; i < g_ltm.ngroups; i++) {
+        list[i] = g_ltm.groups[i];
+    }
+    return g_ltm.ngroups;
 }
 
 int64_t handle_setgroups(size_t size, const gid_t *list) {
-    if ((long)size < 0 || size > 65536) return -LINUX_EINVAL;
+    if ((long)size < 0 || size > 64) return -LINUX_EINVAL;
+    if (g_ltm.euid != 0) return -LINUX_EPERM;
     if (size > 0 && !list) return -LINUX_EFAULT;
+    g_ltm.ngroups = (int)size;
+    for (size_t i = 0; i < size; i++) {
+        g_ltm.groups[i] = list[i];
+    }
     return 0;
 }
 
+int64_t handle_setuid(uid_t uid) {
+    if ((int)uid < 0) return -LINUX_EINVAL;
+    if (g_ltm.euid == 0) {
+        g_ltm.uid = uid;
+        g_ltm.euid = uid;
+        g_ltm.suid = uid;
+        g_ltm.fsuid = uid;
+    } else {
+        if (uid != g_ltm.uid && uid != g_ltm.suid) {
+            return -LINUX_EPERM;
+        }
+        g_ltm.euid = uid;
+        g_ltm.fsuid = uid;
+    }
+    return 0;
+}
+
+int64_t handle_setgid(gid_t gid) {
+    if ((int)gid < 0) return -LINUX_EINVAL;
+    if (g_ltm.euid == 0) {
+        g_ltm.gid = gid;
+        g_ltm.egid = gid;
+        g_ltm.sgid = gid;
+        g_ltm.fsgid = gid;
+    } else {
+        if (gid != g_ltm.gid && gid != g_ltm.sgid) {
+            return -LINUX_EPERM;
+        }
+        g_ltm.egid = gid;
+        g_ltm.fsgid = gid;
+    }
+    return 0;
+}
+
+int64_t handle_setreuid(uid_t ruid, uid_t euid) {
+    if (((int)ruid < 0 && (int)ruid != -1) || ((int)euid < 0 && (int)euid != -1)) {
+        return -LINUX_EINVAL;
+    }
+    if (g_ltm.euid == 0) {
+        if (ruid != (uid_t)-1) g_ltm.uid = ruid;
+        if (euid != (uid_t)-1) {
+            g_ltm.euid = euid;
+            g_ltm.fsuid = euid;
+        }
+        if (ruid != (uid_t)-1 || (euid != (uid_t)-1 && euid != g_ltm.uid)) {
+            g_ltm.suid = g_ltm.euid;
+        }
+    } else {
+        if (ruid != (uid_t)-1 && ruid != g_ltm.uid && ruid != g_ltm.euid) return -LINUX_EPERM;
+        if (euid != (uid_t)-1 && euid != g_ltm.uid && euid != g_ltm.euid && euid != g_ltm.suid) return -LINUX_EPERM;
+        if (ruid != (uid_t)-1) g_ltm.uid = ruid;
+        if (euid != (uid_t)-1) {
+            g_ltm.euid = euid;
+            g_ltm.fsuid = euid;
+        }
+    }
+    return 0;
+}
+
+int64_t handle_setregid(gid_t rgid, gid_t egid) {
+    if (((int)rgid < 0 && (int)rgid != -1) || ((int)egid < 0 && (int)egid != -1)) {
+        return -LINUX_EINVAL;
+    }
+    if (g_ltm.euid == 0) {
+        if (rgid != (gid_t)-1) g_ltm.gid = rgid;
+        if (egid != (gid_t)-1) {
+            g_ltm.egid = egid;
+            g_ltm.fsgid = egid;
+        }
+        if (rgid != (gid_t)-1 || (egid != (gid_t)-1 && egid != g_ltm.gid)) {
+            g_ltm.sgid = g_ltm.egid;
+        }
+    } else {
+        if (rgid != (gid_t)-1 && rgid != g_ltm.gid && rgid != g_ltm.egid) return -LINUX_EPERM;
+        if (egid != (gid_t)-1 && egid != g_ltm.gid && egid != g_ltm.egid && egid != g_ltm.sgid) return -LINUX_EPERM;
+        if (rgid != (gid_t)-1) g_ltm.gid = rgid;
+        if (egid != (gid_t)-1) {
+            g_ltm.egid = egid;
+            g_ltm.fsgid = egid;
+        }
+    }
+    return 0;
+}
+
+int64_t handle_setresuid(uid_t ruid, uid_t euid, uid_t suid) {
+    if (((int)ruid < 0 && (int)ruid != -1) || ((int)euid < 0 && (int)euid != -1) || ((int)suid < 0 && (int)suid != -1)) {
+        return -LINUX_EINVAL;
+    }
+    if (g_ltm.euid == 0) {
+        if (ruid != (uid_t)-1) g_ltm.uid = ruid;
+        if (euid != (uid_t)-1) {
+            g_ltm.euid = euid;
+            g_ltm.fsuid = euid;
+        }
+        if (suid != (uid_t)-1) g_ltm.suid = suid;
+    } else {
+        if (ruid != (uid_t)-1 && ruid != g_ltm.uid && ruid != g_ltm.euid && ruid != g_ltm.suid) return -LINUX_EPERM;
+        if (euid != (uid_t)-1 && euid != g_ltm.uid && euid != g_ltm.euid && euid != g_ltm.suid) return -LINUX_EPERM;
+        if (suid != (uid_t)-1 && suid != g_ltm.uid && suid != g_ltm.euid && suid != g_ltm.suid) return -LINUX_EPERM;
+        if (ruid != (uid_t)-1) g_ltm.uid = ruid;
+        if (euid != (uid_t)-1) {
+            g_ltm.euid = euid;
+            g_ltm.fsuid = euid;
+        }
+        if (suid != (uid_t)-1) g_ltm.suid = suid;
+    }
+    return 0;
+}
+
+int64_t handle_setresgid(gid_t rgid, gid_t egid, gid_t sgid) {
+    if (((int)rgid < 0 && (int)rgid != -1) || ((int)egid < 0 && (int)egid != -1) || ((int)sgid < 0 && (int)sgid != -1)) {
+        return -LINUX_EINVAL;
+    }
+    if (g_ltm.euid == 0) {
+        if (rgid != (gid_t)-1) g_ltm.gid = rgid;
+        if (egid != (gid_t)-1) {
+            g_ltm.egid = egid;
+            g_ltm.fsgid = egid;
+        }
+        if (sgid != (gid_t)-1) g_ltm.sgid = sgid;
+    } else {
+        if (rgid != (gid_t)-1 && rgid != g_ltm.gid && rgid != g_ltm.egid && rgid != g_ltm.sgid) return -LINUX_EPERM;
+        if (egid != (gid_t)-1 && egid != g_ltm.gid && egid != g_ltm.egid && egid != g_ltm.sgid) return -LINUX_EPERM;
+        if (sgid != (gid_t)-1 && sgid != g_ltm.gid && sgid != g_ltm.egid && sgid != g_ltm.sgid) return -LINUX_EPERM;
+        if (rgid != (gid_t)-1) g_ltm.gid = rgid;
+        if (egid != (gid_t)-1) {
+            g_ltm.egid = egid;
+            g_ltm.fsgid = egid;
+        }
+        if (sgid != (gid_t)-1) g_ltm.sgid = sgid;
+    }
+    return 0;
+}
 
 int64_t handle_capget(void *hdr, void *data) {
     if (hdr) {
@@ -2551,12 +2800,13 @@ int64_t handle_capget(void *hdr, void *data) {
     }
     if (data) {
         uint32_t *d = (uint32_t *)data;
-        d[0] = 0xffffffff;
-        d[1] = 0xffffffff;
-        d[2] = 0xffffffff;
-        d[3] = 0xffffffff;
-        d[4] = 0xffffffff;
-        d[5] = 0xffffffff;
+        uint32_t val = (g_ltm.euid == 0) ? 0xffffffff : 0;
+        d[0] = val;
+        d[1] = val;
+        d[2] = val;
+        d[3] = val;
+        d[4] = val;
+        d[5] = val;
     }
     return 0;
 }
@@ -3256,12 +3506,66 @@ int64_t handle_execve(const char *pathname, char *const argv[], char *const envp
         close(sfd);
     }
 
+    uid_t next_ruid = g_ltm.uid;
+    uid_t next_euid = g_ltm.euid;
+    uid_t next_suid = g_ltm.suid;
+    uid_t next_fsuid = g_ltm.fsuid;
+    gid_t next_rgid = g_ltm.gid;
+    gid_t next_egid = g_ltm.egid;
+    gid_t next_sgid = g_ltm.sgid;
+    gid_t next_fsgid = g_ltm.fsgid;
+
+    struct stat exec_st;
+    if (stat(host_path, &exec_st) == 0) {
+        const char *base = strrchr(pathname, '/');
+        base = base ? base + 1 : pathname;
+        bool is_setuid_bin = (exec_st.st_mode & S_ISUID) != 0;
+        if (!is_setuid_bin) {
+            if (strcmp(base, "sudo") == 0 || strcmp(base, "su") == 0 ||
+                strcmp(base, "passwd") == 0 || strcmp(base, "chsh") == 0 ||
+                strcmp(base, "chfn") == 0 || strcmp(base, "newgrp") == 0 ||
+                strcmp(base, "gpasswd") == 0 || strcmp(base, "pkexec") == 0) {
+                is_setuid_bin = true;
+            }
+        }
+        if (is_setuid_bin) {
+            uid_t fuid = 0; gid_t fgid = 0;
+            ltm_get_file_owner(host_path, -1, &fuid, &fgid);
+            next_euid = fuid;
+            next_fsuid = fuid;
+            next_suid = fuid;
+        }
+
+        bool is_setgid_bin = (exec_st.st_mode & S_ISGID) != 0;
+        if (is_setgid_bin) {
+            uid_t fuid = 0; gid_t fgid = 0;
+            ltm_get_file_owner(host_path, -1, &fuid, &fgid);
+            next_egid = fgid;
+            next_fsgid = fgid;
+            next_sgid = fgid;
+        }
+    }
+
+    char creds_str[256];
+    snprintf(creds_str, sizeof(creds_str), "%u:%u:%u:%u:%u:%u:%u:%u",
+             (unsigned int)next_ruid, (unsigned int)next_euid,
+             (unsigned int)next_suid, (unsigned int)next_fsuid,
+             (unsigned int)next_rgid, (unsigned int)next_egid,
+             (unsigned int)next_sgid, (unsigned int)next_fsgid);
+    if (g_ltm.ngroups > 0) {
+        char grp_buf[32];
+        for (int i = 0; i < g_ltm.ngroups; i++) {
+            snprintf(grp_buf, sizeof(grp_buf), "%c%u", (i == 0) ? ';' : ',', (unsigned int)g_ltm.groups[i]);
+            strncat(creds_str, grp_buf, sizeof(creds_str) - strlen(creds_str) - 1);
+        }
+    }
+
     int guest_argc = 0;
     while (argv && argv[guest_argc]) {
         guest_argc++;
     }
 
-    int max_args = guest_argc + 16;
+    int max_args = guest_argc + 24;
     char **new_argv = malloc(max_args * sizeof(char *));
     if (!new_argv) return -LINUX_ENOMEM;
 
@@ -3269,6 +3573,8 @@ int64_t handle_execve(const char *pathname, char *const argv[], char *const envp
     new_argv[n++] = ltm_path;
     new_argv[n++] = "-r";
     new_argv[n++] = g_ltm.host_rootfs;
+    new_argv[n++] = "--creds";
+    new_argv[n++] = creds_str;
     new_argv[n++] = "--preserve-env";
     if (g_ltm.trace_syscalls) {
         new_argv[n++] = "-s";
@@ -3330,6 +3636,12 @@ int64_t handle_mkdirat(int dirfd, const char *pathname, mode_t mode) {
 
     int ret = mkdir(host_path, mode);
     if (ret < 0) return darwin_to_linux_errno(errno);
+    if (g_ltm.fsuid != 0 || g_ltm.fsgid != 0) {
+        uint32_t u = g_ltm.fsuid;
+        uint32_t g = g_ltm.fsgid;
+        setxattr(host_path, "user.ltm.uid", &u, sizeof(u), 0, 0);
+        setxattr(host_path, "user.ltm.gid", &g, sizeof(g), 0, 0);
+    }
     return 0;
 }
 
@@ -3341,11 +3653,22 @@ int64_t handle_faccessat(int dirfd, const char *pathname, int mode, int flags) {
     if (res < 0) return res;
     if (res == 1) return 0;
 
+    struct stat st;
+    if (stat(host_path, &st) != 0) {
+        return darwin_to_linux_errno(errno);
+    }
+
+    uid_t fuid = 0;
+    gid_t fgid = 0;
+    ltm_get_file_owner(host_path, -1, &fuid, &fgid);
+
+    int chk = check_guest_access(st.st_mode, fuid, fgid, mode & (R_OK | W_OK | X_OK));
+    if (chk < 0) return chk;
+
     int ret = access(host_path, mode & (R_OK | W_OK | X_OK));
     if (ret < 0) {
         if (errno == EACCES) {
-            struct stat st;
-            if (stat(host_path, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == getuid()) {
+            if (S_ISREG(st.st_mode) && st.st_uid == getuid()) {
                 if (!(mode & X_OK) || (st.st_mode & 0111)) {
                     return 0; /* CAP_DAC_OVERRIDE */
                 }
@@ -3395,6 +3718,12 @@ int64_t handle_symlinkat(const char *target, int newdirfd, const char *linkpath)
 
     int ret = symlink(target, link_host);
     if (ret < 0) return darwin_to_linux_errno(errno);
+    if (g_ltm.fsuid != 0 || g_ltm.fsgid != 0) {
+        uint32_t u = g_ltm.fsuid;
+        uint32_t g = g_ltm.fsgid;
+        setxattr(link_host, "user.ltm.uid", &u, sizeof(u), 0, XATTR_NOFOLLOW);
+        setxattr(link_host, "user.ltm.gid", &g, sizeof(g), 0, XATTR_NOFOLLOW);
+    }
     return 0;
 }
 
@@ -3454,6 +3783,20 @@ int64_t handle_fchownat(int dirfd, const char *pathname, uid_t owner, gid_t grou
         return darwin_to_linux_errno(errno);
     }
 
+    if (g_ltm.euid != 0) {
+        if (owner != (uid_t)-1 && owner != g_ltm.uid) return -LINUX_EPERM;
+        if (group != (gid_t)-1 && !ltm_user_in_group(group)) return -LINUX_EPERM;
+    }
+
+    if (owner != (uid_t)-1) {
+        uint32_t u = owner;
+        setxattr(host_path, "user.ltm.uid", &u, sizeof(u), 0, (flags & 0x100) ? XATTR_NOFOLLOW : 0);
+    }
+    if (group != (gid_t)-1) {
+        uint32_t g = group;
+        setxattr(host_path, "user.ltm.gid", &g, sizeof(g), 0, (flags & 0x100) ? XATTR_NOFOLLOW : 0);
+    }
+
     int ret = 0;
     if ((flags & 0x100 /* AT_SYMLINK_NOFOLLOW */) || S_ISLNK(st.st_mode)) {
         ret = lchown(host_path, owner, group);
@@ -3469,6 +3812,21 @@ int64_t handle_fchownat(int dirfd, const char *pathname, uid_t owner, gid_t grou
 int64_t handle_fchown(int fd, uid_t owner, gid_t group) {
     if (fd < 0) return -LINUX_EBADF;
     if (fcntl(fd, F_GETFL) < 0) return -LINUX_EBADF;
+
+    if (g_ltm.euid != 0) {
+        if (owner != (uid_t)-1 && owner != g_ltm.uid) return -LINUX_EPERM;
+        if (group != (gid_t)-1 && !ltm_user_in_group(group)) return -LINUX_EPERM;
+    }
+
+    if (owner != (uid_t)-1) {
+        uint32_t u = owner;
+        fsetxattr(fd, "user.ltm.uid", &u, sizeof(u), 0, 0);
+    }
+    if (group != (gid_t)-1) {
+        uint32_t g = group;
+        fsetxattr(fd, "user.ltm.gid", &g, sizeof(g), 0, 0);
+    }
+
     int ret = fchown(fd, owner, group);
     if (ret < 0 && errno != EPERM && errno != EACCES) {
         return darwin_to_linux_errno(errno);
@@ -5730,6 +6088,18 @@ int64_t handle_faccessat2(int dirfd, const char *pathname, int mode, int flags) 
         return 0;
     }
 
+    struct stat st;
+    if (fstatat(AT_FDCWD, host_path, &st, (flags & 0x100) ? AT_SYMLINK_NOFOLLOW : 0) != 0) {
+        return darwin_to_linux_errno(errno);
+    }
+
+    uid_t fuid = 0;
+    gid_t fgid = 0;
+    ltm_get_file_owner(host_path, -1, &fuid, &fgid);
+
+    int chk = check_guest_access(st.st_mode, fuid, fgid, mode & (R_OK | W_OK | X_OK));
+    if (chk < 0) return chk;
+
     int dflags = 0;
     if (flags & 0x100) dflags |= AT_SYMLINK_NOFOLLOW;
     if (flags & 0x200) dflags |= AT_EACCESS;
@@ -5737,8 +6107,7 @@ int64_t handle_faccessat2(int dirfd, const char *pathname, int mode, int flags) 
     int ret = faccessat(AT_FDCWD, host_path, mode, dflags);
     if (ret < 0) {
         if (errno == EACCES) {
-            struct stat st;
-            if (stat(host_path, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == getuid()) {
+            if (S_ISREG(st.st_mode) && st.st_uid == getuid()) {
                 if (!(mode & X_OK) || (st.st_mode & 0111)) {
                     return 0; /* CAP_DAC_OVERRIDE */
                 }
@@ -6356,13 +6725,19 @@ int64_t handle_getpriority(int which, int who) {
 }
 
 int64_t handle_setfsuid(uid_t fsuid) {
-    (void)fsuid;
-    return 0;
+    uid_t prev = g_ltm.fsuid;
+    if (g_ltm.euid == 0 || fsuid == g_ltm.uid || fsuid == g_ltm.euid || fsuid == g_ltm.suid || fsuid == g_ltm.fsuid) {
+        g_ltm.fsuid = fsuid;
+    }
+    return prev;
 }
 
 int64_t handle_setfsgid(gid_t fsgid) {
-    (void)fsgid;
-    return 0;
+    gid_t prev = g_ltm.fsgid;
+    if (g_ltm.euid == 0 || fsgid == g_ltm.gid || fsgid == g_ltm.egid || fsgid == g_ltm.sgid || fsgid == g_ltm.fsgid) {
+        g_ltm.fsgid = fsgid;
+    }
+    return prev;
 }
 
 int64_t handle_sethostname(const char *name, size_t len) {
@@ -7113,12 +7488,12 @@ int64_t handle_statx(int dirfd, const char *pathname, int flags, unsigned int ma
     if (!pathname) return -LINUX_EFAULT;
 
     struct stat st;
+    char host_path[PATH_MAX] = {0};
     if (pathname[0] == '\0') {
         if (!(flags & 0x1000)) return -LINUX_ENOENT; /* AT_EMPTY_PATH */
         if (dirfd < 0) return -LINUX_EBADF;
         if (fstat(dirfd, &st) != 0) return darwin_to_linux_errno(errno);
     } else {
-        char host_path[PATH_MAX];
         int r = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), (flags & 0x100) ? AT_SYMLINK_NOFOLLOW : 0);
         if (r < 0) return r;
 
@@ -7137,9 +7512,26 @@ int64_t handle_statx(int dirfd, const char *pathname, int flags, unsigned int ma
     statxbuf->stx_mask = supported_mask;
     statxbuf->stx_blksize = st.st_blksize;
     statxbuf->stx_nlink = st.st_nlink;
-    statxbuf->stx_uid = 0; /* root container */
-    statxbuf->stx_gid = 0;
-    statxbuf->stx_mode = st.st_mode;
+
+    uid_t fuid = 0;
+    gid_t fgid = 0;
+    const char *p = (pathname[0] != '\0') ? host_path : NULL;
+    ltm_get_file_owner(p, (pathname[0] == '\0') ? dirfd : -1, &fuid, &fgid);
+    statxbuf->stx_uid = fuid;
+    statxbuf->stx_gid = fgid;
+
+    mode_t mode = st.st_mode;
+    if (p) {
+        const char *base = strrchr(p, '/');
+        base = base ? base + 1 : p;
+        if (strcmp(base, "sudo") == 0 || strcmp(base, "su") == 0 ||
+            strcmp(base, "passwd") == 0 || strcmp(base, "chsh") == 0 ||
+            strcmp(base, "chfn") == 0 || strcmp(base, "newgrp") == 0 ||
+            strcmp(base, "gpasswd") == 0 || strcmp(base, "pkexec") == 0) {
+            mode |= S_ISUID;
+        }
+    }
+    statxbuf->stx_mode = mode;
     statxbuf->stx_ino = st.st_ino;
     statxbuf->stx_size = st.st_size;
     statxbuf->stx_blocks = st.st_blocks;

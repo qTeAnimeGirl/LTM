@@ -1000,19 +1000,22 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
             ret = handle_umask((mode_t)a0);
             break;
         case LINUX_SYS_setuid:
+            ret = handle_setuid((uid_t)a0);
+            break;
         case LINUX_SYS_setgid:
-            if ((int)a0 < 0) return -LINUX_EINVAL;
-            ret = 0;
+            ret = handle_setgid((gid_t)a0);
             break;
         case LINUX_SYS_setreuid:
+            ret = handle_setreuid((uid_t)a0, (uid_t)a1);
+            break;
         case LINUX_SYS_setregid:
-            if (((int)a0 < 0 && (int)a0 != -1) || ((int)a1 < 0 && (int)a1 != -1)) return -LINUX_EINVAL;
-            ret = 0;
+            ret = handle_setregid((gid_t)a0, (gid_t)a1);
             break;
         case LINUX_SYS_setresuid:
+            ret = handle_setresuid((uid_t)a0, (uid_t)a1, (uid_t)a2);
+            break;
         case LINUX_SYS_setresgid:
-            if (((int)a0 < 0 && (int)a0 != -1) || ((int)a1 < 0 && (int)a1 != -1) || ((int)a2 < 0 && (int)a2 != -1)) return -LINUX_EINVAL;
-            ret = 0;
+            ret = handle_setresgid((gid_t)a0, (gid_t)a1, (gid_t)a2);
             break;
         case LINUX_SYS_unlinkat:
             ret = handle_unlinkat((int)a0, (const char *)a1, (int)a2);
