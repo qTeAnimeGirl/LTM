@@ -3972,6 +3972,53 @@ When rapid asynchronous signals (`SIGALRM` via `setitimer` or host interrupts) w
    - `pacman -Q`: lists packages cleanly with exit code 0.
    - `bash -c`: executes interactive commands cleanly with exit code 0.
 
+---
+
+## [Sprint 19: Dual-Mode Context Restoration Trampoline & Trap Fallthrough Elimination]
+
+**Date**: 2026-10-17  
+**Author**: Engineering Swarm (Lead Architect, JIT Engine Developer, Signal Systems Auditor, QA Lead)  
+
+### 1. Incident Overview & Root Cause Analysis
+During `pacman -S sudo` in Arch Linux ARM64, a fatal host crash occurred:
+```
+[LTM:ERROR] Fatal signal 11 delivered during host execution: PC=0x1005c8dc8 [handle_io_setup in ltm (+0x1cdc8)], lr=0x1005b4bb8 [syscall_dispatch in ltm], fault_addr=0x14
+```
+Two critical root causes were identified and eliminated:
+
+1. **Trap `0x1803U` Fallthrough into Syscall Dispatch**:
+   - In `src/syscall_dispatcher.c`, the trap handler for `imm == 0x1803U` (`add w18, w18, #1` in `libz.so.1` `inflate_table`) incremented the virtual `x18` register and advanced PC by 4, but **omitted the context resumption call** `ltm_resume_context_ex(state, neon, 1);`.
+   - Execution fell through into `syscall_dispatch(num, a0, a1, ...)`. In the guest context of `inflate_table`, `x8` was 0 (`LINUX_SYS_io_setup`), `x0` was 4, and `x1` was `0x14`.
+   - `handle_io_setup` received `ctx_idp = (aio_context_t *)0x14` and executed `*ctx_idp = ...`, writing to unmapped address `0x14`, triggering host Signal 11.
+   - **Fix**: Added explicit `ltm_resume_context_ex(state, neon, 1);` for trap `0x1803U`, added pointer safety validation to `handle_io_setup`, and added an unhandled trap guard delivering `SIGTRAP` on any non-zero breakpoint trap instead of falling into syscall dispatch.
+
+2. **The Fundamental ABI Conflict Between `x16` and `x18` in Userspace Resumption**:
+   - In AArch64 EL0 userspace, an indirect branch (`br Xn`) requires a 64-bit general-purpose register.
+   - Trampolining via `br x16` clobbers guest `x16` (deadly in `inflate_table` where `w16` is a live loop variable holding `table_bits`).
+   - Trampolining via `br x18` clobbers guest `x18` (deadly in `strftime` and standard code where `x18` is a live buffer pointer).
+   - Returning via Darwin XNU's `_sigtramp` triggers `brk #1` kernel panics due to signal cookie mismatch with stack switching.
+   - **Fix**: Implemented a **Dual-Mode Context Restoration Engine** in `src/jump_stub.s` (`_ltm_resume_context_asm(state, neon, use_x18)`):
+     - **Mode 0 (`use_x18 == 0`)**: Standard mode for syscalls, `clone()`, `fork()`, `execve()`. Trampolines via `br x16` (caller-saved IP0 per Linux ARM64 System Call ABI) and restores `x18` with 100% fidelity from `[x0, #144]`.
+     - **Mode 1 (`use_x18 == 1`)**: Virtualized `x18` mode for `inflate_table` traps (`0x1801..0x1804`). Trampolines via `br x18` and restores guest `x16` and `x17` with 100% fidelity from `[x0, #128]`.
+
+### 2. Bidirectional Register Synchronization & Platform Targeting
+- Retained `-mmacosx-version-min=11.0` and `-Wl,-platform_version,macos,11.0.0,11.0.0` to activate Darwin XNU's `task->preserve_x18` kernel flag.
+- Synchronized physical `x18` with thread-local `s_guest_x18` bidirectionally in both `ltm_sig_handler_impl` and `ltm_host_signal_handler_impl`:
+  - `if (state->__x[18] != 0) ltm_set_guest_x18(state->__x[18]); else state->__x[18] = ltm_get_guest_x18();`
+- Ensured `_ltm_resume_context_asm` reloads physical `x18` so both the hardware register and thread-local state remain pure.
+
+### 3. Verification & Results
+- **Pacman Package Management**:
+  - `pacman -Si sudo`: Resolves metadata, parses package description, formats build dates with `strftime`, exits code 0.
+  - `pacman -Sp sudo`: Resolves URL and exits code 0.
+  - `pacman -S --noconfirm sudo`: Downloads package, verifies keys and signatures, decompresses archives via `libz`, runs post-transaction hooks, and installs sudo with exit code 0.
+  - `sudo --version`: Executes installed `/usr/bin/sudo`, parses config, plugins, and network interfaces with exit code 0.
+- **Dedicated Test Suites**:
+  - `test_x18_virtualization`: 16 threads (32k ops), 30 rapid asynchronous `SIGALRM` signals, 8 concurrent threads under signal blast: **PASS**.
+- **Automated Regression Suite (`./run_tests.sh`)**:
+  - **All 330 / 330 Tests Passed Cleanly (100% pass rate)**.
+
+
 
 
 

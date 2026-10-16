@@ -12,6 +12,7 @@ size_t patcher_scan_and_patch(void *addr, size_t size) {
 }
 
 size_t patcher_scan_and_patch_ex(void *addr, size_t size, bool is_interp) {
+    (void)is_interp;
     if (!addr || size < 4) return 0;
 
     uint32_t *code = (uint32_t *)addr;
@@ -33,30 +34,6 @@ size_t patcher_scan_and_patch_ex(void *addr, size_t size, bool is_interp) {
             /* msr TPIDR_EL0, Xt -> brk #(0x200 | rt) */
             uint32_t rt = insn & 0x1fU;
             uint32_t imm = 0x200U | rt;
-            code[i] = 0xd4200000U | (imm << 5);
-            count++;
-        } else if (!is_interp && (insn & 0xffe0ffffU) == 0xaa0003f2U) {
-            /* mov x18, Xm (orr x18, xzr, Xm) -> brk #(0x1810 + Xm) */
-            uint32_t xm = (insn >> 16) & 0x1fU;
-            uint32_t imm = 0x1810U + xm;
-            code[i] = 0xd4200000U | (imm << 5);
-            count++;
-        } else if (!is_interp && (insn & ~0x1fU) == 0xaa1203e0U && (insn & 0x1fU) < 31) {
-            /* mov Xd, x18 (orr Xd, xzr, x18) -> brk #(0x1830 + Xd) */
-            uint32_t xd = insn & 0x1fU;
-            uint32_t imm = 0x1830U + xd;
-            code[i] = 0xd4200000U | (imm << 5);
-            count++;
-        } else if (!is_interp && (insn & 0xffe0ffffU) == 0x2a0003f2U) {
-            /* mov w18, Wm (orr w18, wzr, Wm) -> brk #(0x1850 + Wm) */
-            uint32_t wm = (insn >> 16) & 0x1fU;
-            uint32_t imm = 0x1850U + wm;
-            code[i] = 0xd4200000U | (imm << 5);
-            count++;
-        } else if (!is_interp && (insn & ~0x1fU) == 0x2a1203e0U && (insn & 0x1fU) < 31) {
-            /* mov Wd, w18 (orr Wd, wzr, w18) -> brk #(0x1870 + Wd) */
-            uint32_t wd = insn & 0x1fU;
-            uint32_t imm = 0x1870U + wd;
             code[i] = 0xd4200000U | (imm << 5);
             count++;
 

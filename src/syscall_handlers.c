@@ -8206,7 +8206,7 @@ int64_t handle_pidfd_getfd(int pidfd, int targetfd, unsigned int flags) {
 
 int64_t handle_io_setup(unsigned nr_events, linux_aio_context_t *ctx_idp) {
     if (nr_events == 0) return -LINUX_EINVAL;
-    if (!ctx_idp) return -LINUX_EFAULT;
+    if (!ctx_idp || (uintptr_t)ctx_idp < 0x1000 || ((uintptr_t)ctx_idp & 0x7) != 0) return -LINUX_EFAULT;
     *ctx_idp = (linux_aio_context_t)(0x1000 + (nr_events & 0x7FFF));
     return 0;
 }

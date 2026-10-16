@@ -23,14 +23,22 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
     }
 }
 
-extern void ltm_resume_context_asm(void *state, void *neon) __attribute__((noreturn));
+extern void ltm_resume_context_asm(void *state, void *neon, int use_x18) __attribute__((noreturn));
 
-void ltm_resume_context(void *state, void *neon) {
+void ltm_resume_context_ex(void *state, void *neon, int use_x18) __attribute__((noreturn));
+
+void ltm_resume_context_ex(void *state, void *neon, int use_x18) {
     if (state) {
         arm_thread_state64_t *s = (arm_thread_state64_t *)state;
         s->__x[18] = ltm_get_guest_x18();
     }
-    ltm_resume_context_asm(state, neon);
+    ltm_resume_context_asm(state, neon, use_x18);
+    __builtin_unreachable();
+}
+
+void ltm_resume_context(void *state, void *neon) {
+    ltm_resume_context_ex(state, neon, 0);
+    __builtin_unreachable();
 }
 
 void ltm_sig_handler_impl(int sig, siginfo_t *si, void *ctx) {
@@ -147,58 +155,33 @@ void ltm_sig_handler_impl(int sig, siginfo_t *si, void *ctx) {
             /* TRACEABILITY: Virtualized w18 in libz inflate_table (ad90: mov w18, #0) */
             ltm_set_guest_x18(0);
             state->__pc += 4;
-            ltm_resume_context(state, neon);
+            ltm_resume_context_ex(state, neon, 1);
         } else if (imm == 0x1802U) {
             /* TRACEABILITY: Virtualized w18 in libz inflate_table (ada0: ldrh w8, [x5, w18, uxtw #1]) */
             uint64_t g_x18 = ltm_get_guest_x18();
             uint16_t val = *(uint16_t *)(state->__x[5] + ((uint32_t)g_x18 * 2));
             state->__x[8] = val;
             state->__pc += 4;
-            ltm_resume_context(state, neon);
+            ltm_resume_context_ex(state, neon, 1);
         } else if (imm == 0x1803U) {
             /* TRACEABILITY: Virtualized w18 in libz inflate_table (ae34: add w18, w18, #1) */
             uint64_t g_x18 = ltm_get_guest_x18();
-            ltm_set_guest_x18((uint32_t)(g_x18 + 1));
+            uint32_t val = (uint32_t)(g_x18 + 1);
+            ltm_set_guest_x18(val);
+            state->__x[18] = val;
             state->__pc += 4;
+            ltm_resume_context_ex(state, neon, 1);
         } else if (imm == 0x1804U) {
             /* TRACEABILITY: Virtualized w18 in libz inflate_table (ae54: ldrh w2, [x5, w18, uxtw #1]) */
             uint64_t g_x18 = ltm_get_guest_x18();
             uint16_t val = *(uint16_t *)(state->__x[5] + ((uint32_t)g_x18 * 2));
             state->__x[2] = val;
             state->__pc += 4;
-            ltm_resume_context(state, neon);
-        } else if (imm >= 0x1810U && imm <= 0x182fU) {
-            /* Virtualized write to x18: mov x18, Xm */
-            uint32_t xm = imm - 0x1810U;
-            uint64_t val = (xm == 31) ? 0 : state->__x[xm];
-            ltm_set_guest_x18(val);
-            state->__x[18] = val;
-            state->__pc += 4;
-            ltm_resume_context(state, neon);
-        } else if (imm >= 0x1830U && imm <= 0x184fU) {
-            /* Virtualized read from x18: mov Xd, x18 */
-            uint32_t xd = imm - 0x1830U;
-            uint64_t val = (state->__x[18] != 0) ? state->__x[18] : ltm_get_guest_x18();
-            ltm_set_guest_x18(val);
-            state->__x[xd] = val;
-            state->__pc += 4;
-            ltm_resume_context(state, neon);
-        } else if (imm >= 0x1850U && imm <= 0x186fU) {
-            /* Virtualized write to w18: mov w18, Wm */
-            uint32_t wm = imm - 0x1850U;
-            uint32_t val = (wm == 31) ? 0 : (uint32_t)state->__x[wm];
-            ltm_set_guest_x18(val);
-            state->__x[18] = val;
-            state->__pc += 4;
-            ltm_resume_context(state, neon);
-        } else if (imm >= 0x1870U && imm <= 0x188fU) {
-            /* Virtualized read from w18: mov Wd, w18 */
-            uint32_t wd = imm - 0x1870U;
-            uint32_t val = (state->__x[18] != 0) ? (uint32_t)state->__x[18] : (uint32_t)ltm_get_guest_x18();
-            ltm_set_guest_x18(val);
-            state->__x[wd] = val;
-            state->__pc += 4;
-            ltm_resume_context(state, neon);
+            ltm_resume_context_ex(state, neon, 1);
+        } else if (imm != 0) {
+            ltm_log_error("Unhandled brk #0x%x at PC=%p", imm, (void *)state->__pc);
+            handle_kill(getpid(), SIGTRAP);
+            return;
         }
     }
 
