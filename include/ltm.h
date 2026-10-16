@@ -368,6 +368,10 @@
 #define LINUX_SYS_lsm_set_self_attr   460
 #define LINUX_SYS_lsm_list_modules    461
 #define LINUX_SYS_mseal               462
+#define LINUX_SYS_setxattrat          463
+#define LINUX_SYS_getxattrat          464
+#define LINUX_SYS_listxattrat         465
+#define LINUX_SYS_removexattrat       466
 
 /* Linux Errno Values */
 #define LINUX_EPERM            1

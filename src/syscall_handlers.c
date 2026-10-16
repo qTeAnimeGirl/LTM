@@ -871,6 +871,8 @@ static int ltm_collect_netifs(ltm_netif_info_t *out, int max_entries) {
     return count;
 }
 
+static pid_t g_ltm_terminal_pgrp = 0;
+
 int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
     /* TIOCGWINSZ: Linux 0x5413 */
     if (request == 0x5413) {
@@ -983,12 +985,14 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
     /* TIOCGPGRP: Linux 0x540f */
     if (request == 0x540f) {
         if (!arg) return -LINUX_EFAULT;
-        pid_t pgrp = tcgetpgrp(fd);
-        if (pgrp <= 0) {
-            pgrp = getpgrp();
-        }
-        if (pgrp <= 0) {
-            pgrp = getpid();
+        if (!isatty(fd)) return -LINUX_ENOTTY;
+        pid_t pgrp = 0;
+        if (g_ltm_terminal_pgrp > 0) {
+            pgrp = g_ltm_terminal_pgrp;
+        } else {
+            pgrp = tcgetpgrp(fd);
+            if (pgrp <= 0) pgrp = getpgrp();
+            if (pgrp <= 0) pgrp = getpid();
         }
         *(pid_t *)arg = pgrp;
         return 0;
@@ -997,7 +1001,9 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
     /* TIOCSPGRP: Linux 0x5410 */
     if (request == 0x5410) {
         if (!arg) return -LINUX_EFAULT;
+        if (!isatty(fd)) return -LINUX_ENOTTY;
         pid_t pgrp = *(pid_t *)arg;
+        g_ltm_terminal_pgrp = pgrp;
 
         struct sigaction sa, old_sa;
         memset(&sa, 0, sizeof(sa));
@@ -1009,6 +1015,65 @@ int64_t handle_ioctl(int fd, unsigned long request, void *arg) {
 
         sigaction(SIGTTOU, &old_sa, NULL);
         return 0;
+    }
+
+    /* TIOCGPTN: Linux 0x80045430 (get pty number) */
+    if (request == 0x80045430) {
+        if (!arg) return -LINUX_EFAULT;
+        char name[128];
+        if (ptsname_r(fd, name, sizeof(name)) != 0) {
+            return darwin_to_linux_errno(errno);
+        }
+        int ptn = 0;
+        const char *p = name;
+        while (*p && !isdigit(*p)) p++;
+        if (*p) ptn = atoi(p);
+        *(unsigned int *)arg = (unsigned int)ptn;
+        return 0;
+    }
+
+    /* TIOCSPTLCK: Linux 0x40045431 (lock/unlock pty) */
+    if (request == 0x40045431) {
+        grantpt(fd);
+        if (unlockpt(fd) != 0) {
+            return darwin_to_linux_errno(errno);
+        }
+        return 0;
+    }
+
+    /* TIOCGPTLCK: Linux 0x80045439 (get pty lock status) */
+    if (request == 0x80045439) {
+        if (!arg) return -LINUX_EFAULT;
+        *(int *)arg = 0;
+        return 0;
+    }
+
+    /* TIOCPKT: Linux 0x5420 */
+    if (request == 0x5420) {
+        int val = 0;
+        if (arg) val = *(int *)arg;
+        if (ioctl(fd, TIOCPKT, &val) != 0) {
+            return darwin_to_linux_errno(errno);
+        }
+        return 0;
+    }
+
+    /* TIOCGPKT: Linux 0x80045438 */
+    if (request == 0x80045438) {
+        if (!arg) return -LINUX_EFAULT;
+        *(int *)arg = 0;
+        return 0;
+    }
+
+    /* TIOCGPTPEER: Linux 0x5441 */
+    if (request == 0x5441) {
+        char name[128];
+        if (ptsname_r(fd, name, sizeof(name)) != 0) {
+            return darwin_to_linux_errno(errno);
+        }
+        int sfd = open(name, (int)(uintptr_t)arg);
+        if (sfd < 0) return darwin_to_linux_errno(errno);
+        return sfd;
     }
 
     /* TIOCGSID: Linux 0x5429 */
@@ -3209,7 +3274,7 @@ int64_t handle_renameat2(int olddirfd, const char *oldpath, int newdirfd, const 
 int64_t handle_symlinkat(const char *target, int newdirfd, const char *linkpath) {
     if (!target || !linkpath) return -LINUX_EFAULT;
     char link_host[1024];
-    int res = sandbox_resolve_path(newdirfd, linkpath, link_host, sizeof(link_host), 0);
+    int res = sandbox_resolve_path(newdirfd, linkpath, link_host, sizeof(link_host), AT_SYMLINK_NOFOLLOW);
     if (res < 0) return res;
     if (res == 1) return -LINUX_EPERM;
 
@@ -3225,7 +3290,7 @@ int64_t handle_linkat(int olddirfd, const char *oldpath, int newdirfd, const cha
     int r1 = sandbox_resolve_path(olddirfd, oldpath, old_host, sizeof(old_host), 0);
     if (r1 < 0) return r1;
     if (r1 == 1) return -LINUX_EPERM;
-    int r2 = sandbox_resolve_path(newdirfd, linkpath, link_host, sizeof(link_host), 0);
+    int r2 = sandbox_resolve_path(newdirfd, linkpath, link_host, sizeof(link_host), AT_SYMLINK_NOFOLLOW);
     if (r2 < 0) return r2;
     if (r2 == 1) return -LINUX_EPERM;
 
@@ -3338,7 +3403,13 @@ int64_t handle_utimensat(int dirfd, const char *pathname, const struct linux_tim
     }
 
     int ret = utimensat(dirfd, target, ptimes, dflags);
-    if (ret < 0) return darwin_to_linux_errno(errno);
+    if (ret < 0) {
+        struct stat st;
+        if ((dflags & AT_SYMLINK_NOFOLLOW) || (lstat(target, &st) == 0 && S_ISLNK(st.st_mode))) {
+            return 0;
+        }
+        return darwin_to_linux_errno(errno);
+    }
     return 0;
 }
 
@@ -5564,6 +5635,7 @@ int64_t handle_setxattr(const char *path, const char *name, const void *value, s
     char host_path[1024];
     int res = sandbox_resolve_path(LINUX_AT_FDCWD, path, host_path, sizeof(host_path), 0);
     if (res < 0) return res;
+    if (res == 1) return -LINUX_EPERM;
 
     int dflags = 0;
     if (flags & 1 /* XATTR_CREATE */) dflags |= XATTR_CREATE;
@@ -5580,6 +5652,7 @@ int64_t handle_lsetxattr(const char *path, const char *name, const void *value, 
     char host_path[1024];
     int res = sandbox_resolve_path(LINUX_AT_FDCWD, path, host_path, sizeof(host_path), AT_SYMLINK_NOFOLLOW);
     if (res < 0) return res;
+    if (res == 1) return -LINUX_EPERM;
 
     int dflags = XATTR_NOFOLLOW;
     if (flags & 1) dflags |= XATTR_CREATE;
@@ -5610,6 +5683,16 @@ int64_t handle_getxattr(const char *path, const char *name, void *value, size_t 
     char host_path[1024];
     int res = sandbox_resolve_path(LINUX_AT_FDCWD, path, host_path, sizeof(host_path), 0);
     if (res < 0) return res;
+    if (res == 1) {
+        if (strncmp(host_path, "/proc/self/fd/", 14) == 0) {
+            int tfd = atoi(host_path + 14);
+            if (tfd < 0 || fcntl(tfd, F_GETFL) < 0) return -LINUX_EBADF;
+            ssize_t ret = fgetxattr(tfd, name, value, size, 0, 0);
+            if (ret < 0) return darwin_to_linux_errno(errno);
+            return ret;
+        }
+        return -LINUX_ENODATA;
+    }
 
     ssize_t ret = getxattr(host_path, name, value, size, 0, 0);
     if (ret < 0) return darwin_to_linux_errno(errno);
@@ -5622,6 +5705,7 @@ int64_t handle_lgetxattr(const char *path, const char *name, void *value, size_t
     char host_path[1024];
     int res = sandbox_resolve_path(LINUX_AT_FDCWD, path, host_path, sizeof(host_path), AT_SYMLINK_NOFOLLOW);
     if (res < 0) return res;
+    if (res == 1) return -LINUX_ENODATA;
 
     ssize_t ret = getxattr(host_path, name, value, size, 0, XATTR_NOFOLLOW);
     if (ret < 0) return darwin_to_linux_errno(errno);
@@ -5644,6 +5728,16 @@ int64_t handle_listxattr(const char *path, char *list, size_t size) {
     char host_path[1024];
     int res = sandbox_resolve_path(LINUX_AT_FDCWD, path, host_path, sizeof(host_path), 0);
     if (res < 0) return res;
+    if (res == 1) {
+        if (strncmp(host_path, "/proc/self/fd/", 14) == 0) {
+            int tfd = atoi(host_path + 14);
+            if (tfd < 0 || fcntl(tfd, F_GETFL) < 0) return -LINUX_EBADF;
+            ssize_t ret = flistxattr(tfd, list, size, 0);
+            if (ret < 0) return darwin_to_linux_errno(errno);
+            return ret;
+        }
+        return 0;
+    }
 
     ssize_t ret = listxattr(host_path, list, size, 0);
     if (ret < 0) return darwin_to_linux_errno(errno);
@@ -5656,6 +5750,7 @@ int64_t handle_llistxattr(const char *path, char *list, size_t size) {
     char host_path[1024];
     int res = sandbox_resolve_path(LINUX_AT_FDCWD, path, host_path, sizeof(host_path), AT_SYMLINK_NOFOLLOW);
     if (res < 0) return res;
+    if (res == 1) return 0;
 
     ssize_t ret = listxattr(host_path, list, size, XATTR_NOFOLLOW);
     if (ret < 0) return darwin_to_linux_errno(errno);
@@ -5676,6 +5771,7 @@ int64_t handle_removexattr(const char *path, const char *name) {
     char host_path[1024];
     int res = sandbox_resolve_path(LINUX_AT_FDCWD, path, host_path, sizeof(host_path), 0);
     if (res < 0) return res;
+    if (res == 1) return -LINUX_EPERM;
 
     int ret = removexattr(host_path, name, 0);
     if (ret < 0) return darwin_to_linux_errno(errno);
@@ -5687,6 +5783,7 @@ int64_t handle_lremovexattr(const char *path, const char *name) {
     char host_path[1024];
     int res = sandbox_resolve_path(LINUX_AT_FDCWD, path, host_path, sizeof(host_path), AT_SYMLINK_NOFOLLOW);
     if (res < 0) return res;
+    if (res == 1) return -LINUX_EPERM;
 
     int ret = removexattr(host_path, name, XATTR_NOFOLLOW);
     if (ret < 0) return darwin_to_linux_errno(errno);
@@ -8390,6 +8487,100 @@ int64_t handle_mseal(unsigned long start, size_t len, unsigned long flags) {
     if (flags != 0) return -LINUX_EINVAL;
     if (!start || len == 0) return -LINUX_EINVAL;
     if (start & 0x3FFF) return -LINUX_EINVAL;
+    return 0;
+}
+
+int64_t handle_setxattrat(int dfd, const char *pathname, unsigned int at_flags, const char *name, const void *value, size_t size, int flags) {
+    if (!name) return -LINUX_EFAULT;
+    if (size > 0 && !value) return -LINUX_EFAULT;
+
+    int dflags = 0;
+    if (flags & 1 /* XATTR_CREATE */) dflags |= XATTR_CREATE;
+    if (flags & 2 /* XATTR_REPLACE */) dflags |= XATTR_REPLACE;
+
+    if (!pathname || pathname[0] == '\0') {
+        if (dfd < 0) return -LINUX_EBADF;
+        int ret = fsetxattr(dfd, name, value, size, 0, dflags);
+        if (ret < 0) return darwin_to_linux_errno(errno);
+        return 0;
+    }
+
+    char host_path[1024];
+    int sflags = (at_flags & 0x100 /* AT_SYMLINK_NOFOLLOW */) ? AT_SYMLINK_NOFOLLOW : 0;
+    int res = sandbox_resolve_path(dfd, pathname, host_path, sizeof(host_path), sflags);
+    if (res < 0) return res;
+    if (res == 1) return -LINUX_EPERM;
+
+    if (at_flags & 0x100) dflags |= XATTR_NOFOLLOW;
+    int ret = setxattr(host_path, name, value, size, 0, dflags);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return 0;
+}
+
+int64_t handle_getxattrat(int dfd, const char *pathname, unsigned int at_flags, const char *name, void *value, size_t size) {
+    if (!name) return -LINUX_EFAULT;
+    if (size > 0 && !value) return -LINUX_EFAULT;
+
+    if (!pathname || pathname[0] == '\0') {
+        if (dfd < 0) return -LINUX_EBADF;
+        ssize_t ret = fgetxattr(dfd, name, value, size, 0, 0);
+        if (ret < 0) return darwin_to_linux_errno(errno);
+        return ret;
+    }
+
+    char host_path[1024];
+    int sflags = (at_flags & 0x100 /* AT_SYMLINK_NOFOLLOW */) ? AT_SYMLINK_NOFOLLOW : 0;
+    int res = sandbox_resolve_path(dfd, pathname, host_path, sizeof(host_path), sflags);
+    if (res < 0) return res;
+    if (res == 1) return -LINUX_ENODATA;
+
+    int dflags = (at_flags & 0x100) ? XATTR_NOFOLLOW : 0;
+    ssize_t ret = getxattr(host_path, name, value, size, 0, dflags);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return ret;
+}
+
+int64_t handle_listxattrat(int dfd, const char *pathname, unsigned int at_flags, char *list, size_t size) {
+    if (size > 0 && !list) return -LINUX_EFAULT;
+
+    if (!pathname || pathname[0] == '\0') {
+        if (dfd < 0) return -LINUX_EBADF;
+        ssize_t ret = flistxattr(dfd, list, size, 0);
+        if (ret < 0) return darwin_to_linux_errno(errno);
+        return ret;
+    }
+
+    char host_path[1024];
+    int sflags = (at_flags & 0x100 /* AT_SYMLINK_NOFOLLOW */) ? AT_SYMLINK_NOFOLLOW : 0;
+    int res = sandbox_resolve_path(dfd, pathname, host_path, sizeof(host_path), sflags);
+    if (res < 0) return res;
+    if (res == 1) return 0;
+
+    int dflags = (at_flags & 0x100) ? XATTR_NOFOLLOW : 0;
+    ssize_t ret = listxattr(host_path, list, size, dflags);
+    if (ret < 0) return darwin_to_linux_errno(errno);
+    return ret;
+}
+
+int64_t handle_removexattrat(int dfd, const char *pathname, unsigned int at_flags, const char *name) {
+    if (!name) return -LINUX_EFAULT;
+
+    if (!pathname || pathname[0] == '\0') {
+        if (dfd < 0) return -LINUX_EBADF;
+        int ret = fremovexattr(dfd, name, 0);
+        if (ret < 0) return darwin_to_linux_errno(errno);
+        return 0;
+    }
+
+    char host_path[1024];
+    int sflags = (at_flags & 0x100 /* AT_SYMLINK_NOFOLLOW */) ? AT_SYMLINK_NOFOLLOW : 0;
+    int res = sandbox_resolve_path(dfd, pathname, host_path, sizeof(host_path), sflags);
+    if (res < 0) return res;
+    if (res == 1) return -LINUX_EPERM;
+
+    int dflags = (at_flags & 0x100) ? XATTR_NOFOLLOW : 0;
+    int ret = removexattr(host_path, name, dflags);
+    if (ret < 0) return darwin_to_linux_errno(errno);
     return 0;
 }
 

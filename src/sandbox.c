@@ -155,6 +155,8 @@ bool sandbox_is_virtual_path(const char *path) {
         strcmp(path, "/dev/tty") == 0 ||
         strcmp(path, "/dev/console") == 0 ||
         strcmp(path, "/dev/ptmx") == 0 ||
+        strcmp(path, "/dev/pts/ptmx") == 0 ||
+        strncmp(path, "/dev/pts/", 9) == 0 ||
         strcmp(path, "/dev/stdin") == 0 ||
         strcmp(path, "/dev/stdout") == 0 ||
         strcmp(path, "/dev/stderr") == 0 ||
@@ -289,6 +291,30 @@ int sandbox_virtual_stat(const char *path, struct stat *st) {
     if (strcmp(path, "/dev/stdin") == 0 || strcmp(path, "/dev/stdout") == 0 || strcmp(path, "/dev/stderr") == 0) {
         st->st_mode = S_IFCHR | 0666;
         st->st_rdev = 0x0103;
+        return 0;
+    }
+
+    if (strcmp(path, "/dev/pts/ptmx") == 0) {
+        st->st_mode = S_IFCHR | 0666;
+        st->st_rdev = 0x0502;
+        return 0;
+    }
+
+    if (strncmp(path, "/dev/pts/", 9) == 0) {
+        int ptn = atoi(path + 9);
+        char tty_dev[64];
+        snprintf(tty_dev, sizeof(tty_dev), "/dev/ttys%03d", ptn);
+        if (access(tty_dev, F_OK) != 0) {
+            snprintf(tty_dev, sizeof(tty_dev), "/dev/ttys%d", ptn);
+        }
+        struct stat host_st;
+        if (stat(tty_dev, &host_st) == 0) {
+            *st = host_st;
+            st->st_mode = S_IFCHR | 0620;
+            return 0;
+        }
+        st->st_mode = S_IFCHR | 0620;
+        st->st_rdev = 0x8800 + ptn;
         return 0;
     }
 
@@ -866,7 +892,18 @@ int sandbox_open_virtual(const char *path, int flags, mode_t mode) {
     if (strcmp(path, "/dev/random") == 0) return open("/dev/random", flags, mode);
     if (strcmp(path, "/dev/tty") == 0) return open("/dev/tty", flags, mode);
     if (strcmp(path, "/dev/console") == 0) return open("/dev/console", flags, mode);
-    if (strcmp(path, "/dev/ptmx") == 0) return open("/dev/ptmx", flags, mode);
+    if (strcmp(path, "/dev/ptmx") == 0 || strcmp(path, "/dev/pts/ptmx") == 0) return open("/dev/ptmx", flags, mode);
+    if (strncmp(path, "/dev/pts/", 9) == 0) {
+        int ptn = atoi(path + 9);
+        char tty_dev[64];
+        snprintf(tty_dev, sizeof(tty_dev), "/dev/ttys%03d", ptn);
+        if (access(tty_dev, F_OK) != 0) {
+            snprintf(tty_dev, sizeof(tty_dev), "/dev/ttys%d", ptn);
+        }
+        int sfd = open(tty_dev, flags, mode);
+        if (sfd < 0) return darwin_to_linux_errno(errno);
+        return sfd;
+    }
     if (strcmp(path, "/dev/stdin") == 0) return dup(0);
     if (strcmp(path, "/dev/stdout") == 0) return dup(1);
     if (strcmp(path, "/dev/stderr") == 0) return dup(2);
@@ -1105,6 +1142,31 @@ static int sandbox_resolve_path_lexical(int dirfd, const char *guest_path, char 
 int sandbox_resolve_path(int dirfd, const char *guest_path, char *host_path_buf, size_t buf_sz, int flags) {
     if (!guest_path) return -LINUX_EFAULT;
     if (!host_path_buf || buf_sz == 0) return -LINUX_EINVAL;
+
+    int pid = 0;
+    const char *subfile = NULL;
+    if (strncmp(guest_path, "/dev/fd/", 8) == 0 ||
+        strncmp(guest_path, "/proc/self/fd/", 14) == 0 ||
+        (parse_proc_pid_path(guest_path, &pid, &subfile) && strncmp(subfile, "fd/", 3) == 0)) {
+        int target_fd = -1;
+        if (strncmp(guest_path, "/dev/fd/", 8) == 0) target_fd = atoi(guest_path + 8);
+        else if (strncmp(guest_path, "/proc/self/fd/", 14) == 0) target_fd = atoi(guest_path + 14);
+        else if (subfile) target_fd = atoi(subfile + 3);
+
+        if (target_fd < 0 || fcntl(target_fd, F_GETFL) < 0) {
+            return -LINUX_EBADF;
+        }
+
+        if (!(flags & (AT_SYMLINK_NOFOLLOW | LINUX_AT_SYMLINK_NOFOLLOW | LINUX_O_NOFOLLOW | 0x8000 | 0x20000))) {
+            char real_path[PATH_MAX];
+            if (fcntl(target_fd, F_GETPATH, real_path) == 0) {
+                strncpy(host_path_buf, real_path, buf_sz - 1);
+                host_path_buf[buf_sz - 1] = '\0';
+                return 0; /* Followed fd symlink to real host file */
+            }
+        }
+    }
+
     if (sandbox_is_virtual_path(guest_path)) {
         strncpy(host_path_buf, guest_path, buf_sz - 1);
         host_path_buf[buf_sz - 1] = '\0';
@@ -1126,6 +1188,26 @@ int sandbox_resolve_path(int dirfd, const char *guest_path, char *host_path_buf,
         size_t root_len = strlen(g_ltm.host_rootfs);
         if (strncmp(host_path_buf, g_ltm.host_rootfs, root_len) == 0) {
             const char *virt_cand = host_path_buf + root_len;
+            int vpid = 0;
+            const char *vsub = NULL;
+            if (strncmp(virt_cand, "/dev/fd/", 8) == 0 ||
+                strncmp(virt_cand, "/proc/self/fd/", 14) == 0 ||
+                (parse_proc_pid_path(virt_cand, &vpid, &vsub) && strncmp(vsub, "fd/", 3) == 0)) {
+                int vtfd = -1;
+                if (strncmp(virt_cand, "/dev/fd/", 8) == 0) vtfd = atoi(virt_cand + 8);
+                else if (strncmp(virt_cand, "/proc/self/fd/", 14) == 0) vtfd = atoi(virt_cand + 14);
+                else if (vsub) vtfd = atoi(vsub + 3);
+
+                if (vtfd < 0 || fcntl(vtfd, F_GETFL) < 0) return -LINUX_EBADF;
+                if (!(flags & (AT_SYMLINK_NOFOLLOW | LINUX_AT_SYMLINK_NOFOLLOW | LINUX_O_NOFOLLOW | 0x8000 | 0x20000))) {
+                    char real_path[PATH_MAX];
+                    if (fcntl(vtfd, F_GETPATH, real_path) == 0) {
+                        strncpy(host_path_buf, real_path, buf_sz - 1);
+                        host_path_buf[buf_sz - 1] = '\0';
+                        return 0;
+                    }
+                }
+            }
             if (sandbox_is_virtual_path(virt_cand)) {
                 memmove(host_path_buf, virt_cand, strlen(virt_cand) + 1);
                 return 1;

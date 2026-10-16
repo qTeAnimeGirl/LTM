@@ -749,6 +749,10 @@ static const char * const g_linux_syscall_names[LINUX_MAX_SYSCALL_NR + 1] = {
     [460] = "lsm_set_self_attr",
     [461] = "lsm_list_modules",
     [462] = "mseal",
+    [463] = "setxattrat",
+    [464] = "getxattrat",
+    [465] = "listxattrat",
+    [466] = "removexattrat",
 };
 
 const char *linux_syscall_name(int sysno) {
@@ -1724,6 +1728,18 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
             break;
         case LINUX_SYS_mseal:
             ret = handle_mseal((unsigned long)a0, (size_t)a1, (unsigned long)a2);
+            break;
+        case LINUX_SYS_setxattrat:
+            ret = handle_setxattrat((int)a0, (const char *)a1, (unsigned int)a2, (const char *)a3, (const void *)a4, (size_t)a5, 0);
+            break;
+        case LINUX_SYS_getxattrat:
+            ret = handle_getxattrat((int)a0, (const char *)a1, (unsigned int)a2, (const char *)a3, (void *)a4, (size_t)a5);
+            break;
+        case LINUX_SYS_listxattrat:
+            ret = handle_listxattrat((int)a0, (const char *)a1, (unsigned int)a2, (char *)a3, (size_t)a4);
+            break;
+        case LINUX_SYS_removexattrat:
+            ret = handle_removexattrat((int)a0, (const char *)a1, (unsigned int)a2, (const char *)a3);
             break;
 
         default:

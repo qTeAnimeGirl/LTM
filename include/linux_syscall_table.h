@@ -325,8 +325,12 @@
 #define LINUX_SYS_lsm_set_self_attr          460
 #define LINUX_SYS_lsm_list_modules           461
 #define LINUX_SYS_mseal                      462
+#define LINUX_SYS_setxattrat                 463
+#define LINUX_SYS_getxattrat                 464
+#define LINUX_SYS_listxattrat                465
+#define LINUX_SYS_removexattrat              466
 
-#define LINUX_MAX_SYSCALL_NR 462
+#define LINUX_MAX_SYSCALL_NR 466
 
 /* Look up human-readable syscall name from number */
 const char *linux_syscall_name(int sysno);

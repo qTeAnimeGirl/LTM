@@ -924,6 +924,10 @@ int64_t handle_lsm_get_self_attr(unsigned int attr, void *ctx, size_t *size, uin
 int64_t handle_lsm_set_self_attr(unsigned int attr, const void *ctx, size_t size, uint32_t flags);
 int64_t handle_lsm_list_modules(uint64_t *ids, size_t *size, uint32_t flags);
 int64_t handle_mseal(unsigned long start, size_t len, unsigned long flags);
+int64_t handle_setxattrat(int dfd, const char *pathname, unsigned int at_flags, const char *name, const void *value, size_t size, int flags);
+int64_t handle_getxattrat(int dfd, const char *pathname, unsigned int at_flags, const char *name, void *value, size_t size);
+int64_t handle_listxattrat(int dfd, const char *pathname, unsigned int at_flags, char *list, size_t size);
+int64_t handle_removexattrat(int dfd, const char *pathname, unsigned int at_flags, const char *name);
 
 /* Linux Network Interface ioctls and structs */
 #define LINUX_IFNAMSIZ 16
