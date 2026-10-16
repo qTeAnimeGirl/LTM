@@ -1,15 +1,29 @@
 #include "linux_syscall_table.h"
 #include "syscalls.h"
 #include "elf_loader.h"
+#include <dlfcn.h>
 
-static void *g_alt_stack = NULL;
+void *g_alt_stack = NULL;
+void *g_alt_stack_top = NULL;
 #define ALT_STACK_SIZE (1024 * 1024) /* 1MB dedicated signal stack */
 
+__thread void *t_host_stack_top = NULL;
+
 static void ltm_crash_handler(int sig, siginfo_t *si, void *ctx);
+void ltm_sig_handler_impl(int sig, siginfo_t *si, void *ctx);
 
 static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
     (void)sig;
     (void)si;
+    void *target_sp = ltm_get_signal_stack();
+    if (target_sp) {
+        ltm_call_on_stack((void *)ltm_sig_handler_impl, sig, si, ctx, target_sp);
+    } else {
+        ltm_sig_handler_impl(sig, si, ctx);
+    }
+}
+
+void ltm_sig_handler_impl(int sig, siginfo_t *si, void *ctx) {
     ucontext_t *uc = (ucontext_t *)ctx;
     arm_thread_state64_t *state = &uc->uc_mcontext->__ss;
     arm_neon_state64_t *neon = &uc->uc_mcontext->__ns;
@@ -29,7 +43,7 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
         int64_t ret = syscall_dispatch(num, a0, a1, a2, a3, a4, a5, state, neon);
         state->__x[0] = (uint64_t)ret;
         state->__pc += 4;
-        return;
+        ltm_resume_context(state, neon);
     }
 
     if (sig == SIGILL) {
@@ -40,47 +54,47 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
             /* mrs Xt, MIDR_EL1 */
             if (reg < 31) state->__x[reg] = 0x610f0300ULL; /* Apple Silicon M-series */
             state->__pc += 4;
-            return;
+            ltm_resume_context(state, neon);
         } else if (op == 0xd53b0020U) {
             /* mrs Xt, CTR_EL0 */
             if (reg < 31) state->__x[reg] = 0x8444c004ULL; /* 64-byte I/D cache lines */
             state->__pc += 4;
-            return;
+            ltm_resume_context(state, neon);
         } else if (op == 0xd5380600U) {
             /* mrs Xt, ID_AA64ISAR0_EL1 */
             if (reg < 31) state->__x[reg] = 0x00011120ULL; /* AES, SHA1, SHA2, CRC32, ATOMICS */
             state->__pc += 4;
-            return;
+            ltm_resume_context(state, neon);
         } else if (op == 0xd5380620U) {
             /* mrs Xt, ID_AA64ISAR1_EL1 */
             if (reg < 31) state->__x[reg] = 0x00000022ULL; /* DP, FCMA, JSCVT */
             state->__pc += 4;
-            return;
+            ltm_resume_context(state, neon);
         } else if (op == 0xd5380400U) {
             /* mrs Xt, ID_AA64PFR0_EL1 */
             if (reg < 31) state->__x[reg] = 0x00000011ULL; /* FP, AdvSIMD, AArch64 */
             state->__pc += 4;
-            return;
+            ltm_resume_context(state, neon);
         } else if (op == 0xd5380420U) {
             /* mrs Xt, ID_AA64PFR1_EL1 */
             if (reg < 31) state->__x[reg] = 0x0ULL;
             state->__pc += 4;
-            return;
+            ltm_resume_context(state, neon);
         } else if (op == 0xd5380700U) {
             /* mrs Xt, ID_AA64MMFR0_EL1 */
             if (reg < 31) state->__x[reg] = 0x00000005ULL; /* 48-bit VA, 16KB/4KB granule */
             state->__pc += 4;
-            return;
+            ltm_resume_context(state, neon);
         } else if (op == 0xd5380720U) {
             /* mrs Xt, ID_AA64MMFR1_EL1 */
             if (reg < 31) state->__x[reg] = 0x0ULL;
             state->__pc += 4;
-            return;
+            ltm_resume_context(state, neon);
         } else if (op == 0xd5380500U) {
             /* mrs Xt, ID_AA64DFR0_EL1 */
             if (reg < 31) state->__x[reg] = 0x00000006ULL;
             state->__pc += 4;
-            return;
+            ltm_resume_context(state, neon);
         }
         ltm_crash_handler(sig, si, ctx);
         return;
@@ -98,7 +112,7 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
                 state->__x[reg] = ltm_get_guest_tls();
             }
             state->__pc += 4;
-            return;
+            ltm_resume_context(state, neon);
         } else if (type == 2) {
             /* Virtualized TLS write: msr TPIDR_EL0, Xt */
             if (reg < 31) {
@@ -106,29 +120,22 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
             } else {
                 ltm_set_guest_tls(0); /* xzr */
             }
+            state->__pc += 4;
+            ltm_resume_context(state, neon);
         } else if (imm == 0x301U) {
-            /* Virtualized inflate_fast: add w1, [x8, #0x3c], w21
-             * TRACEABILITY: Addresses guest crash Signal 11 (fault_addr=0x50012b31e / 0x50012a4b1).
-             * On Apple Silicon Darwin ARM64, register x18 is platform-reserved. The XNU kernel
-             * scheduler clears x18 to 0 during preemptive thread context switches.
-             * In libz's inflate_fast, w18 holds wsize (loaded once before the loop). When XNU
-             * wipes w18 to 0, w1 = w18 + w21 becomes 0 + (-dist) = 0xffff..., computing an address
-             * 4GB above the 32KB window buffer (0x400130000 + 0xffffb07e = 0x50012b31e) and faulting.
-             * By intercepting via JIT trap, we safely read wsize from inflate_state [x8, #0x3c],
-             * calculate w1 = wsize + w21, and restore x18 in the guest register state. */
+            /* Virtualized inflate_fast: add w1, [x8, #0x3c], w21 */
             uint32_t wsize = *(uint32_t *)(state->__x[8] + 0x3c);
             state->__x[1] = (uint32_t)(wsize + (uint32_t)state->__x[21]);
             state->__x[18] = wsize;
             state->__pc += 4;
-            return;
+            ltm_resume_context(state, neon);
         } else if (imm == 0x302U) {
-            /* Virtualized inflate_fast: add w1, [x8, #0x3c], w15
-             * TRACEABILITY: Same as above for alternate history window offset calculation. */
+            /* Virtualized inflate_fast: add w1, [x8, #0x3c], w15 */
             uint32_t wsize = *(uint32_t *)(state->__x[8] + 0x3c);
             state->__x[1] = (uint32_t)(wsize + (uint32_t)state->__x[15]);
             state->__x[18] = wsize;
             state->__pc += 4;
-            return;
+            ltm_resume_context(state, neon);
         }
     }
 
@@ -145,8 +152,8 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
     ltm_set_in_host_syscall(0);
 
     if (num == 139 /* rt_sigreturn */ && ret == 0) {
-        /* Guest context has been fully restored from sigframe into state & neon */
-        return;
+        /* Guest context has been fully restored from sigframe into state & neon (Rule 5) */
+        ltm_resume_context(state, neon);
     }
 
     /* Set guest return value in x0 */
@@ -156,20 +163,48 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
     state->__pc += 4;
 
     /* Check for signals that arrived while executing host syscall */
-    ltm_check_and_deliver_pending_signals(state);
-    return;
+    ltm_check_and_deliver_pending_signals(state, neon);
+    ltm_resume_context(state, neon);
 }
 
+static void ltm_crash_handler_impl(int sig, siginfo_t *si, void *ctx);
+
 static void ltm_crash_handler(int sig, siginfo_t *si, void *ctx) {
+    void *target_sp = ltm_get_signal_stack();
+    if (target_sp) {
+        ltm_call_on_stack((void *)ltm_crash_handler_impl, sig, si, ctx, target_sp);
+    } else {
+        ltm_crash_handler_impl(sig, si, ctx);
+    }
+}
+
+static void ltm_crash_handler_impl(int sig, siginfo_t *si, void *ctx) {
     ucontext_t *uc = (ucontext_t *)ctx;
     arm_thread_state64_t *state = &uc->uc_mcontext->__ss;
 
     uint64_t cur_tpidr = 0;
     __asm__ volatile("mrs %0, tpidr_el0" : "=r"(cur_tpidr));
 
-    fprintf(stderr, "\n[LTM:CRASH] [pid=%d] Fatal signal %d (%s) at address %p (PC=0x%llx, tpidr_el0=0x%llx)\n",
+    Dl_info dli_pc = {0}, dli_lr = {0}, dli_x16 = {0};
+    dladdr((void *)state->__pc, &dli_pc);
+    dladdr((void *)state->__lr, &dli_lr);
+    dladdr((void *)state->__x[16], &dli_x16);
+
+    fprintf(stderr, "\n[LTM:CRASH] [pid=%d] Fatal signal %d (%s) at address %p (PC=0x%llx [%s], lr=0x%llx [%s], far=0x%llx, esr=0x%x, tpidr_el0=0x%llx)\n",
             getpid(), sig, sig == SIGSEGV ? "SIGSEGV" : (sig == SIGBUS ? "SIGBUS" : (sig == SIGILL ? "SIGILL" : "UNKNOWN")),
-            si->si_addr, (unsigned long long)state->__pc, cur_tpidr);
+            si->si_addr, (unsigned long long)state->__pc, dli_pc.dli_sname ? dli_pc.dli_sname : "?",
+            (unsigned long long)state->__lr, dli_lr.dli_sname ? dli_lr.dli_sname : "?",
+            (unsigned long long)uc->uc_mcontext->__es.__far, uc->uc_mcontext->__es.__esr,
+            (unsigned long long)cur_tpidr);
+    fprintf(stderr, "  x16=[%s (%s)] x17=0x%llx\n",
+            dli_x16.dli_sname ? dli_x16.dli_sname : "?", dli_x16.dli_fname ? dli_x16.dli_fname : "?",
+            (unsigned long long)state->__x[17]);
+    if (state->__x[3] >= 0x1000) {
+        fprintf(stderr, "  string at x3: %.*s\n", 64, (const char *)state->__x[3]);
+    }
+    if (state->__x[5] >= 0x1000) {
+        fprintf(stderr, "  string at x5: %.*s\n", 64, (const char *)state->__x[5]);
+    }
     for (int i = 0; i < 31; i += 2) {
         fprintf(stderr, "  x%-2d = 0x%016llx  x%-2d = 0x%016llx\n",
                 i, (unsigned long long)state->__x[i],
@@ -227,20 +262,13 @@ int syscall_dispatcher_init(void) {
         ltm_log_error("Failed to allocate signal alternate stack: %s", strerror(errno));
         return -1;
     }
-
-    stack_t ss;
-    ss.ss_sp = g_alt_stack;
-    ss.ss_size = ALT_STACK_SIZE;
-    ss.ss_flags = 0;
-    if (sigaltstack(&ss, NULL) != 0) {
-        ltm_log_error("sigaltstack failed: %s", strerror(errno));
-        return -1;
-    }
+    g_alt_stack_top = (char *)g_alt_stack + ALT_STACK_SIZE;
+    t_host_stack_top = g_alt_stack_top;
 
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = ltm_sig_handler;
-    sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER; /* NO SA_ONSTACK! Stack switch handled natively via _ltm_call_on_stack */
     sigemptyset(&sa.sa_mask);
 
     if (sigaction(SIGTRAP, &sa, NULL) != 0) {
@@ -256,13 +284,17 @@ int syscall_dispatcher_init(void) {
     struct sigaction sa_crash;
     memset(&sa_crash, 0, sizeof(sa_crash));
     sa_crash.sa_sigaction = ltm_crash_handler;
-    sa_crash.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sa_crash.sa_flags = SA_SIGINFO;
     sigemptyset(&sa_crash.sa_mask);
     sigaction(SIGSEGV, &sa_crash, NULL);
     sigaction(SIGBUS, &sa_crash, NULL);
 
     ltm_log_debug("Syscall dispatcher initialized successfully (SIGTRAP hooked)");
     return 0;
+}
+
+void ltm_dispatcher_reinit_child(void) {
+    t_host_stack_top = g_alt_stack_top;
 }
 
 

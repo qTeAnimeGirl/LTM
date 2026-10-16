@@ -48,8 +48,8 @@ _ltm_jump_to_entry:
 .global _ltm_resume_context
 _ltm_resume_context:
     // x0 = pointer to arm_thread_state64_t
-    // x1 = optional pointer to arm_neon_state64_t (or NULL)
-    cbz x1, 1f
+    cmp x1, #0x1000
+    b.lo 1f
     ldp q0, q1, [x1, #0]
     ldp q2, q3, [x1, #32]
     ldp q4, q5, [x1, #64]
@@ -98,3 +98,27 @@ _ltm_resume_context:
 _ltm_sigreturn_stub:
     mov x8, #139
     brk #0
+
+.global _ltm_sig_handler_on_stack
+_ltm_sig_handler_on_stack:
+    // x0 = sig, x1 = si, x2 = ctx, x3 = new_sp
+    mov sp, x3
+    b _ltm_sig_handler_impl
+
+.global _ltm_call_on_stack
+_ltm_call_on_stack:
+    // x0 = fn, x1 = sig, x2 = si, x3 = ctx, x4 = new_sp
+    mov x16, sp
+    mov sp, x4
+    stp x16, x30, [sp, #-16]!
+    mov x9, x0
+    mov x0, x1
+    mov x1, x2
+    mov x2, x3
+    blr x9
+    ldp x16, x30, [sp], #16
+    mov sp, x16
+    ret
+
+
+

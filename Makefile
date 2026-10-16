@@ -29,6 +29,7 @@ all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	codesign -s - -f $@
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

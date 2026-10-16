@@ -1269,14 +1269,20 @@ int64_t handle_fcntl(int fd, int cmd, unsigned long arg) {
         if (!lfl) return -LINUX_EFAULT;
         struct flock dfl;
         memset(&dfl, 0, sizeof(dfl));
-        dfl.l_type = lfl->l_type;
+        if (lfl->l_type == LINUX_F_RDLCK) dfl.l_type = F_RDLCK;
+        else if (lfl->l_type == LINUX_F_WRLCK) dfl.l_type = F_WRLCK;
+        else if (lfl->l_type == LINUX_F_UNLCK) dfl.l_type = F_UNLCK;
+        else dfl.l_type = lfl->l_type;
         dfl.l_whence = lfl->l_whence;
         dfl.l_start = lfl->l_start;
         dfl.l_len = lfl->l_len;
         dfl.l_pid = lfl->l_pid;
         int ret = fcntl(fd, F_GETLK, &dfl);
         if (ret < 0) return darwin_to_linux_errno(errno);
-        lfl->l_type = dfl.l_type;
+        if (dfl.l_type == F_RDLCK) lfl->l_type = LINUX_F_RDLCK;
+        else if (dfl.l_type == F_WRLCK) lfl->l_type = LINUX_F_WRLCK;
+        else if (dfl.l_type == F_UNLCK) lfl->l_type = LINUX_F_UNLCK;
+        else lfl->l_type = dfl.l_type;
         lfl->l_whence = dfl.l_whence;
         lfl->l_start = dfl.l_start;
         lfl->l_len = dfl.l_len;
@@ -1289,7 +1295,10 @@ int64_t handle_fcntl(int fd, int cmd, unsigned long arg) {
         if (!lfl) return -LINUX_EFAULT;
         struct flock dfl;
         memset(&dfl, 0, sizeof(dfl));
-        dfl.l_type = lfl->l_type;
+        if (lfl->l_type == LINUX_F_RDLCK) dfl.l_type = F_RDLCK;
+        else if (lfl->l_type == LINUX_F_WRLCK) dfl.l_type = F_WRLCK;
+        else if (lfl->l_type == LINUX_F_UNLCK) dfl.l_type = F_UNLCK;
+        else dfl.l_type = lfl->l_type;
         dfl.l_whence = lfl->l_whence;
         dfl.l_start = lfl->l_start;
         dfl.l_len = lfl->l_len;
@@ -1304,7 +1313,10 @@ int64_t handle_fcntl(int fd, int cmd, unsigned long arg) {
         if (!lfl) return -LINUX_EFAULT;
         struct flock dfl;
         memset(&dfl, 0, sizeof(dfl));
-        dfl.l_type = lfl->l_type;
+        if (lfl->l_type == LINUX_F_RDLCK) dfl.l_type = F_RDLCK;
+        else if (lfl->l_type == LINUX_F_WRLCK) dfl.l_type = F_WRLCK;
+        else if (lfl->l_type == LINUX_F_UNLCK) dfl.l_type = F_UNLCK;
+        else dfl.l_type = lfl->l_type;
         dfl.l_whence = lfl->l_whence;
         dfl.l_start = lfl->l_start;
         dfl.l_len = lfl->l_len;
@@ -1379,9 +1391,13 @@ int64_t handle_getdents64(int fd, void *dirp, size_t count) {
     char dir_path[1024];
     bool is_proc = false;
     if (fcntl(fd, F_GETPATH, dir_path) == 0) {
-        size_t dlen = strlen(dir_path);
-        if ((dlen == 5 && strcmp(dir_path, "/proc") == 0) ||
-            (dlen > 5 && strcmp(dir_path + dlen - 5, "/proc") == 0)) {
+        char root_proc[1024];
+        if (g_ltm.host_rootfs[0] != '\0') {
+            snprintf(root_proc, sizeof(root_proc), "%s/proc", g_ltm.host_rootfs);
+            if (strcmp(dir_path, root_proc) == 0) {
+                is_proc = true;
+            }
+        } else if (strcmp(dir_path, "/proc") == 0) {
             is_proc = true;
         }
     }
@@ -1780,18 +1796,18 @@ void ltm_set_in_host_syscall(int in_sys) {
     s_in_host_syscall = in_sys;
 }
 
-void ltm_check_and_deliver_pending_signals(void *state_ptr) {
-    if (!state_ptr) return;
+int ltm_check_and_deliver_pending_signals(void *state_ptr, void *neon_ptr) {
+    if (!state_ptr) return 0;
     uint64_t deliverable = s_pending_signals & ~s_guest_sigmask;
-    if (!deliverable) return;
+    if (!deliverable) return 0;
 
     int l_sig = __builtin_ctzll(deliverable) + 1;
     s_pending_signals &= ~(1ULL << (l_sig - 1));
 
-    if (l_sig <= 0 || l_sig >= LINUX_NSIG) return;
+    if (l_sig <= 0 || l_sig >= LINUX_NSIG) return 0;
     struct linux_sigaction *act = &g_guest_sigactions[l_sig];
     if (!act->l_handler || act->l_handler == (void (*)(int))SIG_DFL || act->l_handler == (void (*)(int))SIG_IGN) {
-        return;
+        return 0;
     }
 
     arm_thread_state64_t *state = (arm_thread_state64_t *)state_ptr;
@@ -1812,7 +1828,11 @@ void ltm_check_and_deliver_pending_signals(void *state_ptr) {
     }
 
     memcpy(&frame->saved_state, state, sizeof(arm_thread_state64_t));
-    memset(&frame->saved_neon, 0, sizeof(frame->saved_neon));
+    if (neon_ptr) {
+        memcpy(&frame->saved_neon, neon_ptr, sizeof(arm_neon_state64_t));
+    } else {
+        memset(&frame->saved_neon, 0, sizeof(frame->saved_neon));
+    }
     frame->magic = LTM_SIGFRAME_MAGIC;
 
     memset(&frame->uc, 0, sizeof(frame->uc));
@@ -1844,9 +1864,21 @@ void ltm_check_and_deliver_pending_signals(void *state_ptr) {
     state->__lr = restorer;
     state->__pc = (uintptr_t)act->l_handler;
     state->__x[16] = (uintptr_t)act->l_handler;
+    return 1;
 }
 
+static void ltm_host_signal_handler_impl(int d_sig, siginfo_t *info, void *ucontext);
+
 static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) {
+    void *target_sp = ltm_get_signal_stack();
+    if (target_sp) {
+        ltm_call_on_stack((void *)ltm_host_signal_handler_impl, d_sig, info, ucontext, target_sp);
+    } else {
+        ltm_host_signal_handler_impl(d_sig, info, ucontext);
+    }
+}
+
+static void ltm_host_signal_handler_impl(int d_sig, siginfo_t *info, void *ucontext) {
     int l_sig = darwin_to_linux_signal(d_sig);
     if (l_sig <= 0 || l_sig >= LINUX_NSIG) return;
 
@@ -1856,7 +1888,13 @@ static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) 
     }
 
     ucontext_t *uc = (ucontext_t *)ucontext;
-    arm_thread_state64_t *cur_state = &uc->uc_mcontext->__ss;
+    if (!uc || !uc->uc_mcontext) return;
+    arm_thread_state64_t cur_state_val = uc->uc_mcontext->__ss;
+    arm_neon_state64_t cur_neon_val = uc->uc_mcontext->__ns;
+    arm_thread_state64_t *cur_state = &cur_state_val;
+    arm_neon_state64_t *cur_neon = &cur_neon_val;
+    ltm_log_debug("[pid=%d] ltm_host_signal_handler: d_sig=%d (l_sig=%d), PC=0x%llx, SP=0x%llx, handler=%p",
+                  getpid(), d_sig, l_sig, (unsigned long long)cur_state->__pc, (unsigned long long)cur_state->__sp, act->l_handler);
 
     Dl_info dlinfo;
     bool in_host = (s_in_host_syscall != 0) || (dladdr((void *)cur_state->__pc, &dlinfo) != 0);
@@ -1864,8 +1902,23 @@ static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) 
     /* If the signal is blocked by the guest thread, OR if we are executing host C code, defer delivery */
     if ((s_guest_sigmask & (1ULL << (l_sig - 1))) || in_host) {
         if (in_host && (l_sig == 4 || l_sig == 7 || l_sig == 8 || l_sig == 11 || l_sig == 31)) {
-            ltm_log_error("Fatal signal %d delivered during host execution: PC=0x%llx, fault_addr=%p",
-                          l_sig, (unsigned long long)cur_state->__pc, info ? info->si_addr : NULL);
+            Dl_info dli_pc = {0}, dli_lr = {0};
+            dladdr((void *)cur_state->__pc, &dli_pc);
+            dladdr((void *)cur_state->__lr, &dli_lr);
+            ltm_log_error("Fatal signal %d delivered during host execution: PC=0x%llx [%s in %s (+0x%lx)], lr=0x%llx [%s in %s], fault_addr=%p",
+                          l_sig, (unsigned long long)cur_state->__pc,
+                          dli_pc.dli_sname ? dli_pc.dli_sname : "?", dli_pc.dli_fname ? dli_pc.dli_fname : "?",
+                          dli_pc.dli_fbase ? (uintptr_t)cur_state->__pc - (uintptr_t)dli_pc.dli_fbase : 0,
+                          (unsigned long long)cur_state->__lr,
+                          dli_lr.dli_sname ? dli_lr.dli_sname : "?", dli_lr.dli_fname ? dli_lr.dli_fname : "?",
+                          info ? info->si_addr : NULL);
+            if (cur_state->__pc >= 0x1000) {
+                uint32_t *code = (uint32_t *)(cur_state->__pc - 16);
+                for (int i = -4; i <= 4; i++) {
+                    ltm_log_error("  %s 0x%llx: 0x%08x", (i == 0 ? "=>" : "  "),
+                                  (unsigned long long)(cur_state->__pc + i * 4), code[i + 4]);
+                }
+            }
             for (int i = 0; i < 31; i += 2) {
                 ltm_log_error("  x%-2d = 0x%016llx  x%-2d = 0x%016llx",
                               i, (unsigned long long)cur_state->__x[i],
@@ -1933,7 +1986,7 @@ static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) 
     }
 
     memcpy(&frame->saved_state, cur_state, sizeof(arm_thread_state64_t));
-    memcpy(&frame->saved_neon, &uc->uc_mcontext->__ns, sizeof(arm_neon_state64_t));
+    memcpy(&frame->saved_neon, cur_neon, sizeof(arm_neon_state64_t));
     frame->magic = LTM_SIGFRAME_MAGIC;
 
     /* Populate standard Linux ARM64 ucontext */
@@ -1956,8 +2009,8 @@ static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) 
         if (cur_state->__pc >= 0x1000) {
             fault_insn = *(uint32_t *)cur_state->__pc;
         }
-        ltm_log_error("Guest crash signal %d delivered: PC=0x%llx (insn=0x%08x), fault_addr=%p",
-                      l_sig, (unsigned long long)cur_state->__pc, fault_insn, info ? info->si_addr : NULL);
+        ltm_log_error("[pid=%d] Guest crash signal %d delivered: PC=0x%llx (insn=0x%08x), fault_addr=%p",
+                      getpid(), l_sig, (unsigned long long)cur_state->__pc, fault_insn, info ? info->si_addr : NULL);
         for (int i = 0; i < 31; i += 2) {
             ltm_log_error("  x%-2d = 0x%016llx  x%-2d = 0x%016llx",
                           i, (unsigned long long)cur_state->__x[i],
@@ -2011,9 +2064,8 @@ static void ltm_host_signal_handler(int d_sig, siginfo_t *info, void *ucontext) 
         pthread_sigmask(SIG_SETMASK, &set, NULL);
     }
 
-    /* Resume execution into guest handler via Darwin signal trampoline */
-    *cur_state = target_state;
-    return;
+    /* Resume execution into guest handler via custom assembly restoration engine (Rule 5) */
+    ltm_resume_context(&target_state, cur_neon);
 }
 
 int64_t handle_rt_sigaction(int signum, const struct linux_sigaction *act, struct linux_sigaction *oldact, size_t sigsetsize) {
@@ -2042,7 +2094,7 @@ int64_t handle_rt_sigaction(int signum, const struct linux_sigaction *act, struc
                 sigaction(d_sig, &d_sa, NULL);
             } else {
                 d_sa.sa_sigaction = ltm_host_signal_handler;
-                d_sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+                d_sa.sa_flags = SA_SIGINFO; /* NO SA_ONSTACK! Handled via ltm_resume_context */
                 if (act->l_flags & 0x40000000ULL /* LINUX_SA_NODEFER */) {
                     d_sa.sa_flags |= SA_NODEFER;
                 }
@@ -2058,6 +2110,7 @@ int64_t handle_rt_sigaction(int signum, const struct linux_sigaction *act, struc
 int64_t handle_rt_sigreturn(void *state_ptr, void *neon_ptr) {
     arm_thread_state64_t *cur_state = (arm_thread_state64_t *)state_ptr;
     uintptr_t sp = cur_state->__sp;
+    struct ltm_sigframe *frame = (struct ltm_sigframe *)sp;
     if (sp < 0x1000 || (sp & 0x7) != 0) return -LINUX_EINVAL;
 
     mach_vm_address_t vaddr = (mach_vm_address_t)sp;
@@ -2074,7 +2127,7 @@ int64_t handle_rt_sigreturn(void *state_ptr, void *neon_ptr) {
         return -LINUX_EINVAL;
     }
 
-    struct ltm_sigframe *frame = (struct ltm_sigframe *)sp;
+    frame = (struct ltm_sigframe *)sp;
     if (frame->magic != LTM_SIGFRAME_MAGIC) {
         return -LINUX_EINVAL;
     }
@@ -2237,9 +2290,11 @@ int64_t handle_mmap(void *addr, size_t length, int prot, int flags, int fd, off_
 
 int64_t handle_munmap(void *addr, size_t length) {
     if (!addr || length == 0) return -LINUX_EINVAL;
-    size_t aligned_len = PAGE_ROUND_UP(length);
+    uintptr_t pstart = PAGE_ROUND_DOWN(addr);
+    uintptr_t pend = PAGE_ROUND_UP((uintptr_t)addr + length);
+    size_t plen = pend - pstart;
 
-    if (munmap(addr, aligned_len) != 0) {
+    if (munmap((void *)pstart, plen) != 0) {
         return darwin_to_linux_errno(errno);
     }
     return 0;
@@ -2573,15 +2628,10 @@ struct ltm_thread_arg {
 static void *ltm_thread_entry(void *arg) {
     struct ltm_thread_arg *targ = (struct ltm_thread_arg *)arg;
 
-    /* Allocate dedicated alternate signal stack for this thread (1MB) */
+    /* Allocate dedicated host stack for this thread (1MB) */
     void *alt_stack = mmap(NULL, 1024 * 1024, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (alt_stack != MAP_FAILED) {
-        stack_t ss = {
-            .ss_sp = alt_stack,
-            .ss_size = 1024 * 1024,
-            .ss_flags = 0
-        };
-        sigaltstack(&ss, NULL);
+        t_host_stack_top = (char *)alt_stack + 1024 * 1024;
     }
 
     pthread_mutex_lock(&targ->lock);
@@ -2619,8 +2669,6 @@ static void *ltm_thread_entry(void *arg) {
     s_has_exit_jmp = true;
     if (sigsetjmp(s_thread_exit_jmp, 1) != 0) {
         /* Thread has terminated via handle_exit! We are safely back on Darwin native pthread stack */
-        stack_t ss = { .ss_flags = SS_DISABLE };
-        sigaltstack(&ss, NULL);
         if (alt_stack != MAP_FAILED) {
             munmap(alt_stack, 1024 * 1024);
         }
@@ -2757,6 +2805,7 @@ int64_t handle_clone(uint64_t flags, void *stack, int *ptid, void *tls, int *cti
         sigprocmask(SIG_SETMASK, &empty_mask, NULL);
 
         ltm_reset_on_fork();
+        ltm_dispatcher_reinit_child();
 
         if (state) {
             state->__x[0] = 0;
@@ -2764,6 +2813,9 @@ int64_t handle_clone(uint64_t flags, void *stack, int *ptid, void *tls, int *cti
             if (stack && (uintptr_t)stack >= 0x100000000ULL) {
                 state->__sp = (uintptr_t)stack & ~0x0fULL;
             }
+        }
+        if (s_guest_tls) {
+            ltm_set_guest_tls(s_guest_tls);
         }
         if ((flags & LINUX_CLONE_SETTLS) && tls) {
             ltm_set_guest_tls((uintptr_t)tls);
@@ -2776,6 +2828,8 @@ int64_t handle_clone(uint64_t flags, void *stack, int *ptid, void *tls, int *cti
         }
 
         if (state) {
+            ltm_log_debug("[pid=%d] Child resumed after clone: PC=0x%llx, SP=0x%llx, lr=0x%llx",
+                          getpid(), (unsigned long long)state->__pc, (unsigned long long)state->__sp, (unsigned long long)state->__lr);
             ltm_resume_context(state, NULL);
         }
         exit(0);
@@ -2971,6 +3025,7 @@ int64_t handle_getpgid(pid_t pid) {
 
 int64_t handle_execve(const char *pathname, char *const argv[], char *const envp[]) {
     if (!pathname) return -LINUX_EFAULT;
+    ltm_log_debug("[pid=%d] handle_execve: pathname='%s'", getpid(), pathname);
 
     char host_path[1024];
     int res = sandbox_resolve_path(LINUX_AT_FDCWD, pathname, host_path, sizeof(host_path), 0);
@@ -3182,7 +3237,7 @@ int64_t handle_linkat(int olddirfd, const char *oldpath, int newdirfd, const cha
 int64_t handle_fchmodat(int dirfd, const char *pathname, mode_t mode, int flags) {
     if (!pathname) return -LINUX_EFAULT;
     char host_path[1024];
-    int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), 0);
+    int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), flags);
     if (res < 0) return res;
     if (res == 1) return 0;
 
@@ -3191,12 +3246,7 @@ int64_t handle_fchmodat(int dirfd, const char *pathname, mode_t mode, int flags)
         return darwin_to_linux_errno(errno);
     }
     if (S_ISLNK(st.st_mode)) {
-        if (flags & 0x100 /* AT_SYMLINK_NOFOLLOW */) {
-            return -LINUX_EOPNOTSUPP;
-        }
-        if (lchmod(host_path, mode) != 0) {
-            return 0;
-        }
+        lchmod(host_path, mode);
         return 0;
     }
 
@@ -3215,7 +3265,7 @@ int64_t handle_fchmod(int fd, mode_t mode) {
 int64_t handle_fchownat(int dirfd, const char *pathname, uid_t owner, gid_t group, int flags) {
     if (!pathname) return -LINUX_EFAULT;
     char host_path[1024];
-    int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), 0);
+    int res = sandbox_resolve_path(dirfd, pathname, host_path, sizeof(host_path), flags);
     if (res < 0) return res;
     if (res == 1) return 0;
 

@@ -686,7 +686,7 @@ extern ltm_runtime_t g_ltm;
 
 #define ltm_trace(fmt, ...) do { \
     if (g_ltm.trace_syscalls) { \
-        fprintf(stderr, "[LTM:STRACE] " fmt "\n", ##__VA_ARGS__); \
+        fprintf(stderr, "[LTM:STRACE pid=%d] " fmt "\n", getpid(), ##__VA_ARGS__); \
     } \
 } while (0)
 

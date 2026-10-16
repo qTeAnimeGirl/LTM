@@ -44,6 +44,28 @@ size_t patcher_scan_and_patch(void *addr, size_t size) {
              * Patch to brk #(0x302) to safely compute w1 from [x8, #0x3c] + w15 and restore x18. */
             code[i] = 0xd4200000U | (0x302U << 5);
             count++;
+        } else if (insn == 0xf9401412U && (i + 1 < num_instrs) && code[i + 1] == 0xf9401245U) {
+            /* TRACEABILITY: Addresses Glibc _int_malloc Signal 11 crash at 0x97f9c (str x3, [x18, #32]).
+             * On Darwin ARM64, register x18 is platform-reserved and clobbered by XNU scheduler
+             * during timer interrupts and preemption.
+             * Register x2 is dead throughout this entire block (last set at 0x97e58, overwritten at 0x98018).
+             * Register x17 is live across this block (holding bk for list insertion at 0x97fc4).
+             * Rewrite x18 to x2 in this critical largebin insertion sequence:
+             *   ldr x18, [x0, #40]         -> ldr x2, [x0, #40]        (0xf9401402)
+             *   ldr x5, [x18, #32]         -> ldr x5, [x2, #32]        (0xf9401045)
+             *   stp x5, x18, [x3, #32]     -> stp x5, x2, [x3, #32]    (0xa9020865)
+             *   str x3, [x18, #32]         -> str x3, [x2, #32]        (0xf9001043)
+             */
+            code[i]     = 0xf9401402U; /* ldr x2, [x0, #40] */
+            code[i + 1] = 0xf9401045U; /* ldr x5, [x2, #32] */
+            if (i + 4 < num_instrs && code[i + 4] == 0xa9024865U) {
+                code[i + 4] = 0xa9020865U; /* stp x5, x2, [x3, #32] */
+            }
+            if (i + 5 < num_instrs && code[i + 5] == 0xf9001243U) {
+                code[i + 5] = 0xf9001043U; /* str x3, [x2, #32] */
+            }
+            ltm_log_info("Patcher: rewrote Glibc _int_malloc x18 sequence to x2 at %p", &code[i]);
+            count++;
         }
     }
 

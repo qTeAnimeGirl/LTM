@@ -200,6 +200,35 @@ ssize_t sandbox_virtual_readlink(const char *path, char *buf, size_t bufsiz) {
         return (ssize_t)copy_len;
     }
 
+    if (strncmp(path, "/dev/fd/", 8) == 0 || (parse_proc_pid_path(path, &pid, &subfile) && strncmp(subfile, "fd/", 3) == 0)) {
+        int target_fd = (strncmp(path, "/dev/fd/", 8) == 0) ? atoi(path + 8) : atoi(subfile + 3);
+        char target_path[PATH_MAX];
+        if (fcntl(target_fd, F_GETPATH, target_path) == 0) {
+            size_t rlen = strlen(g_ltm.host_rootfs);
+            const char *guest_res = target_path;
+            if (strncmp(target_path, g_ltm.host_rootfs, rlen) == 0 && target_path[rlen] == '/') {
+                guest_res = target_path + rlen;
+            }
+            size_t len = strlen(guest_res);
+            size_t copy_len = len < bufsiz ? len : bufsiz;
+            memcpy(buf, guest_res, copy_len);
+            return (ssize_t)copy_len;
+        } else {
+            struct stat fst;
+            if (fstat(target_fd, &fst) == 0) {
+                char anon_desc[64];
+                if (S_ISFIFO(fst.st_mode)) snprintf(anon_desc, sizeof(anon_desc), "pipe:[%llu]", (unsigned long long)fst.st_ino);
+                else if (S_ISSOCK(fst.st_mode)) snprintf(anon_desc, sizeof(anon_desc), "socket:[%llu]", (unsigned long long)fst.st_ino);
+                else snprintf(anon_desc, sizeof(anon_desc), "anon_inode:[%llu]", (unsigned long long)fst.st_ino);
+                size_t len = strlen(anon_desc);
+                size_t copy_len = len < bufsiz ? len : bufsiz;
+                memcpy(buf, anon_desc, copy_len);
+                return (ssize_t)copy_len;
+            }
+            return -LINUX_EBADF;
+        }
+    }
+
     return -LINUX_ENOENT;
 }
 
@@ -1104,7 +1133,7 @@ int sandbox_resolve_path(int dirfd, const char *guest_path, char *host_path_buf,
         }
 
         /* If caller requested NOFOLLOW on final target, stop here */
-        if (flags & (AT_SYMLINK_NOFOLLOW | LINUX_O_NOFOLLOW)) {
+        if (flags & (AT_SYMLINK_NOFOLLOW | LINUX_AT_SYMLINK_NOFOLLOW | LINUX_O_NOFOLLOW | 0x8000 | 0x20000)) {
             return 0;
         }
 

@@ -463,6 +463,9 @@ skip_shebang_check:
     ltm_log_debug("  Entry point: 0x%lx", (unsigned long)g_ltm.elf_entry);
     ltm_log_debug("  Guest SP:    %p", g_ltm.guest_sp);
 
+    ltm_log_debug("[pid=%d] Launching guest ELF '%s': entry=0x%lx, sp=%p",
+                  getpid(), g_ltm.binary_path, (unsigned long)g_ltm.elf_entry, g_ltm.guest_sp);
+
     /* Jump to guest entry */
     ltm_jump_to_entry(g_ltm.elf_entry, g_ltm.guest_sp);
 

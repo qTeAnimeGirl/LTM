@@ -355,6 +355,10 @@ struct linux_flock64 {
     int32_t  __pad2;
 };
 
+#define LINUX_F_RDLCK         0
+#define LINUX_F_WRLCK         1
+#define LINUX_F_UNLCK         2
+
 #define LINUX_F_DUPFD         0
 #define LINUX_F_GETFD         1
 #define LINUX_F_SETFD         2
@@ -381,6 +385,22 @@ struct linux_flock64 {
 
 /* Syscall Dispatcher Registration & Entry */
 int syscall_dispatcher_init(void);
+void ltm_dispatcher_reinit_child(void);
+extern void *g_alt_stack;
+extern void *g_alt_stack_top;
+extern __thread void *t_host_stack_top;
+
+static inline void *ltm_get_signal_stack(void) {
+    uintptr_t cur_sp = 0;
+    __asm__ volatile("mov %0, sp" : "=r"(cur_sp));
+    if (g_alt_stack && cur_sp >= (uintptr_t)g_alt_stack && cur_sp <= (uintptr_t)g_alt_stack_top) {
+        return NULL; /* Already on host alternate stack */
+    }
+    return t_host_stack_top ? t_host_stack_top : g_alt_stack_top;
+}
+
+void ltm_call_on_stack(void *fn, int sig, void *si, void *ctx, void *new_sp);
+void ltm_sig_handler_impl(int sig, siginfo_t *si, void *ctx);
 int64_t syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
                          uint64_t a3, uint64_t a4, uint64_t a5, void *state, void *neon);
 
@@ -419,7 +439,7 @@ int64_t handle_rt_sigaction(int signum, const struct linux_sigaction *act, struc
 int64_t handle_rt_sigreturn(void *state, void *neon);
 int64_t handle_rt_sigprocmask(int how, const uint64_t *set, uint64_t *oldset, size_t sigsetsize);
 void ltm_set_in_host_syscall(int in_sys);
-void ltm_check_and_deliver_pending_signals(void *state);
+int ltm_check_and_deliver_pending_signals(void *state, void *neon);
 
 int64_t handle_brk(uintptr_t brk_addr);
 int64_t handle_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);

@@ -3575,3 +3575,47 @@ During sequential package transactions executed in persistent interactive bash s
   - With lock removed, full sequential transaction (`pacman -Sy` followed by `pacman -Su --noconfirm`) runs to package download phase without faults or memory wraps.
 - **Full Automated Regression Suite (`./run_tests.sh`)**:
   - **329 / 329 Tests Passed (100% Pass Rate)** with zero regressions.
+
+---
+
+## [Phase 15: Darwin XNU Preemption Clobbering Resolution, Glibc _int_malloc Dead Register Substitution & Host Signal Stack Decoupling]
+
+### 1. Incident Overview & Deep Root Cause Analysis
+During high-throughput archive extraction in `pacman -Su` and complex build pipelines with `mkinitcpio` (generating `/boot/initramfs-linux.img`), two interdependent failure modes were uncovered:
+1. **Glibc `_int_malloc` Preemption Crash**:
+   - Glibc's largebin insertion sequence (`libc.so.6`) loaded register `x18` with `chunk->bk_nextsize` at `0x97f88`.
+   - Darwin XNU kernel scheduler clears register `x18` to 0 upon returning from timer interrupt preemption (~10ms into execution).
+   - If preemption occurred between `0x97f88` and `0x97f9c`, `str x3, [x18, #32]` (`0xf9001243`) dereferenced address `0x20` (or `0x0`), causing `SIGSEGV` (Signal 11).
+   - Analysis of Glibc's largebin block proved that register `x2` is completely dead from `0x97e58` through `0x98018` (>400 bytes), while `x17` was active holding `bk`.
+2. **Darwin Signal Frame Collisions on Guest Userspace Stack**:
+   - When Darwin delivered signals without `SA_ONSTACK`, Darwin's `ucontext` structure was pushed onto the active userspace stack.
+   - Allocating `struct ltm_sigframe` (5504 bytes) on the same stack occasionally collided with Darwin's frame, causing memory corruption or Darwin signal cookie panics (`brk #1`).
+3. **Virtual `/proc` Path Shadowing in `getdents64`**:
+   - `handle_getdents64` matched any path ending in `/proc`, mistakenly injecting virtual procfs files into `$BUILDROOT/proc` during `mkinitcpio` runs and breaking `find` / `bsdtar` archive creation.
+
+### 2. Solutions Implemented
+1. **Automated JIT Largebin Substitution (`src/patcher.c`)**:
+   - Added pattern matching in `patcher_scan_and_patch` targeting Glibc's `_int_malloc` sequence:
+     - `ldr x18, [x0, #40]` $\to$ `ldr x2, [x0, #40]` (`0xf9401402`)
+     - `ldr x5, [x18, #32]` $\to$ `ldr x5, [x2, #32]` (`0xf9401045`)
+     - `stp x5, x18, [x3, #32]` $\to$ `stp x5, x2, [x3, #32]` (`0xa9020865`)
+     - `str x3, [x18, #32]` $\to$ `str x3, [x2, #32]` (`0xf9001043`)
+   - Permanently eliminates preemption zeroing risk in memory allocation.
+2. **Dedicated Host Signal Stack & Pure Assembly Restoration (`src/jump_stub.s`, `src/syscall_handlers.c`)**:
+   - Implemented `_ltm_call_on_stack` assembly stub that switches `sp` to a dedicated 1MB host stack (`g_alt_stack_top` / `t_host_stack_top`) before running host signal handler code.
+   - Signal state (`__ss`, `__ns`) is immediately copied to local host stack variables before allocating `struct ltm_sigframe` on the guest stack.
+   - Guest signal handlers resume execution via `_ltm_resume_context` rather than Darwin's `_sigtramp`, maintaining full compliance with Invariant Rule 5.
+3. **Container-Rooted Virtual `/proc` Isolation (`src/syscall_handlers.c`)**:
+   - Restricted virtual `/proc` detection to exact match with `g_ltm.host_rootfs/proc`.
+4. **Makefile Ad-Hoc Codesign**:
+   - Added `codesign -s - -f` to `Makefile` targets to eliminate Darwin code signature invalidation kills (SIGKILL 137) during iterative rebuilds.
+
+### 3. Verification & Live Validation
+- **`mkinitcpio` Initramfs Pipeline**:
+  - Successfully generated full 14MB gzip-compressed initramfs image (`/boot/initramfs-linux.img`).
+  - Executed hundreds of concurrent subshells, CPIO pipelines (`find`, `sort`, `bsdtar`, `gzip`), and module dependency tools without crashes.
+- **Pacman Database Operations**:
+  - `pacman -Q` listed all 150+ packages cleanly.
+  - `pacman -Sy` synchronized all 4 repository databases over the network without faults.
+- **Automated Regression Test Suite (`./run_tests.sh`)**:
+  - **329 / 329 Tests Passed (100% Pass Rate)**.
