@@ -3895,6 +3895,84 @@ During comprehensive user validation on Arch Linux ARM inside LTM, three critica
   - `python3 --version`: `Python 3.14.8` (PASS)
 - **Regression Test Suite**: All 329 tests passed (316 syscall unit tests + 13 core integration suites) with 100% pass rate.
 
+---
+
+## [Sprint 18: Native Modern macOS SDK Transition, Unified Real-Time x18 JIT Virtualization, & Dedicated Multi-Threaded / Async Test Suite]
+
+**Date**: 2026-10-16  
+**Author**: Engineering Swarm (Lead Architect, JIT Engine Developer, Signal Systems Auditor, QA Lead)  
+
+### 1. Architectural Mission
+1. **Eliminate macOS 11.0 SDK Deployment Target**:
+   - Completely remove `-mmacosx-version-min=11.0` and `-Wl,-platform_version,macos,11.0.0,11.0.0` from `Makefile`.
+   - Compile LTM natively against the modern host Apple Silicon macOS SDK without relying on the legacy `task->preserve_x18` kernel backwards-compatibility mechanism.
+2. **Unified Real-Time JIT Virtualization for `x18` & `w18`**:
+   - Virtualize guest register `x18` and `w18` across normal multi-threading, context switching, and asynchronous signal delivery.
+   - Prevent Darwin kernel preemption register zeroing from corrupting guest state.
+3. **Dedicated Test Suite**:
+   - Create `tests/test_x18_virtualization.c` validating 3 rigorous phases:
+     - Phase 1: 16 concurrent threads performing 32,000 operations across heavy mutex contention, system calls, and `sched_yield`.
+     - Phase 2: Rapid asynchronous signal delivery (ITIMER_REAL @ 1ms interval timer).
+     - Phase 3: Combined multi-threaded execution under asynchronous signal blasts.
+4. **Full Regression Test Verification**:
+   - Verify all 330 tests pass cleanly with 100% accuracy.
+
+---
+
+### 2. Root Cause Analysis & Architectural Breakthroughs
+
+#### 2.1 The Asynchronous Signal Restoration Invariant in `handle_rt_sigreturn`
+When rapid asynchronous signals (`SIGALRM` via `setitimer` or host interrupts) were delivered to guest signal handlers:
+- In `ltm_host_signal_handler` and `ltm_check_and_deliver_pending_signals`, guest context was saved in `struct ltm_sigframe` (containing both `saved_state` and Linux standard `ucontext_t uc`).
+- When the signal handler completed and returned via `_ltm_sigreturn_stub` (`LINUX_SYS_rt_sigreturn`), `handle_rt_sigreturn` restored `cur_state->__pc = frame->uc.uc_mcontext.pc`.
+- For deferred signals delivered after host syscall execution (`s_in_host_syscall`), `uc_mcontext.pc` previously captured host dylib addresses with PAC pointers, causing `SIGILL` (code 132) on context resumption.
+- **Fix**: Restored hardware execution context (`__pc`, `__sp`, `__cpsr`, and general registers) accurately from `frame->saved_state`, while restoring virtual register `x18` directly from Linux standard `frame->uc.uc_mcontext.regs[18]` and synchronizing with thread-local `s_guest_x18`.
+
+#### 2.2 Interpreter Scoping in `patcher_scan_and_patch_ex`
+- When generic `mov x18, Xm` and `mov Xd, x18` JIT rewriting was introduced, dynamic linkers (`ld-musl-aarch64.so.1`) encountered relocation failure during self-relocation bootstrap because Musl uses `x18` as a temporary intra-procedure register inside its internal `do_relocs` symbol table lookup.
+- Trapping `mov x18` during `_dl_start` before libc initialization led to `x16` caller-saved register clobbering across breakpoints.
+- **Fix**: Implemented `patcher_scan_and_patch_ex(addr, size, is_interp)`. When loading dynamic interpreters (`PT_INTERP`), LTM strictly patches `ARM64_SVC_0` and `TPIDR_EL0`, leaving dynamic linker bootstrap moves native, while enforcing unified real-time JIT virtualization across all user binaries, libraries, and application threads.
+
+#### 2.3 Bi-Directional Register Synchronization in `syscall_dispatcher.c`
+- Synchronized physical `x18` with virtual `s_guest_x18` bidirectionally:
+  - If `state->__x[18] != 0` on trap entry, `ltm_set_guest_x18(state->__x[18])` updates thread-local memory.
+  - If Darwin kernel preemption cleared `state->__x[18]` to 0, `state->__x[18] = ltm_get_guest_x18()` restores the pristine virtual register before context resumption.
+  - In `_ltm_resume_context_asm`, physical `x18` is reloaded via `ldp x18, x19, [x0, #144]` ensuring physical register continuity.
+
+---
+
+### 3. Verification & Results
+
+1. **Dedicated `test_x18_virtualization` Validation**:
+   - `[Phase 1]`: 16 threads completed 32,000 operations across `sched_yield`, mutex locks, and syscalls with 0 mismatches.
+   - `[Phase 2]`: 30 rapid asynchronous `SIGALRM` signals (ITIMER_REAL @ 1ms) intercepted and resumed with 100% register integrity.
+   - `[Phase 3]`: 8 concurrent threads under continuous signal load passed with 0 errors.
+   - Result: **All x18 Virtualization Tests Passed Cleanly!**
+
+2. **Automated Regression Test Suite (`./run_tests.sh`)**:
+   - All 316 Linux ARM64 standalone syscall tests (Cases A, B, C): **PASS**.
+   - All 14 Core Integration Suites: **PASS**:
+     - `test_hello` (0s): PASS
+     - `test_args_env` (0s): PASS
+     - `test_file_io` (0s): PASS
+     - `test_sandbox_defense` (0s): PASS
+     - `test_procfs` (0s): PASS
+     - `test_memory` (0s): PASS
+     - `test_ps_procfs` (0s): PASS
+     - `test_wave1_syscalls` (0s): PASS
+     - `busybox ps` (0s): PASS
+     - `test_wave2_syscalls` (0s): PASS
+     - `test_pthreads` (0s): PASS
+     - `test_glibc` (0s): PASS
+     - `test_concurrency_stress` (4s): PASS
+     - `test_x18_virtualization` (1s): PASS
+   - **Total Tests: 330 / Passed: 330 / Failed: 0 (100% Pass Rate)**.
+
+3. **Live User Applications**:
+   - `pacman -Q`: lists packages cleanly with exit code 0.
+   - `bash -c`: executes interactive commands cleanly with exit code 0.
+
+
 
 
 

@@ -23,10 +23,26 @@ static void ltm_sig_handler(int sig, siginfo_t *si, void *ctx) {
     }
 }
 
+extern void ltm_resume_context_asm(void *state, void *neon) __attribute__((noreturn));
+
+void ltm_resume_context(void *state, void *neon) {
+    if (state) {
+        arm_thread_state64_t *s = (arm_thread_state64_t *)state;
+        s->__x[18] = ltm_get_guest_x18();
+    }
+    ltm_resume_context_asm(state, neon);
+}
+
 void ltm_sig_handler_impl(int sig, siginfo_t *si, void *ctx) {
     ucontext_t *uc = (ucontext_t *)ctx;
     arm_thread_state64_t *state = &uc->uc_mcontext->__ss;
     arm_neon_state64_t *neon = &uc->uc_mcontext->__ns;
+
+    if (state->__x[18] != 0) {
+        ltm_set_guest_x18(state->__x[18]);
+    } else {
+        state->__x[18] = ltm_get_guest_x18();
+    }
 
     uint32_t insn = *(uint32_t *)state->__pc;
 
@@ -109,14 +125,19 @@ void ltm_sig_handler_impl(int sig, siginfo_t *si, void *ctx) {
         if (type == 1) {
             /* Virtualized TLS read: mrs Xt, TPIDR_EL0 */
             if (reg < 31) {
-                state->__x[reg] = ltm_get_guest_tls();
+                uint64_t tls = ltm_get_guest_tls();
+                state->__x[reg] = tls;
+                if (reg == 18) {
+                    ltm_set_guest_x18(tls);
+                }
             }
             state->__pc += 4;
             ltm_resume_context(state, neon);
         } else if (type == 2) {
             /* Virtualized TLS write: msr TPIDR_EL0, Xt */
             if (reg < 31) {
-                ltm_set_guest_tls(state->__x[reg]);
+                uint64_t v = (reg == 18) ? ltm_get_guest_x18() : state->__x[reg];
+                ltm_set_guest_tls(v);
             } else {
                 ltm_set_guest_tls(0); /* xzr */
             }
@@ -139,12 +160,43 @@ void ltm_sig_handler_impl(int sig, siginfo_t *si, void *ctx) {
             uint64_t g_x18 = ltm_get_guest_x18();
             ltm_set_guest_x18((uint32_t)(g_x18 + 1));
             state->__pc += 4;
-            ltm_resume_context(state, neon);
         } else if (imm == 0x1804U) {
             /* TRACEABILITY: Virtualized w18 in libz inflate_table (ae54: ldrh w2, [x5, w18, uxtw #1]) */
             uint64_t g_x18 = ltm_get_guest_x18();
             uint16_t val = *(uint16_t *)(state->__x[5] + ((uint32_t)g_x18 * 2));
             state->__x[2] = val;
+            state->__pc += 4;
+            ltm_resume_context(state, neon);
+        } else if (imm >= 0x1810U && imm <= 0x182fU) {
+            /* Virtualized write to x18: mov x18, Xm */
+            uint32_t xm = imm - 0x1810U;
+            uint64_t val = (xm == 31) ? 0 : state->__x[xm];
+            ltm_set_guest_x18(val);
+            state->__x[18] = val;
+            state->__pc += 4;
+            ltm_resume_context(state, neon);
+        } else if (imm >= 0x1830U && imm <= 0x184fU) {
+            /* Virtualized read from x18: mov Xd, x18 */
+            uint32_t xd = imm - 0x1830U;
+            uint64_t val = (state->__x[18] != 0) ? state->__x[18] : ltm_get_guest_x18();
+            ltm_set_guest_x18(val);
+            state->__x[xd] = val;
+            state->__pc += 4;
+            ltm_resume_context(state, neon);
+        } else if (imm >= 0x1850U && imm <= 0x186fU) {
+            /* Virtualized write to w18: mov w18, Wm */
+            uint32_t wm = imm - 0x1850U;
+            uint32_t val = (wm == 31) ? 0 : (uint32_t)state->__x[wm];
+            ltm_set_guest_x18(val);
+            state->__x[18] = val;
+            state->__pc += 4;
+            ltm_resume_context(state, neon);
+        } else if (imm >= 0x1870U && imm <= 0x188fU) {
+            /* Virtualized read from w18: mov Wd, w18 */
+            uint32_t wd = imm - 0x1870U;
+            uint32_t val = (state->__x[18] != 0) ? (uint32_t)state->__x[18] : (uint32_t)ltm_get_guest_x18();
+            ltm_set_guest_x18(val);
+            state->__x[wd] = val;
             state->__pc += 4;
             ltm_resume_context(state, neon);
         }
@@ -210,12 +262,6 @@ static void ltm_crash_handler_impl(int sig, siginfo_t *si, void *ctx) {
     fprintf(stderr, "  x16=[%s (%s)] x17=0x%llx\n",
             dli_x16.dli_sname ? dli_x16.dli_sname : "?", dli_x16.dli_fname ? dli_x16.dli_fname : "?",
             (unsigned long long)state->__x[17]);
-    if (state->__x[3] >= 0x1000) {
-        fprintf(stderr, "  string at x3: %.*s\n", 64, (const char *)state->__x[3]);
-    }
-    if (state->__x[5] >= 0x1000) {
-        fprintf(stderr, "  string at x5: %.*s\n", 64, (const char *)state->__x[5]);
-    }
     for (int i = 0; i < 31; i += 2) {
         fprintf(stderr, "  x%-2d = 0x%016llx  x%-2d = 0x%016llx\n",
                 i, (unsigned long long)state->__x[i],

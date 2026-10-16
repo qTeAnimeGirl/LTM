@@ -45,8 +45,8 @@ _ltm_jump_to_entry:
 
     br x16
 
-.global _ltm_resume_context
-_ltm_resume_context:
+.global _ltm_resume_context_asm
+_ltm_resume_context_asm:
     // x0 = pointer to arm_thread_state64_t
     cmp x1, #0x1000
     b.lo 1f
@@ -75,15 +75,15 @@ _ltm_resume_context:
     msr nzcv, x1            // Restore NZCV condition flags
     ldr x1, [x0, #248]      // Load guest __sp
     mov sp, x1
-    ldr x18, [x0, #256]     // Load target __pc into physical x18
-    ldp x16, x17, [x0, #128] // Restore guest x16 AND x17 from offset 128
+    ldr x16, [x0, #256]     // Load target __pc into x16
+    ldr x17, [x0, #136]     // Restore guest x17 from offset 136
     ldp x29, x30, [x0, #232]
     ldr x28, [x0, #224]
     ldp x26, x27, [x0, #208]
     ldp x24, x25, [x0, #192]
     ldp x22, x23, [x0, #176]
     ldp x20, x21, [x0, #160]
-    ldr x19, [x0, #152]      // Restore guest x19 from offset 152
+    ldp x18, x19, [x0, #144] // Restore guest x18 and x19 from offset 144
     ldp x14, x15, [x0, #112]
     ldp x12, x13, [x0, #96]
     ldp x10, x11, [x0, #80]
@@ -92,7 +92,7 @@ _ltm_resume_context:
     ldp x4, x5, [x0, #32]
     ldp x2, x3, [x0, #16]
     ldp x0, x1, [x0, #0]
-    br x18
+    br x16
 
 .global _ltm_sigreturn_stub
 _ltm_sigreturn_stub:

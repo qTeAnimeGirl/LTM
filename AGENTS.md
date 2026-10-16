@@ -78,7 +78,7 @@ macOS Apple Silicon hardware strictly enforces **16KB (0x4000) page sizes**. Lin
 | `src/jump_stub.s` | AArch64 assembly stubs: `jump_to_elf`, `_ltm_resume_context`, and `_ltm_sigreturn_stub`. |
 | `scripts/setup_rootfs.sh` | Legacy auxiliary script to unpack Alpine Linux rootfs (superceded by native C installer). |
 | `tests/` | Source code for automated Linux test binaries (`test_hello`, `test_args_env`, `test_file_io`, etc.). |
-| `run_tests.sh` | Automated regression test harness verifying all 316 Linux ARM64 syscall unit tests and 13 core integration test suites (329 tests total). |
+| `run_tests.sh` | Automated regression test harness verifying all 316 Linux ARM64 syscall unit tests and 14 core integration test suites (330 tests total). |
 | `ROADMAP.md` | Full capability roadmap, implemented syscall matrix, and future milestones. |
 | `development_log.md` | Persistent chronological log of all architectural decisions and sprint outcomes. |
 

@@ -2109,6 +2109,7 @@ int ltm_check_and_deliver_pending_signals(void *state_ptr, void *neon_ptr) {
     }
 
     memcpy(&frame->saved_state, state, sizeof(arm_thread_state64_t));
+    frame->saved_state.__x[18] = ltm_get_guest_x18();
     if (neon_ptr) {
         memcpy(&frame->saved_neon, neon_ptr, sizeof(arm_neon_state64_t));
     } else {
@@ -2119,7 +2120,7 @@ int ltm_check_and_deliver_pending_signals(void *state_ptr, void *neon_ptr) {
     memset(&frame->uc, 0, sizeof(frame->uc));
     frame->uc.uc_stack.ss_sp = (void *)state->__sp;
     for (int i = 0; i < 31; i++) {
-        frame->uc.uc_mcontext.regs[i] = state->__x[i];
+        frame->uc.uc_mcontext.regs[i] = (i == 18) ? ltm_get_guest_x18() : state->__x[i];
     }
     frame->uc.uc_mcontext.sp = state->__sp;
     frame->uc.uc_mcontext.pc = state->__pc;
@@ -2266,7 +2267,13 @@ static void ltm_host_signal_handler_impl(int d_sig, siginfo_t *info, void *ucont
         frame->siginfo._sifields._sigfault._addr = info->si_addr;
     }
 
+    if (cur_state->__x[18] != 0) {
+        ltm_set_guest_x18(cur_state->__x[18]);
+    } else {
+        cur_state->__x[18] = ltm_get_guest_x18();
+    }
     memcpy(&frame->saved_state, cur_state, sizeof(arm_thread_state64_t));
+    frame->saved_state.__x[18] = ltm_get_guest_x18();
     memcpy(&frame->saved_neon, cur_neon, sizeof(arm_neon_state64_t));
     frame->magic = LTM_SIGFRAME_MAGIC;
 
@@ -2274,7 +2281,7 @@ static void ltm_host_signal_handler_impl(int d_sig, siginfo_t *info, void *ucont
     memset(&frame->uc, 0, sizeof(frame->uc));
     frame->uc.uc_stack.ss_sp = (void *)cur_state->__sp;
     for (int i = 0; i < 31; i++) {
-        frame->uc.uc_mcontext.regs[i] = cur_state->__x[i];
+        frame->uc.uc_mcontext.regs[i] = (i == 18) ? ltm_get_guest_x18() : cur_state->__x[i];
     }
     frame->uc.uc_mcontext.sp = cur_state->__sp;
     frame->uc.uc_mcontext.pc = cur_state->__pc;
@@ -2416,8 +2423,15 @@ int64_t handle_rt_sigreturn(void *state_ptr, void *neon_ptr) {
     /* Restore guest signal mask from sigframe */
     s_guest_sigmask = frame->uc.uc_sigmask;
 
-    /* Restore all integer registers, condition flags, SP, and PC directly into trap context */
+    ltm_log_debug("handle_rt_sigreturn: frame=%p, magic=0x%llx, saved_pc=0x%llx, uc_pc=0x%llx, saved_sp=0x%llx, uc_sp=0x%llx, saved_x18=0x%llx, uc_x18=0x%llx",
+                  frame, (unsigned long long)frame->magic,
+                  (unsigned long long)frame->saved_state.__pc, (unsigned long long)frame->uc.uc_mcontext.pc,
+                  (unsigned long long)frame->saved_state.__sp, (unsigned long long)frame->uc.uc_mcontext.sp,
+                  (unsigned long long)frame->saved_state.__x[18], (unsigned long long)frame->uc.uc_mcontext.regs[18]);
+
     *cur_state = frame->saved_state;
+    cur_state->__x[18] = frame->uc.uc_mcontext.regs[18];
+    ltm_set_guest_x18(cur_state->__x[18]);
     if (neon_ptr) {
         memcpy(neon_ptr, &frame->saved_neon, sizeof(arm_neon_state64_t));
     }
@@ -3074,6 +3088,7 @@ static void *ltm_thread_entry(void *arg) {
     if ((local.flags & LINUX_CLONE_SETTLS) && local.tls) {
         ltm_set_guest_tls((uintptr_t)local.tls);
     }
+    ltm_set_guest_x18(local.state.__x[18]);
     if ((local.flags & LINUX_CLONE_CHILD_SETTID) && local.ctid) {
         *local.ctid = local.tid;
     }

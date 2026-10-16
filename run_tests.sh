@@ -195,6 +195,9 @@ run_single_test "test_glibc" "100% Glibc dynamic loader and runtime compatibilit
 # Run multi-threaded concurrency stress test suite
 run_single_test "test_concurrency_stress" "Concurrency Stress Test PASSED"
 
+# Run x18 register real-time virtualization test suite (async signals & normal threads)
+run_single_test "test_x18_virtualization" "All x18 Virtualization (Async Signals & Normal Threads) Tests Passed Cleanly!"
+
 # Run standalone syscall test binaries (Sprint 10)
 if [ -d "$BIN_DIR/syscalls" ]; then
     for sys_bin in "$BIN_DIR/syscalls"/test_sys_*; do

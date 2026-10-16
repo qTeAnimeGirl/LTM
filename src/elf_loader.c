@@ -170,7 +170,8 @@ static int elf_load_image(int fd, const char *filepath, uintptr_t pref_base,
         }
 
         if (phdrs[i].p_flags & PF_X) {
-            size_t patched = patcher_scan_and_patch((void *)seg_start, phdrs[i].p_filesz);
+            bool is_interp = (out_interp == NULL);
+            size_t patched = patcher_scan_and_patch_ex((void *)seg_start, phdrs[i].p_filesz, is_interp);
             ltm_log_debug("Segment %d (RX) of '%s': patched %zu instructions", i, filepath, patched);
         }
     }

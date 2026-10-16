@@ -1,7 +1,7 @@
 CC ?= clang
-CFLAGS ?= -Wall -Wextra -O2 -g -Iinclude -mmacosx-version-min=11.0
-LDFLAGS ?= -Wl,-platform_version,macos,11.0.0,11.0.0
-ASFLAGS ?= -g -mmacosx-version-min=11.0
+CFLAGS ?= -Wall -Wextra -O2 -g -Iinclude
+LDFLAGS ?=
+ASFLAGS ?= -g
 
 SRCS = src/main.c \
        src/elf_loader.c \

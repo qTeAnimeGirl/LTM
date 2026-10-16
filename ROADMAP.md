@@ -6,7 +6,7 @@
 **Kernel Personality**: `Linux LTM 2026.1A`  
 **Last Updated**: October 15, 2026  
 **Syscall Coverage**: **316 of 316 Official Linux ARM64 System Calls Implemented (100.0%)**  
-**Test Pass Rate**: **329 of 329 Automated Tests Passing (100.0%)**  
+**Test Pass Rate**: **330 of 330 Automated Tests Passing (100.0%)**  
 **Detailed References**:
 - **[docs/SYSCALLS.md](file:///Users/qteanimegirl/Documents/LTM/docs/SYSCALLS.md)**: Exhaustive 316-syscall architecture registry and gap analysis.
 - **[docs/TUTORIAL.md](file:///Users/qteanimegirl/Documents/LTM/docs/TUTORIAL.md)**: Complete guide on building, running Arch Linux ARM, using `pacman`, and testing.
@@ -318,8 +318,21 @@ As of October 15, 2026, LTM has achieved **100% implementation of all 316 offici
   - In `syscall_dispatcher_init()`, sanitized inherited `SIG_IGN` signal dispositions across `execve()` back to `SIG_DFL` for signals 1..`NSIG` while preserving background job control signals (`SIGTTOU`, `SIGTTIN`). Eliminates signal state desynchronization between host Darwin kernel and guest userspace.
 - [x] **Native Pacman Database Lock Enforcement**:
   - Completely excised automatic lock deletion from `src/main.c`. Arch Linux pacman natively manages `/var/lib/pacman/db.lck`, ensuring transactional integrity and failing cleanly with `error: failed to init transaction (unable to lock database)` if an unhandled lock is present.
-- [x] **Universal 329/329 Test Certification**:
-  - 100% pass rate across 316 per-syscall unit tests and 13 core integration test suites with zero failures.
+- [x] **Universal 330/330 Test Certification**:
+  - 100% pass rate across 316 per-syscall unit tests and 14 core integration test suites with zero failures.
+
+### Milestone 26: Unified Real-Time x18 JIT Virtualization, Modern macOS SDK Transition, & Dedicated Concurrency/Signal Suites
+- [x] **Native macOS SDK Compilation**:
+  - Removed macOS 11.0 backwards compatibility deployment target (`-mmacosx-version-min=11.0` and `-Wl,-platform_version,macos,11.0.0,11.0.0`), compiling natively against host Apple Silicon SDK.
+- [x] **Unified Real-Time JIT Virtualization for `x18` & `w18`**:
+  - Virtualized `mov x18, Xm`, `mov Xd, x18`, `mov w18, Wm`, `mov Wd, w18`, and `mrs x18, TPIDR_EL0` with bidirectional hardware/thread-local register synchronization.
+  - Implemented scoped `patcher_scan_and_patch_ex(addr, size, is_interp)` ensuring dynamic linkers retain native intra-procedure moves while guest user code runs under full JIT virtualization.
+- [x] **Signal Restoration Fidelity in `handle_rt_sigreturn`**:
+  - Restored guest execution state (`__pc`, `__sp`, `__cpsr`, general registers) accurately from signal frame while restoring virtual register `x18` from standard Linux `ucontext_t`.
+- [x] **Dedicated x18 Virtualization Test Suite (`test_x18_virtualization`)**:
+  - Verified 16 concurrent threads (32,000 ops), rapid asynchronous `SIGALRM` timer interrupts (1ms interval), and combined multi-threaded signal blasts with 100% register isolation.
+- [x] **Universal 330/330 Test Certification**:
+  - 100% pass rate across all 316 Linux ARM64 system calls and 14 core integration test suites.
 
 ---
 
@@ -671,7 +684,7 @@ In the official Linux kernel for AArch64 (`asm-generic/unistd.h`), there are fou
 | **`ps` / `ps aux`** | `aarch64` | Arch Linux ARM / Glibc | **100% Working** | Discovers container processes, PID 1, current PID, formatted user, time, and command |
 | **`whoami` & `id`** | `aarch64` | Arch Linux ARM / Glibc | **100% Working** | Correctly outputs `root` and `uid=0(root) gid=0(root) groups=0(root)` |
 | **`uname`** | `aarch64` | Arch Linux ARM / Glibc | **100% Working** | Outputs `Linux ltm-mac LTM 2026.1A #1 SMP PREEMPT_DYNAMIC ... aarch64 GNU/Linux` |
-| **Automated Test Suite** | `aarch64` | Static / Freestanding | **100% Working** | **329 of 329 tests pass cleanly** (100% pass rate across all 316 defined Linux 6.12 syscalls + 13 integration suites) |
+| **Automated Test Suite** | `aarch64` | Static / Freestanding | **100% Working** | **330 of 330 tests pass cleanly** (100% pass rate across all 316 defined Linux 6.12 syscalls + 14 integration suites) |
 
 ---
 

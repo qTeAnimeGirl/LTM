@@ -88,10 +88,17 @@ build_glibc() {
 
     if [ -f "$rootfs/usr/lib/libc.so" ] && [ -f "$rootfs/usr/lib/Scrt1.o" ]; then
         echo "  -> Compiling & dynamic linking $name.c with Glibc..."
-        "$CLANG" -target aarch64-linux-gnu -O2 -ffixed-x18 -fstack-protector-strong -isystem "$rootfs/usr/include" -c "$src" -o "$obj"
+        local fixed_flag="-ffixed-x18"
+        if [ "$name" = "test_x18_virtualization" ]; then
+            fixed_flag=""
+        fi
+        "$CLANG" -target aarch64-linux-gnu -O2 $fixed_flag -fstack-protector-strong -isystem "$rootfs/usr/include" -c "$src" -o "$obj"
         "$LLD" -flavor gnu --sysroot="$rootfs" -pie --dynamic-linker /lib/ld-linux-aarch64.so.1 -L"$rootfs/usr/lib" "$rootfs/usr/lib/Scrt1.o" "$rootfs/usr/lib/crti.o" "$obj" -lc -lpthread -lm "$rootfs/usr/lib/crtn.o" -o "$out"
         rm -f "$obj"
         cp "$out" "$rootfs/usr/bin/$name"
+        if [ -d "$PROJECT_ROOT/arch_rootfs/usr/bin" ]; then
+            cp "$out" "$PROJECT_ROOT/arch_rootfs/usr/bin/$name"
+        fi
     fi
 }
 
@@ -106,7 +113,7 @@ done
 for c_file in "$SCRIPT_DIR"/*.c; do
     if [ -f "$c_file" ]; then
         c_name="$(basename "$c_file" .c)"
-        if [ "$c_name" = "test_glibc" ] || [ "$c_name" = "test_concurrency_stress" ] || [ "$c_name" = "bench_scaling" ]; then
+        if [ "$c_name" = "test_glibc" ] || [ "$c_name" = "test_concurrency_stress" ] || [ "$c_name" = "bench_scaling" ] || [ "$c_name" = "test_x18_virtualization" ]; then
             build_glibc "$c_file"
         elif [ "$c_name" != "syscall_test" ]; then
             build_c "$c_file"

@@ -7,6 +7,7 @@
  * and rewrites to brk #0 (0xd4200000). Buffer must be writable.
  * Returns number of instructions patched. */
 size_t patcher_scan_and_patch(void *addr, size_t size);
+size_t patcher_scan_and_patch_ex(void *addr, size_t size, bool is_interp);
 
 /* Patches an already mapped executable range by temporarily elevating
  * permissions to RW, rewriting instructions, restoring protection to RX,
