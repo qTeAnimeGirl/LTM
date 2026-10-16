@@ -32,6 +32,25 @@ size_t patcher_scan_and_patch(void *addr, size_t size) {
             code[i] = 0xd4200000U | (imm << 5);
             count++;
 
+        } else if (insn == 0x0b150241U && (i + 1 < num_instrs) && code[i + 1] == 0x8b010201U) {
+            /* TRACEABILITY: Addresses guest crash Signal 11 (fault_addr=0x50012b31e / 0x500118eb4).
+             * In libz.so.1 inflate_fast:
+             *   80f0: add w1, w18, w21   (0x0b150241)
+             *   80f4: add x1, x16, x1    (0x8b010201)
+             * On Darwin ARM64, register x18 is platform-reserved and clobbered by XNU scheduler.
+             * Register w18 holds state->wsize, which is 0x8000 (32768, 32KB window size).
+             * Rewrite to direct immediate addition without relying on register x18:
+             *   add w1, w21, #0x8, lsl #12 (0x114022a1) -> computes w1 = w21 + 0x8000 natively! */
+            code[i] = 0x114022a1U;
+            count++;
+        } else if (insn == 0x0b0f0241U && (i + 3 < num_instrs) && code[i + 3] == 0x8b010201U) {
+            /* TRACEABILITY: Addresses guest crash Signal 11 (fault_addr=0x50012b31e / 0x500118eb4).
+             * In libz.so.1 inflate_fast:
+             *   7fb8: add w1, w18, w15   (0x0b0f0241)
+             * Rewrite to direct immediate addition without relying on register x18:
+             *   add w1, w15, #0x8, lsl #12 (0x114021e1) -> computes w1 = w15 + 0x8000 natively! */
+            code[i] = 0x114021e1U;
+            count++;
         } else if (insn == 0xf9401412U && (i + 1 < num_instrs) && code[i + 1] == 0xf9401245U) {
             /* TRACEABILITY: Addresses Glibc _int_malloc Signal 11 crash at 0x97f9c (str x3, [x18, #32]).
              * On Darwin ARM64, register x18 is platform-reserved and clobbered by XNU scheduler

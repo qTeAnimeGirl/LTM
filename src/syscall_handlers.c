@@ -452,7 +452,7 @@ static void copy_stat_to_linux(const struct stat *st, struct linux_stat *statbuf
     if (!p && fd >= 0) {
         if (fcntl(fd, F_GETPATH, path_buf) == 0) p = path_buf;
     }
-    if (p) {
+    if (p && S_ISREG(st->st_mode)) {
         const char *base = strrchr(p, '/');
         base = base ? base + 1 : p;
         if (strcmp(base, "sudo") == 0 || strcmp(base, "su") == 0 ||
@@ -3682,10 +3682,10 @@ int64_t handle_faccessat(int dirfd, const char *pathname, int mode, int flags) {
 int64_t handle_renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath) {
     if (!oldpath || !newpath) return -LINUX_EFAULT;
     char old_host[1024], new_host[1024];
-    int r1 = sandbox_resolve_path(olddirfd, oldpath, old_host, sizeof(old_host), 0);
+    int r1 = sandbox_resolve_path(olddirfd, oldpath, old_host, sizeof(old_host), AT_SYMLINK_NOFOLLOW);
     if (r1 < 0) return r1;
     if (r1 == 1) return -LINUX_EPERM;
-    int r2 = sandbox_resolve_path(newdirfd, newpath, new_host, sizeof(new_host), 0);
+    int r2 = sandbox_resolve_path(newdirfd, newpath, new_host, sizeof(new_host), AT_SYMLINK_NOFOLLOW);
     if (r2 < 0) return r2;
     if (r2 == 1) return -LINUX_EPERM;
 
@@ -3698,7 +3698,7 @@ int64_t handle_renameat2(int olddirfd, const char *oldpath, int newdirfd, const 
     if (!oldpath || !newpath) return -LINUX_EFAULT;
     if (flags & 1 /* RENAME_NOREPLACE */) {
         char new_host[1024];
-        int res = sandbox_resolve_path(newdirfd, newpath, new_host, sizeof(new_host), 0);
+        int res = sandbox_resolve_path(newdirfd, newpath, new_host, sizeof(new_host), AT_SYMLINK_NOFOLLOW);
         if (res == 0) {
             struct stat st;
             if (lstat(new_host, &st) == 0) {
@@ -7521,7 +7521,7 @@ int64_t handle_statx(int dirfd, const char *pathname, int flags, unsigned int ma
     statxbuf->stx_gid = fgid;
 
     mode_t mode = st.st_mode;
-    if (p) {
+    if (p && S_ISREG(st.st_mode)) {
         const char *base = strrchr(p, '/');
         base = base ? base + 1 : p;
         if (strcmp(base, "sudo") == 0 || strcmp(base, "su") == 0 ||
