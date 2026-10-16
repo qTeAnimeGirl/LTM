@@ -232,6 +232,16 @@ int64_t handle_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
     }
 
     int fd = open(host_path, dflags, mode);
+    if (fd < 0 && errno == EACCES && (dflags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC))) {
+        struct stat st;
+        if (stat(host_path, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == getuid()) {
+            /* CAP_DAC_OVERRIDE: temporarily grant owner write bit for root DAC override */
+            chmod(host_path, st.st_mode | S_IWUSR);
+            fd = open(host_path, dflags, mode);
+            if (fd >= 0) fchmod(fd, st.st_mode);
+            else chmod(host_path, st.st_mode);
+        }
+    }
     if (fd < 0) return darwin_to_linux_errno(errno);
     return fd;
 }
@@ -391,14 +401,6 @@ int64_t handle_newfstatat(int dirfd, const char *pathname, struct linux_stat *st
         if (dirfd < 0) return -LINUX_EBADF;
         struct stat st;
         if (fstat(dirfd, &st) != 0) return darwin_to_linux_errno(errno);
-        copy_stat_to_linux(&st, statbuf);
-        return 0;
-    }
-
-    if (pathname && sandbox_is_virtual_path(pathname)) {
-        struct stat st;
-        int vres = sandbox_virtual_stat(pathname, &st);
-        if (vres < 0) return vres;
         copy_stat_to_linux(&st, statbuf);
         return 0;
     }
@@ -1455,16 +1457,119 @@ int64_t handle_getdents64(int fd, void *dirp, size_t count) {
 
     char dir_path[1024];
     bool is_proc = false;
+    bool is_proc_pid = false;
     if (fcntl(fd, F_GETPATH, dir_path) == 0) {
         char root_proc[1024];
         if (g_ltm.host_rootfs[0] != '\0') {
             snprintf(root_proc, sizeof(root_proc), "%s/proc", g_ltm.host_rootfs);
             if (strcmp(dir_path, root_proc) == 0) {
                 is_proc = true;
+            } else if (strncmp(dir_path, root_proc, strlen(root_proc)) == 0 && dir_path[strlen(root_proc)] == '/') {
+                const char *sub = dir_path + strlen(root_proc) + 1;
+                if (strcmp(sub, "1") == 0 || strcmp(sub, "self") == 0 || atoi(sub) > 0) {
+                    is_proc_pid = true;
+                }
             }
         } else if (strcmp(dir_path, "/proc") == 0) {
             is_proc = true;
         }
+    }
+
+    if (is_proc_pid) {
+        struct {
+            const char *name;
+            uint8_t d_type;
+            uint64_t ino;
+        } pid_entries[20];
+        int total_entries = 0;
+
+        pid_entries[total_entries].name = ".";
+        pid_entries[total_entries].d_type = DT_DIR;
+        pid_entries[total_entries++].ino = 100;
+
+        pid_entries[total_entries].name = "..";
+        pid_entries[total_entries].d_type = DT_DIR;
+        pid_entries[total_entries++].ino = 1;
+
+        pid_entries[total_entries].name = "root";
+        pid_entries[total_entries].d_type = DT_LNK;
+        pid_entries[total_entries++].ino = 101;
+
+        pid_entries[total_entries].name = "cwd";
+        pid_entries[total_entries].d_type = DT_LNK;
+        pid_entries[total_entries++].ino = 102;
+
+        pid_entries[total_entries].name = "exe";
+        pid_entries[total_entries].d_type = DT_LNK;
+        pid_entries[total_entries++].ino = 103;
+
+        pid_entries[total_entries].name = "fd";
+        pid_entries[total_entries].d_type = DT_DIR;
+        pid_entries[total_entries++].ino = 104;
+
+        pid_entries[total_entries].name = "task";
+        pid_entries[total_entries].d_type = DT_DIR;
+        pid_entries[total_entries++].ino = 105;
+
+        pid_entries[total_entries].name = "status";
+        pid_entries[total_entries].d_type = DT_REG;
+        pid_entries[total_entries++].ino = 106;
+
+        pid_entries[total_entries].name = "stat";
+        pid_entries[total_entries].d_type = DT_REG;
+        pid_entries[total_entries++].ino = 107;
+
+        pid_entries[total_entries].name = "statm";
+        pid_entries[total_entries].d_type = DT_REG;
+        pid_entries[total_entries++].ino = 108;
+
+        pid_entries[total_entries].name = "cmdline";
+        pid_entries[total_entries].d_type = DT_REG;
+        pid_entries[total_entries++].ino = 109;
+
+        pid_entries[total_entries].name = "comm";
+        pid_entries[total_entries].d_type = DT_REG;
+        pid_entries[total_entries++].ino = 110;
+
+        pid_entries[total_entries].name = "maps";
+        pid_entries[total_entries].d_type = DT_REG;
+        pid_entries[total_entries++].ino = 111;
+
+        pid_entries[total_entries].name = "mounts";
+        pid_entries[total_entries].d_type = DT_REG;
+        pid_entries[total_entries++].ino = 112;
+
+        off_t cur_idx = lseek(fd, 0, SEEK_CUR);
+        if (cur_idx < 0) cur_idx = 0;
+        if (cur_idx >= total_entries) return 0;
+
+        size_t bytes_written = 0;
+        char *out = (char *)dirp;
+
+        while (cur_idx < total_entries) {
+            size_t namelen = strlen(pid_entries[cur_idx].name);
+            size_t reclen = (offsetof(struct linux_dirent64, d_name) + namelen + 1 + 7) & ~7ULL;
+            if (bytes_written + reclen > count) {
+                break;
+            }
+
+            struct linux_dirent64 *ld = (struct linux_dirent64 *)(out + bytes_written);
+            ld->d_ino = pid_entries[cur_idx].ino;
+            ld->d_off = cur_idx + 1;
+            ld->d_reclen = (uint16_t)reclen;
+            ld->d_type = pid_entries[cur_idx].d_type;
+            memcpy(ld->d_name, pid_entries[cur_idx].name, namelen + 1);
+
+            bytes_written += reclen;
+            cur_idx++;
+        }
+
+        if (bytes_written == 0 && cur_idx < total_entries) {
+            return -LINUX_EINVAL;
+        }
+
+        lseek(fd, cur_idx, SEEK_SET);
+        return bytes_written;
     }
 
     if (is_proc) {
@@ -3237,7 +3342,17 @@ int64_t handle_faccessat(int dirfd, const char *pathname, int mode, int flags) {
     if (res == 1) return 0;
 
     int ret = access(host_path, mode & (R_OK | W_OK | X_OK));
-    if (ret < 0) return darwin_to_linux_errno(errno);
+    if (ret < 0) {
+        if (errno == EACCES) {
+            struct stat st;
+            if (stat(host_path, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == getuid()) {
+                if (!(mode & X_OK) || (st.st_mode & 0111)) {
+                    return 0; /* CAP_DAC_OVERRIDE */
+                }
+            }
+        }
+        return darwin_to_linux_errno(errno);
+    }
     return 0;
 }
 
@@ -5069,8 +5184,8 @@ int64_t handle_chroot(const char *path) {
     char resolved[1024];
     if (!realpath(host_path, resolved)) return darwin_to_linux_errno(errno);
 
-    size_t root_len = strlen(g_ltm.host_root);
-    if (strncmp(resolved, g_ltm.host_root, root_len) != 0 ||
+    size_t root_len = strlen(g_ltm.host_rootfs);
+    if (strncmp(resolved, g_ltm.host_rootfs, root_len) != 0 ||
         (resolved[root_len] != '/' && resolved[root_len] != '\0')) {
         ltm_log_debug("Sandbox BLOCKED chroot escape: %s -> %s", path, resolved);
         return -LINUX_EACCES;
@@ -5620,7 +5735,17 @@ int64_t handle_faccessat2(int dirfd, const char *pathname, int mode, int flags) 
     if (flags & 0x200) dflags |= AT_EACCESS;
 
     int ret = faccessat(AT_FDCWD, host_path, mode, dflags);
-    if (ret < 0) return darwin_to_linux_errno(errno);
+    if (ret < 0) {
+        if (errno == EACCES) {
+            struct stat st;
+            if (stat(host_path, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == getuid()) {
+                if (!(mode & X_OK) || (st.st_mode & 0111)) {
+                    return 0; /* CAP_DAC_OVERRIDE */
+                }
+            }
+        }
+        return darwin_to_linux_errno(errno);
+    }
     return 0;
 }
 

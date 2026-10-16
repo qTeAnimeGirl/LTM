@@ -194,12 +194,36 @@ ssize_t sandbox_virtual_readlink(const char *path, char *buf, size_t bufsiz) {
 
     int pid = 0;
     const char *subfile = NULL;
-    if (parse_proc_pid_path(path, &pid, &subfile) && strcmp(subfile, "exe") == 0) {
-        const char *target = (pid == 1) ? "/bin/sh" : g_ltm.binary_path;
-        size_t len = strlen(target);
-        size_t copy_len = len < bufsiz ? len : bufsiz;
-        memcpy(buf, target, copy_len);
-        return (ssize_t)copy_len;
+    if (parse_proc_pid_path(path, &pid, &subfile)) {
+        if (strcmp(subfile, "exe") == 0) {
+            const char *target = (pid == 1) ? "/bin/sh" : g_ltm.binary_path;
+            size_t len = strlen(target);
+            size_t copy_len = len < bufsiz ? len : bufsiz;
+            memcpy(buf, target, copy_len);
+            return (ssize_t)copy_len;
+        }
+        if (strcmp(subfile, "root") == 0) {
+            const char *target = "/";
+            size_t len = strlen(target);
+            size_t copy_len = len < bufsiz ? len : bufsiz;
+            memcpy(buf, target, copy_len);
+            return (ssize_t)copy_len;
+        }
+        if (strcmp(subfile, "cwd") == 0) {
+            char host_cwd[1024];
+            const char *guest_cwd = "/";
+            if (getcwd(host_cwd, sizeof(host_cwd))) {
+                size_t rlen = strlen(g_ltm.host_rootfs);
+                if (strncmp(host_cwd, g_ltm.host_rootfs, rlen) == 0) {
+                    guest_cwd = host_cwd + rlen;
+                    if (*guest_cwd == '\0') guest_cwd = "/";
+                }
+            }
+            size_t len = strlen(guest_cwd);
+            size_t copy_len = len < bufsiz ? len : bufsiz;
+            memcpy(buf, guest_cwd, copy_len);
+            return (ssize_t)copy_len;
+        }
     }
 
     if (strncmp(path, "/dev/fd/", 8) == 0 || (parse_proc_pid_path(path, &pid, &subfile) && strncmp(subfile, "fd/", 3) == 0)) {
@@ -264,6 +288,11 @@ int sandbox_virtual_stat(const char *path, struct stat *st) {
         if (strcmp(subfile, "exe") == 0) {
             st->st_mode = S_IFLNK | 0777;
             st->st_size = strlen((pid == 1) ? "/bin/sh" : g_ltm.binary_path);
+            return 0;
+        }
+        if (strcmp(subfile, "root") == 0 || strcmp(subfile, "cwd") == 0) {
+            st->st_mode = S_IFLNK | 0777;
+            st->st_size = 1;
             return 0;
         }
         if (strncmp(subfile, "fd/", 3) == 0) {
@@ -691,6 +720,20 @@ static int open_proc_pid_file(int pid, const char *subfile) {
         }
     }
 
+    if (strcmp(subfile, "root") == 0) {
+        int fd = open(g_ltm.host_rootfs, O_RDONLY | O_DIRECTORY);
+        if (fd < 0) fd = open(g_ltm.host_rootfs, O_RDONLY);
+        return fd >= 0 ? fd : -LINUX_ENOENT;
+    }
+
+    if (strcmp(subfile, "cwd") == 0) {
+        char cwd[1024];
+        if (!getcwd(cwd, sizeof(cwd))) return -LINUX_ENOENT;
+        int fd = open(cwd, O_RDONLY | O_DIRECTORY);
+        if (fd < 0) fd = open(cwd, O_RDONLY);
+        return fd >= 0 ? fd : -LINUX_ENOENT;
+    }
+
     if (strcmp(subfile, "mounts") == 0) {
         return open_proc_mounts();
     }
@@ -1023,23 +1066,6 @@ static int sandbox_resolve_path_lexical(int dirfd, const char *guest_path, char 
 
     const char *src = guest_path;
 
-    /* Handle home and root virtual aliases if not present in rootfs */
-    char test_target[1024];
-    if (strncmp(src, "/home/user", 10) == 0) {
-        snprintf(test_target, sizeof(test_target), "%s/home/user", g_ltm.host_rootfs);
-        if (access(test_target, F_OK) != 0) {
-            /* If /home/user doesn't exist in rootfs, alias to rootfs root */
-            src += 10;
-            if (*src == '\0') src = "/";
-        }
-    } else if (strncmp(src, "/root", 5) == 0) {
-        snprintf(test_target, sizeof(test_target), "%s/root", g_ltm.host_rootfs);
-        if (access(test_target, F_OK) != 0) {
-            src += 5;
-            if (*src == '\0') src = "/";
-        }
-    }
-
     /* Canonicalize path components */
     char full_virtual[1024];
     if (src[0] == '/') {
@@ -1167,6 +1193,41 @@ int sandbox_resolve_path(int dirfd, const char *guest_path, char *host_path_buf,
         }
     }
 
+    if (parse_proc_pid_path(guest_path, &pid, &subfile)) {
+        if (strcmp(subfile, "root") == 0) {
+            if (flags & (AT_SYMLINK_NOFOLLOW | LINUX_AT_SYMLINK_NOFOLLOW | LINUX_O_NOFOLLOW | 0x8000 | 0x20000)) {
+                strncpy(host_path_buf, guest_path, buf_sz - 1);
+                host_path_buf[buf_sz - 1] = '\0';
+                return 1;
+            }
+            strncpy(host_path_buf, g_ltm.host_rootfs, buf_sz - 1);
+            host_path_buf[buf_sz - 1] = '\0';
+            return 0;
+        }
+        if (strncmp(subfile, "root/", 5) == 0) {
+            char subpath[1024];
+            snprintf(subpath, sizeof(subpath), "/%s", subfile + 5);
+            return sandbox_resolve_path_lexical(LINUX_AT_FDCWD, subpath, host_path_buf, buf_sz);
+        }
+        if (strcmp(subfile, "cwd") == 0) {
+            if (flags & (AT_SYMLINK_NOFOLLOW | LINUX_AT_SYMLINK_NOFOLLOW | LINUX_O_NOFOLLOW | 0x8000 | 0x20000)) {
+                strncpy(host_path_buf, guest_path, buf_sz - 1);
+                host_path_buf[buf_sz - 1] = '\0';
+                return 1;
+            }
+            if (!getcwd(host_path_buf, buf_sz)) {
+                strncpy(host_path_buf, g_ltm.host_rootfs, buf_sz - 1);
+            }
+            host_path_buf[buf_sz - 1] = '\0';
+            return 0;
+        }
+        if (strncmp(subfile, "cwd/", 4) == 0) {
+            char subpath[1024];
+            snprintf(subpath, sizeof(subpath), "%s", subfile + 4);
+            return sandbox_resolve_path_lexical(LINUX_AT_FDCWD, subpath, host_path_buf, buf_sz);
+        }
+    }
+
     if (sandbox_is_virtual_path(guest_path)) {
         strncpy(host_path_buf, guest_path, buf_sz - 1);
         host_path_buf[buf_sz - 1] = '\0';
@@ -1203,6 +1264,23 @@ int sandbox_resolve_path(int dirfd, const char *guest_path, char *host_path_buf,
                     char real_path[PATH_MAX];
                     if (fcntl(vtfd, F_GETPATH, real_path) == 0) {
                         strncpy(host_path_buf, real_path, buf_sz - 1);
+                        host_path_buf[buf_sz - 1] = '\0';
+                        return 0;
+                    }
+                }
+            }
+            if (parse_proc_pid_path(virt_cand, &vpid, &vsub)) {
+                if (strcmp(vsub, "root") == 0) {
+                    if (!(flags & (AT_SYMLINK_NOFOLLOW | LINUX_AT_SYMLINK_NOFOLLOW | LINUX_O_NOFOLLOW | 0x8000 | 0x20000))) {
+                        strncpy(host_path_buf, g_ltm.host_rootfs, buf_sz - 1);
+                        host_path_buf[buf_sz - 1] = '\0';
+                        return 0;
+                    }
+                } else if (strcmp(vsub, "cwd") == 0) {
+                    if (!(flags & (AT_SYMLINK_NOFOLLOW | LINUX_AT_SYMLINK_NOFOLLOW | LINUX_O_NOFOLLOW | 0x8000 | 0x20000))) {
+                        if (!getcwd(host_path_buf, buf_sz)) {
+                            strncpy(host_path_buf, g_ltm.host_rootfs, buf_sz - 1);
+                        }
                         host_path_buf[buf_sz - 1] = '\0';
                         return 0;
                     }

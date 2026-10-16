@@ -3679,3 +3679,52 @@ During high-throughput archive extraction in `pacman -Su` and complex build pipe
   - `pacman -Sy` synchronized all 4 repository databases over the network without faults.
 - **Automated Regression Test Suite (`./run_tests.sh`)**:
   - **329 / 329 Tests Passed (100% Pass Rate)**.
+
+---
+
+## [Phase 16: POSIX CAP_DAC_OVERRIDE, Process Rootfs Namespace Links (/proc/<pid>/root, /proc/<pid>/cwd), and Multi-User Home Directory Creation]
+
+### 1. Incident Overview & Deep Root Cause Analysis
+During comprehensive user validation on Arch Linux ARM inside LTM, three critical usability and POSIX compliance issues were identified:
+1. **`visudo: /etc/sudoers: Permission denied`**:
+   - `/etc/sudoers` has mode `0440` (`-r--r-----`). On real Linux, root (UID 0) has `CAP_DAC_OVERRIDE` capability, granting unconditional read/write access to any existing file regardless of permission bits.
+   - On macOS Darwin, LTM runs in userspace under host user permissions. When `visudo` opened `/etc/sudoers` with `O_RDWR` (or checked write access with `faccessat`), the Darwin kernel strictly rejected the call with `EACCES` (-13).
+2. **`useradd -m -s /bin/bash user` Home Directory Skipping**:
+   - Running `useradd -m -s /bin/bash user` printed: `useradd: warning: the home directory '/home/user' already exists. Not copying any file from skel directory into it.` Yet `/home/user` did not exist in `/home`.
+   - Root Cause: In `src/sandbox.c` (`sandbox_resolve_path_lexical`), a legacy hack from early freestanding milestones checked:
+     `if (strncmp(src, "/home/user", 10) == 0) { if (access(test_target, F_OK) != 0) src += 10; if (*src == '\0') src = "/"; }`
+     This aliased non-existent `/home/user` directly to rootfs root `/`! When `useradd` checked whether `/home/user` existed, `stat` evaluated `/` (which exists), causing `useradd` to abort home directory creation and skel file copying.
+3. **`systemd-detect-virt --chroot`: `Failed to check for chroot() environment: Function not implemented`**:
+   - Systemd's `running_in_chroot()` calls `files_same("/proc/1/root", "/", 0)` to compare inodes.
+   - In LTM, `/proc/1/root` was not handled as a virtual symlink to rootfs `/`, returning `ENOENT` (-2).
+   - Systemd verified that `/proc` was mounted (`fstatfs` returning `0x9FA0` `PROC_SUPER_MAGIC`), but because `/proc/1/root` returned `ENOENT`, systemd assumed the host kernel did not support procfs root namespace traversal and returned `ENOSYS` (-38).
+
+### 2. Solutions Implemented
+1. **POSIX `CAP_DAC_OVERRIDE` Emulation (`src/syscall_handlers.c`)**:
+   - In `handle_openat`: if `open()` returns `EACCES` when opening with write/trunc flags (`O_WRONLY | O_RDWR | O_CREAT | O_TRUNC`) on a regular file owned by the host user (`st.st_uid == getuid()`), LTM temporarily adds `S_IWUSR` via `chmod()`, executes `open()`, and immediately restores the original file mode via `fchmod()`. Open file descriptors retain read/write permissions for their entire lifetime.
+   - In `handle_faccessat` and `handle_faccessat2`: if `access`/`faccessat` returns `EACCES` on a regular file owned by the host user, read and write checks (`R_OK | W_OK`) succeed unconditionally, while `X_OK` checks for at least one execute bit (`st.st_mode & 0111`), exactly mirroring Linux kernel DAC override semantics.
+2. **Elimination of Legacy Home/Root Aliasing (`src/sandbox.c`)**:
+   - Completely deleted the hardcoded `/home/user` and `/root` path rewriting logic in `sandbox_resolve_path_lexical`.
+   - Proper lexical resolution now verifies genuine existence within `g_ltm.host_rootfs`.
+3. **Virtual Process Namespace Symlinks & Directory Enumeration (`src/sandbox.c`, `src/syscall_handlers.c`)**:
+   - In `sandbox_virtual_readlink`: added `/proc/<pid>/root` (returns `"/"`) and `/proc/<pid>/cwd` (returns guest working directory).
+   - In `sandbox_virtual_stat`: added `S_IFLNK | 0777` reporting for `root` and `cwd`.
+   - In `open_proc_pid_file`: supported opening `root` and `cwd` as directory file descriptors.
+   - In `sandbox_resolve_path`: followed `/proc/<pid>/root` and `/proc/<pid>/cwd` when `AT_SYMLINK_NOFOLLOW` is not specified, resolving to `g_ltm.host_rootfs` and host cwd respectively.
+   - In `handle_newfstatat`: removed premature virtual stat bypass so `sandbox_resolve_path` properly dereferences virtual symlinks, allowing `stat("/proc/1/root")` and `stat("/")` to return matching device and inode numbers.
+   - In `handle_getdents64`: added virtual directory listing entries for `/proc/<pid>` and `/proc/self` (`root`, `cwd`, `exe`, `fd`, `task`, `status`, `stat`, `statm`, `cmdline`, `comm`, `maps`, `mounts`).
+4. **Strict Container Boundary Check in `handle_chroot` (`src/syscall_handlers.c`)**:
+   - Updated root boundary validation to enforce `g_ltm.host_rootfs` containment.
+
+### 3. Verification & Live Validation
+- **`visudo` Verification**:
+  - `visudo -c` returned `/etc/sudoers: parsed OK` (exit code 0).
+  - `EDITOR=true visudo` succeeded with zero permission errors (`visudo: /etc/sudoers.tmp unchanged`, exit code 0).
+- **`useradd` Multi-User Verification**:
+  - `useradd -m -s /bin/bash user` created `/home/user` with zero warnings (exit code 0).
+  - Verified skeleton files `.bashrc`, `.bash_profile`, and `.bash_logout` copied and populated into `/home/user`.
+- **`systemd-detect-virt` Chroot Check**:
+  - `systemd-detect-virt --chroot` exited cleanly with exit code 1 (not in chroot) and completely eliminated `Failed to check for chroot() environment: Function not implemented`.
+- **Automated Regression Suite (`./run_tests.sh`)**:
+  - **329 / 329 Tests Passed (100% Pass Rate)**.
+
