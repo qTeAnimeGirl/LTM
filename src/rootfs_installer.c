@@ -1,4 +1,5 @@
 #include "ltm.h"
+#include "rootfs_installer.h"
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -281,9 +282,10 @@ int ltm_install_arch_rootfs(const char *target_dir) {
     printf("[+] Configuring /etc/resolv.conf nameservers (1.1.1.1, 8.8.8.8)...\n");
     setup_resolv_conf(target_dir);
 
-    /* Configure pacman.conf */
-    printf("[+] Configuring /etc/pacman.conf for userland translation...\n");
+    /* Configure pacman.conf and mirrors */
+    printf("[+] Configuring /etc/pacman.conf and mirrorlist for userland translation...\n");
     configure_pacman_conf(target_dir);
+    ensure_rootfs_configured(target_dir);
 
     /* Initialize virtual directory nodes */
     printf("[+] Initializing /proc, /sys, and /dev directory nodes...\n");
@@ -458,7 +460,7 @@ void ensure_rootfs_configured(const char *rootfs_dir) {
                     mbuf[nr] = '\0';
                     fclose(mf);
                     mf = NULL;
-                    if (strstr(mbuf, "Server = http://ca.us.mirror") == NULL) {
+                    if (strstr(mbuf, "\nServer = http://ca.us.mirror") == NULL && strncmp(mbuf, "Server = http://ca.us.mirror", 28) != 0) {
                         /* Prepend fast direct mirrors before geo mirror */
                         char *new_mbuf = malloc(msz + 8192);
                         if (new_mbuf) {

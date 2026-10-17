@@ -38,7 +38,7 @@ void ltm_resume_context_ex(void *state, void *neon, int use_x18) {
 }
 
 void ltm_resume_context(void *state, void *neon) {
-    ltm_resume_context_ex(state, neon, 1);
+    ltm_resume_context_ex(state, neon, 0);
     __builtin_unreachable();
 }
 
@@ -207,8 +207,9 @@ static inline uint64_t aarch64_decode_bit_masks(uint32_t N, uint32_t imms, uint3
     return result;
 }
 
-void emulate_x18_instruction(void *state_ptr, uint32_t insn) {
+void emulate_x18_instruction(void *state_ptr, void *neon_ptr, uint32_t insn) {
     arm_thread_state64_t *state = (arm_thread_state64_t *)state_ptr;
+    arm_neon_state64_t *neon = (arm_neon_state64_t *)neon_ptr;
     uint32_t rd  = insn & 0x1f;
     uint32_t rn  = (insn >> 5) & 0x1f;
     uint32_t rt2 = (insn >> 10) & 0x1f;
@@ -497,7 +498,7 @@ void emulate_x18_instruction(void *state_ptr, uint32_t insn) {
     }
 
     /* 6b. Variable Shifts (LSLV, LSRV, ASRV, RORV) */
-    if ((insn & 0x7fe0f800) == 0x1ac02000) {
+    if ((insn & 0x7fe0f000) == 0x1ac02000) {
         uint32_t op = (insn >> 10) & 0x3;
         uint64_t a = sf ? get_reg(state, rn) : get_wreg(state, rn);
         uint64_t b = sf ? get_reg(state, rm) : get_wreg(state, rm);
@@ -522,8 +523,8 @@ void emulate_x18_instruction(void *state_ptr, uint32_t insn) {
         return;
     }
 
-    /* 6c. Data Processing 1-Source (RBIT, CLZ, REV, REV16, REV32) */
-    if ((insn & 0x5fe0fc00) == 0x5ac00000) {
+    /* 6c. Data Processing 1-Source (RBIT, CLZ, CLS, REV, REV16, REV32) */
+    if ((insn & 0x5fe00000) == 0x5ac00000) {
         uint32_t opcode = (insn >> 10) & 0x3f;
         uint64_t a = sf ? get_reg(state, rn) : get_wreg(state, rn);
         uint64_t res = 0;
@@ -533,31 +534,31 @@ void emulate_x18_instruction(void *state_ptr, uint32_t insn) {
             } else {
                 for (int i = 0; i < 32; i++) if (a & (1ULL << i)) res |= (1ULL << (31 - i));
             }
-        } else if (opcode == 1) { /* CLZ */
-            if (sf) res = a ? (uint64_t)__builtin_clzll(a) : 64;
-            else res = (uint32_t)a ? (uint32_t)__builtin_clz((uint32_t)a) : 32;
-        } else if (opcode == 2) { /* CLS */
-            if (sf) res = __builtin_clrsbll((int64_t)a);
-            else res = __builtin_clrsb((int32_t)a);
-        } else if (opcode == 3) { /* REV */
-            if (sf) res = __builtin_bswap64(a);
-            else res = __builtin_bswap32((uint32_t)a);
-        } else if (opcode == 4 && sf) { /* REV32 */
-            res = ((uint64_t)__builtin_bswap32((uint32_t)(a >> 32)) << 32) | __builtin_bswap32((uint32_t)a);
-        } else if (opcode == 5) { /* REV16 */
+        } else if (opcode == 1) { /* REV16 */
             if (sf) {
                 res = (((a & 0xFF00FF00FF00FF00ULL) >> 8) | ((a & 0x00FF00FF00FF00FFULL) << 8));
             } else {
                 uint32_t a32 = (uint32_t)a;
                 res = (((a32 & 0xFF00FF00U) >> 8) | ((a32 & 0x00FF00FFU) << 8));
             }
+        } else if (opcode == 2) { /* REV */
+            if (sf) res = __builtin_bswap64(a);
+            else res = __builtin_bswap32((uint32_t)a);
+        } else if (opcode == 3 && sf) { /* REV32 */
+            res = ((uint64_t)__builtin_bswap32((uint32_t)(a >> 32)) << 32) | __builtin_bswap32((uint32_t)a);
+        } else if (opcode == 4) { /* CLZ */
+            if (sf) res = a ? (uint64_t)__builtin_clzll(a) : 64;
+            else res = (uint32_t)a ? (uint32_t)__builtin_clz((uint32_t)a) : 32;
+        } else if (opcode == 5) { /* CLS */
+            if (sf) res = __builtin_clrsbll((int64_t)a);
+            else res = __builtin_clrsb((int32_t)a);
         }
         if (sf) set_reg(state, rd, res);
         else set_wreg(state, rd, (uint32_t)res);
         return;
     }
 
-    /* 7. Multiply / Divide (MADD, MSUB, UMULH, SMULH, UDIV, SDIV) */
+    /* 7. Multiply / Divide (MADD, MSUB, UMULH, SMULH, UMADDL, UMSUBL, SMADDL, SMSUBL, UDIV, SDIV) */
     if ((insn & 0x1f000000) == 0x1b000000) {
         uint32_t op31 = (insn >> 21) & 0x7;
         uint32_t o0 = (insn >> 15) & 1;
@@ -574,27 +575,47 @@ void emulate_x18_instruction(void *state_ptr, uint32_t insn) {
             }
             if (sf) set_reg(state, rd, res);
             else set_wreg(state, rd, (uint32_t)res);
-        } else if (op31 == 2 && sf) { /* UMULH */
-            res = (uint64_t)(((__uint128_t)a * (__uint128_t)b) >> 64);
+        } else if (op31 == 1) {
+            if (o0 == 0) { /* SMADDL */
+                res = c + (int64_t)(int32_t)a * (int64_t)(int32_t)b;
+            } else {       /* SMSUBL */
+                res = c - (int64_t)(int32_t)a * (int64_t)(int32_t)b;
+            }
             set_reg(state, rd, res);
-        } else if (op31 == 1 && sf) { /* SMULH */
+        } else if (op31 == 2 && sf) { /* SMULH */
             res = (uint64_t)(((__int128_t)(int64_t)a * (__int128_t)(int64_t)b) >> 64);
+            set_reg(state, rd, res);
+        } else if (op31 == 5) {
+            if (o0 == 0) { /* UMADDL */
+                res = c + (uint64_t)(uint32_t)a * (uint64_t)(uint32_t)b;
+            } else {       /* UMSUBL */
+                res = c - (uint64_t)(uint32_t)a * (uint64_t)(uint32_t)b;
+            }
+            set_reg(state, rd, res);
+        } else if (op31 == 6 && sf) { /* UMULH */
+            res = (uint64_t)(((__uint128_t)a * (__uint128_t)b) >> 64);
             set_reg(state, rd, res);
         }
         return;
     }
-    if ((insn & 0x1fe0fc00) == 0x1ac00800) { /* UDIV */
+    if ((insn & 0x1fe0f800) == 0x1ac00800) { /* UDIV / SDIV */
+        uint32_t o0 = (insn >> 10) & 1;
         uint64_t b = get_reg(state, rm);
         uint64_t a = get_reg(state, rn);
         uint64_t res = 0;
-        if (sf) res = (b != 0) ? (a / b) : 0;
-        else res = ((uint32_t)b != 0) ? ((uint32_t)a / (uint32_t)b) : 0;
+        if (o0 == 0) { /* UDIV */
+            if (sf) res = (b != 0) ? (a / b) : 0;
+            else res = ((uint32_t)b != 0) ? ((uint32_t)a / (uint32_t)b) : 0;
+        } else {       /* SDIV */
+            if (sf) res = (b != 0) ? ((int64_t)a / (int64_t)b) : 0;
+            else res = ((int32_t)b != 0) ? ((int32_t)a / (int32_t)b) : 0;
+        }
         if (sf) set_reg(state, rd, res);
         else set_wreg(state, rd, (uint32_t)res);
         return;
     }
 
-    /* 8. Branches (CBZ, CBNZ, TBZ, TBNZ) */
+    /* 8. Branches (CBZ, CBNZ, TBZ, TBNZ, BR, BLR, RET) */
     if ((insn & 0x7e000000) == 0x34000000) { /* CBZ / CBNZ */
         bool is_cbnz = (insn & (1 << 24)) != 0;
         int64_t imm19 = (insn >> 5) & 0x7ffff;
@@ -617,6 +638,15 @@ void emulate_x18_instruction(void *state_ptr, uint32_t insn) {
         if (take) {
             state->__pc = (state->__pc - 4) + imm14 * 4;
         }
+        return;
+    }
+    if ((insn & 0xfe1ffc1f) == 0xd61f0000) { /* BR / BLR / RET */
+        uint32_t opc = (insn >> 21) & 0x3;
+        uint64_t target = (rn == 18) ? ltm_get_guest_x18() : get_reg(state, rn);
+        if (opc == 1) { /* BLR */
+            state->__lr = state->__pc;
+        }
+        state->__pc = target;
         return;
     }
 
@@ -766,6 +796,25 @@ void emulate_x18_instruction(void *state_ptr, uint32_t insn) {
         return;
     }
 
+    /* 12. FP / SIMD to GPR (FMOV) */
+    if ((insn & 0x7f200000) == 0x1e200000) {
+        uint32_t opcode = (insn >> 16) & 0x7;
+        if (opcode == 0) { /* FMOV Wd, Sn */
+            uint32_t val = neon ? (uint32_t)neon->__v[rn] : 0;
+            set_wreg(state, rd, val);
+        } else if (opcode == 1) { /* FMOV Xd, Dn */
+            uint64_t val = neon ? (uint64_t)neon->__v[rn] : 0;
+            set_reg(state, rd, val);
+        } else if (opcode == 4) { /* FMOV Sn, Wn */
+            uint32_t val = (uint32_t)get_reg(state, rn);
+            if (neon) neon->__v[rd] = val;
+        } else if (opcode == 5) { /* FMOV Dn, Xn */
+            uint64_t val = get_reg(state, rn);
+            if (neon) neon->__v[rd] = val;
+        }
+        return;
+    }
+
     ltm_log_error("Unhandled x18 emulation instruction 0x%08x at PC=%p", insn, (void *)(state->__pc - 4));
 }
 
@@ -884,7 +933,7 @@ void ltm_sig_handler_impl(int sig, siginfo_t *si, void *ctx) {
                 handle_kill(getpid(), SIGTRAP);
                 return;
             }
-            emulate_x18_instruction(state, orig_insn);
+            emulate_x18_instruction(state, neon, orig_insn);
             if (ltm_check_and_deliver_pending_signals(state, neon)) {
                 ltm_resume_context(state, neon);
             } else {
