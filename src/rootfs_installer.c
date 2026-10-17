@@ -219,29 +219,38 @@ int ltm_install_arch_rootfs(const char *target_dir) {
 
     ensure_dir(target_dir, 0755);
 
-    /* Download Arch Linux ARM rootfs archive using /usr/bin/curl */
-    char tmp_archive[] = "/tmp/ltm_archlinux_arm_XXXXXX.tar.gz";
-    int fd = mkstemps(tmp_archive, 7);
-    if (fd >= 0) close(fd);
+    /* Check for local cached rootfs archive */
+    bool is_cached = false;
+    char tmp_archive[1024];
+    const char *cached_path = "/tmp/archlinux_arm.tar.gz";
+    if (access(cached_path, R_OK) == 0) {
+        printf("[+] Using locally cached Arch Linux ARM rootfs archive: %s\n", cached_path);
+        snprintf(tmp_archive, sizeof(tmp_archive), "%s", cached_path);
+        is_cached = true;
+    } else {
+        snprintf(tmp_archive, sizeof(tmp_archive), "/tmp/ltm_archlinux_arm_XXXXXX.tar.gz");
+        int fd = mkstemps(tmp_archive, 7);
+        if (fd >= 0) close(fd);
 
-    printf("[+] Downloading official Arch Linux ARM rootfs archive...\n");
-    printf("    URL: http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz\n");
+        printf("[+] Downloading official Arch Linux ARM rootfs archive...\n");
+        printf("    URL: http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz\n");
 
-    char *curl_argv[] = {
-        "/usr/bin/curl",
-        "-L",
-        "--progress-bar",
-        "-o",
-        tmp_archive,
-        "http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz",
-        NULL
-    };
+        char *curl_argv[] = {
+            "/usr/bin/curl",
+            "-L",
+            "--progress-bar",
+            "-o",
+            tmp_archive,
+            "http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz",
+            NULL
+        };
 
-    int ret = run_exec("/usr/bin/curl", curl_argv);
-    if (ret != 0) {
-        fprintf(stderr, "\n[-] Failed to download Arch Linux ARM rootfs archive (curl exit code: %d)\n", ret);
-        unlink(tmp_archive);
-        return 1;
+        int ret = run_exec("/usr/bin/curl", curl_argv);
+        if (ret != 0) {
+            fprintf(stderr, "\n[-] Failed to download Arch Linux ARM rootfs archive (curl exit code: %d)\n", ret);
+            unlink(tmp_archive);
+            return 1;
+        }
     }
 
     /* Extract rootfs using /usr/bin/tar */
@@ -255,8 +264,10 @@ int ltm_install_arch_rootfs(const char *target_dir) {
         NULL
     };
 
-    ret = run_exec("/usr/bin/tar", tar_argv);
-    unlink(tmp_archive);
+    int ret = run_exec("/usr/bin/tar", tar_argv);
+    if (!is_cached) {
+        unlink(tmp_archive);
+    }
 
     char check_sh[1024], check_bash[1024];
     snprintf(check_sh, sizeof(check_sh), "%s/bin/sh", target_dir);

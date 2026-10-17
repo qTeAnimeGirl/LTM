@@ -4171,6 +4171,54 @@ Two critical root causes were identified and eliminated:
    - Exited cleanly with code 0!
 6. **Regression Suite**: Ran `./run_tests.sh`, passing **all 329 / 329 tests (100% pass rate)**.
 
+---
+
+### [Sprint 24: Clean Rootfs End-to-End Single-Session Lifecycle Validation]
+- **Timestamp**: 2026-10-17 04:05 UTC
+- **Author**: The Diligent Tester & The Brilliant Coder
+- **Status**: Completed & 100% Verified
+
+#### 1. Objectives & Lifecycle Requirement
+The user required automated end-to-end verification of LTM on a clean rootfs inside a single persistent interactive bash session (`./ltm /usr/bin/bash`):
+1. Completely remove `arch_rootfs` to force a 100% clean installation from scratch.
+2. Start `./ltm /usr/bin/bash` and wait for automated rootfs installation.
+3. Within that single persistent session:
+   - Run `pacman -Syy`
+   - Run `pacman -S sudo` (answering interactive prompts)
+   - Run `pacman -S fastfetch` (answering interactive prompts)
+   - Run `pacman -Su` (downloading 77 packages, checking integrity, unpacking, running hooks)
+   - Verify post-upgrade binary execution: `fastfetch --version` and `sudo --version`.
+
+#### 2. Enhancements Implemented
+1. **Rootfs Installer Optimization (`src/rootfs_installer.c`)**:
+   - Added support for local cached rootfs archive at `/tmp/archlinux_arm.tar.gz` to avoid re-downloading 800MB over the internet during fresh lifecycle test iterations, while preserving standard curl downloading when cache is absent.
+   - Avoids unlinking the cached archive when present.
+
+2. **Automated Clean Rootfs PTY Lifecycle Harness (`tests/test_clean_rootfs_lifecycle.py`)**:
+   - Implemented using Python's `pty.fork()` to ensure proper session allocation, controlling terminal (`TIOCSCTTY`), and standard PTY line discipline.
+   - Implemented recursive permission unlock (`chmod -R u+w`) prior to deletion to handle read-only directories in the Arch rootfs (`/etc/ca-certificates/extracted/cadir` mode `0555`), preventing `rm: Permission denied` failures on macOS APFS.
+   - Added automated interactive prompt handling for `[Y/n]` confirmations.
+   - Added post-upgrade verification commands (`fastfetch --version` and `sudo --version`).
+
+#### 3. Verification & Test Results
+- **Task ID**: `task-7946`
+- **Result**: **EXIT CODE 0 (100% SUCCESS)**
+  - Clean rootfs unpacked and VFS initialized.
+  - `pacman -Syy` completed 100% with exit code 0.
+  - `pacman -S sudo` completed 100% with exit code 0.
+  - `pacman -S fastfetch` completed 100% with exit code 0.
+  - `pacman -Su` upgraded all 77 packages (407 MiB download, 1.7 GiB installed):
+    - All 77 packages downloaded with 5 parallel streams without sliding-window or register faults.
+    - Keyring and integrity checks 100% passed.
+    - All 77 packages installed cleanly.
+    - All 15 post-transaction hooks ran to completion, including hook 14/15 (`mkinitcpio` building `initramfs-linux.img` via `gzip` compression running at 98.6% CPU).
+  - Post-upgrade verification:
+    - `fastfetch --version` -> `fastfetch 2.70.0 (aarch64)` (PASS)
+    - `sudo --version` -> `Sudo version 1.9.17p2` (PASS)
+- **Regression Suite**:
+  - `./run_tests.sh`: **329 / 329 tests passed (100% pass rate)**.
+
+
 
 
 
