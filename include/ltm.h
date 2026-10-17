@@ -644,6 +644,7 @@ int *ltm_get_child_tid_ptr(void);
 void ltm_set_child_tid_ptr(int *ptr);
 int64_t ltm_get_thread_tid(void);
 void ltm_set_thread_tid(int tid);
+void emulate_x18_instruction(void *state, uint32_t insn);
 
 /* Global runtime state */
 typedef struct {

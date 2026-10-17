@@ -3,6 +3,8 @@
 
 #include "ltm.h"
 
+#define ARM64_BRK_X18 (0xd4200000U | (0x1800U << 5))
+
 /* Scans memory buffer [addr, addr + size) for Linux svc #0 (0xd4000001)
  * and rewrites to brk #0 (0xd4200000). Buffer must be writable.
  * Returns number of instructions patched. */
@@ -20,5 +22,11 @@ void patcher_invalidate_cache(void *addr, size_t size);
 
 /* Reinitializes patcher mutex in child process after fork */
 void patcher_reset_on_fork(void);
+
+/* Universal x18 Virtualization Engine */
+void x18_register_patch(uintptr_t pc, uint32_t orig_insn);
+uint32_t x18_lookup_patch(uintptr_t pc);
+bool aarch64_insn_uses_x18(uint32_t insn);
+int patcher_patch_elf_mapped_file(int fd, void *mapped_addr, size_t mapped_len, off_t map_offset);
 
 #endif /* PATCHER_H */

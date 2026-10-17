@@ -168,11 +168,39 @@ static int elf_load_image(int fd, const char *filepath, uintptr_t pref_base,
                 return -1;
             }
         }
+    }
 
-        if (phdrs[i].p_flags & PF_X) {
-            bool is_interp = (out_interp == NULL);
-            size_t patched = patcher_scan_and_patch_ex((void *)seg_start, phdrs[i].p_filesz, is_interp);
-            ltm_log_debug("Segment %d (RX) of '%s': patched %zu instructions", i, filepath, patched);
+    /* Patch executable code: prefer section headers to avoid touching metadata/strings */
+    bool patched_via_sections = false;
+    if (ehdr.e_shoff != 0 && ehdr.e_shnum > 0 && ehdr.e_shentsize == sizeof(Elf64_Shdr)) {
+        size_t sh_size = ehdr.e_shnum * sizeof(Elf64_Shdr);
+        Elf64_Shdr *shdrs = malloc(sh_size);
+        if (shdrs) {
+            if (pread(fd, shdrs, sh_size, ehdr.e_shoff) == (ssize_t)sh_size) {
+                bool is_interp = (out_interp == NULL);
+                for (int s = 0; s < ehdr.e_shnum; s++) {
+                    if ((shdrs[s].sh_flags & 0x4 /* SHF_EXECINSTR */) && shdrs[s].sh_size > 0) {
+                        uintptr_t sec_addr = load_base + shdrs[s].sh_addr;
+                        size_t patched = patcher_scan_and_patch_ex((void *)sec_addr, shdrs[s].sh_size, is_interp);
+                        ltm_log_debug("Section %d (RX, size=0x%lx) of '%s': patched %zu instructions",
+                                      s, (unsigned long)shdrs[s].sh_size, filepath, patched);
+                    }
+                }
+                patched_via_sections = true;
+            }
+            free(shdrs);
+        }
+    }
+
+    if (!patched_via_sections) {
+        for (int i = 0; i < ehdr.e_phnum; i++) {
+            if (phdrs[i].p_type != PT_LOAD) continue;
+            if (phdrs[i].p_flags & PF_X) {
+                uintptr_t seg_start = load_base + phdrs[i].p_vaddr;
+                bool is_interp = (out_interp == NULL);
+                size_t patched = patcher_scan_and_patch_ex((void *)seg_start, phdrs[i].p_filesz, is_interp);
+                ltm_log_debug("Segment %d (RX) of '%s': patched %zu instructions", i, filepath, patched);
+            }
         }
     }
 

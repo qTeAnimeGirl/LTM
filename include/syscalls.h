@@ -394,9 +394,16 @@ static inline void *ltm_get_signal_stack(void) {
     uintptr_t cur_sp = 0;
     __asm__ volatile("mov %0, sp" : "=r"(cur_sp));
     if (g_alt_stack && cur_sp >= (uintptr_t)g_alt_stack && cur_sp <= (uintptr_t)g_alt_stack_top) {
-        return NULL; /* Already on host alternate stack */
+        return NULL; /* Already on main host alternate stack */
     }
-    return t_host_stack_top ? t_host_stack_top : g_alt_stack_top;
+    if (t_host_stack_top) {
+        uintptr_t th_base = (uintptr_t)t_host_stack_top - 1024 * 1024;
+        if (cur_sp >= th_base && cur_sp <= (uintptr_t)t_host_stack_top) {
+            return NULL; /* Already on thread host stack */
+        }
+        return t_host_stack_top;
+    }
+    return g_alt_stack_top;
 }
 
 void ltm_call_on_stack(void *fn, int sig, void *si, void *ctx, void *new_sp);

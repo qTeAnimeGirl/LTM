@@ -60,10 +60,30 @@ typedef struct {
 #define ELFMAG1       'E'
 #define ELFMAG2       'L'
 #define ELFMAG3       'F'
+#define ELFMAG        "\177ELF"
+#define SELFMAG       4
 
 #define ELFCLASS64    2
 #define ELFDATA2LSB   1
 #define EV_CURRENT    1
+
+/* ELF64 Section Header */
+typedef struct {
+    Elf64_Word  sh_name;      /* Section name (string tbl index) */
+    Elf64_Word  sh_type;      /* Section type */
+    Elf64_Xword sh_flags;     /* Section flags */
+    Elf64_Addr  sh_addr;      /* Section virtual addr at execution */
+    Elf64_Off   sh_offset;    /* Section file offset */
+    Elf64_Xword sh_size;      /* Section size in bytes */
+    Elf64_Word  sh_link;      /* Link to another section */
+    Elf64_Word  sh_info;      /* Additional section information */
+    Elf64_Xword sh_addralign; /* Section alignment */
+    Elf64_Xword sh_entsize;   /* Entry size if section holds table */
+} Elf64_Shdr;
+
+#define SHF_WRITE     0x1
+#define SHF_ALLOC     0x2
+#define SHF_EXECINSTR 0x4
 
 /* e_type values */
 #define ET_NONE       0

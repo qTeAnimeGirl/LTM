@@ -45,6 +45,8 @@ _ltm_jump_to_entry:
 
     br x16
 
+.global _ltm_resume_context_asm_start
+_ltm_resume_context_asm_start:
 .global _ltm_resume_context_asm
 _ltm_resume_context_asm:
     // x0 = pointer to arm_thread_state64_t
@@ -101,8 +103,7 @@ _ltm_resume_context_asm:
     br x16
 
 2:
-    // Virtualized x18 mode (inflate_table brk #0x1801..0x1804): jump via x18, restore x16 & x17
-    ldr x18, [x0, #256]     // Load target __pc into physical x18
+    // Virtualized x18 mode: jump via x18, restore x16 & x17
     ldp x16, x17, [x0, #128] // Restore guest x16 AND x17 from offset 128
     ldp x29, x30, [x0, #232]
     ldr x28, [x0, #224]
@@ -118,8 +119,12 @@ _ltm_resume_context_asm:
     ldp x6, x7, [x0, #48]
     ldp x4, x5, [x0, #32]
     ldp x2, x3, [x0, #16]
+    ldr x18, [x0, #256]     // Load target __pc into physical x18 right before jump
     ldp x0, x1, [x0, #0]
     br x18
+
+.global _ltm_resume_context_asm_end
+_ltm_resume_context_asm_end:
 
 .global _ltm_sigreturn_stub
 _ltm_sigreturn_stub:

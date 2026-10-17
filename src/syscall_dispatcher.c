@@ -1,6 +1,7 @@
 #include "linux_syscall_table.h"
 #include "syscalls.h"
 #include "elf_loader.h"
+#include "patcher.h"
 #include <dlfcn.h>
 
 void *g_alt_stack = NULL;
@@ -37,8 +38,735 @@ void ltm_resume_context_ex(void *state, void *neon, int use_x18) {
 }
 
 void ltm_resume_context(void *state, void *neon) {
-    ltm_resume_context_ex(state, neon, 0);
+    ltm_resume_context_ex(state, neon, 1);
     __builtin_unreachable();
+}
+
+static inline uint64_t get_reg(arm_thread_state64_t *s, int r) {
+    if (r == 31) return 0;
+    if (r == 18) return ltm_get_guest_x18();
+    if (r == 29) return s->__fp;
+    if (r == 30) return s->__lr;
+    return s->__x[r];
+}
+
+static inline void set_reg(arm_thread_state64_t *s, int r, uint64_t val) {
+    if (r == 31) return;
+    if (r == 18) {
+        ltm_set_guest_x18(val);
+    } else if (r == 29) {
+        s->__fp = val;
+    } else if (r == 30) {
+        s->__lr = val;
+    } else {
+        s->__x[r] = val;
+    }
+}
+
+static inline uint32_t get_wreg(arm_thread_state64_t *s, int r) {
+    return (uint32_t)get_reg(s, r);
+}
+
+static inline void set_wreg(arm_thread_state64_t *s, int r, uint32_t val) {
+    set_reg(s, r, (uint64_t)val);
+}
+
+static inline uint64_t eval_add_flags(uint64_t a, uint64_t b, uint32_t *cpsr, bool is_64) {
+    uint64_t res;
+    uint64_t nzcv;
+    if (is_64) {
+        __asm__ volatile (
+            "adds %0, %2, %3\n\t"
+            "mrs %1, nzcv\n\t"
+            : "=r"(res), "=r"(nzcv)
+            : "r"(a), "r"(b)
+            : "cc"
+        );
+    } else {
+        uint32_t r32;
+        __asm__ volatile (
+            "adds %w0, %w2, %w3\n\t"
+            "mrs %1, nzcv\n\t"
+            : "=r"(r32), "=r"(nzcv)
+            : "r"((uint32_t)a), "r"((uint32_t)b)
+            : "cc"
+        );
+        res = r32;
+    }
+    *cpsr = (*cpsr & 0x0fffffff) | (uint32_t)(nzcv & 0xf0000000);
+    return res;
+}
+
+static inline uint64_t eval_sub_flags(uint64_t a, uint64_t b, uint32_t *cpsr, bool is_64) {
+    uint64_t res;
+    uint64_t nzcv;
+    if (is_64) {
+        __asm__ volatile (
+            "subs %0, %2, %3\n\t"
+            "mrs %1, nzcv\n\t"
+            : "=r"(res), "=r"(nzcv)
+            : "r"(a), "r"(b)
+            : "cc"
+        );
+    } else {
+        uint32_t r32;
+        __asm__ volatile (
+            "subs %w0, %w2, %w3\n\t"
+            "mrs %1, nzcv\n\t"
+            : "=r"(r32), "=r"(nzcv)
+            : "r"((uint32_t)a), "r"((uint32_t)b)
+            : "cc"
+        );
+        res = r32;
+    }
+    *cpsr = (*cpsr & 0x0fffffff) | (uint32_t)(nzcv & 0xf0000000);
+    return res;
+}
+
+static inline bool condition_holds(uint32_t cond, uint32_t cpsr) {
+    bool n = (cpsr >> 31) & 1;
+    bool z = (cpsr >> 30) & 1;
+    bool c = (cpsr >> 29) & 1;
+    bool v = (cpsr >> 28) & 1;
+    switch (cond) {
+        case 0: return z;
+        case 1: return !z;
+        case 2: return c;
+        case 3: return !c;
+        case 4: return n;
+        case 5: return !n;
+        case 6: return v;
+        case 7: return !v;
+        case 8: return c && !z;
+        case 9: return !c || z;
+        case 10: return n == v;
+        case 11: return n != v;
+        case 12: return !z && (n == v);
+        case 13: return z || (n != v);
+        default: return true;
+    }
+}
+
+static inline uint64_t extend_reg(uint64_t val, uint32_t option, uint32_t shift) {
+    uint64_t res = 0;
+    switch (option) {
+        case 0: res = (uint8_t)val; break;         /* UXTB */
+        case 1: res = (uint16_t)val; break;        /* UXTH */
+        case 2: res = (uint32_t)val; break;        /* UXTW */
+        case 3: res = val; break;                  /* UXTX / LSL */
+        case 4: res = (int64_t)(int8_t)val; break; /* SXTB */
+        case 5: res = (int64_t)(int16_t)val; break;/* SXTH */
+        case 6: res = (int64_t)(int32_t)val; break;/* SXTW */
+        case 7: res = val; break;                  /* SXTX */
+    }
+    return res << shift;
+}
+
+static inline uint64_t shift_reg(uint64_t val, uint32_t shift_type, uint32_t amount, bool is_64) {
+    if (amount == 0) return val;
+    if (is_64) {
+        switch (shift_type) {
+            case 0: return val << amount;
+            case 1: return val >> amount;
+            case 2: return (uint64_t)((int64_t)val >> amount);
+            default: return val;
+        }
+    } else {
+        uint32_t v32 = (uint32_t)val;
+        switch (shift_type) {
+            case 0: return (uint32_t)(v32 << amount);
+            case 1: return (uint32_t)(v32 >> amount);
+            case 2: return (uint32_t)((int32_t)v32 >> amount);
+            default: return v32;
+        }
+    }
+}
+
+static inline uint64_t aarch64_decode_bit_masks(uint32_t N, uint32_t imms, uint32_t immr, bool sf) {
+    uint32_t val = (N << 6) | ((~imms) & 0x3f);
+    int len_bit = -1;
+    for (int i = 7; i >= 0; i--) {
+        if (val & (1 << i)) {
+            len_bit = i;
+            break;
+        }
+    }
+    if (len_bit < 1) return 0;
+    uint32_t esize = 1U << len_bit;
+    uint32_t levels = esize - 1;
+    uint32_t s = imms & levels;
+    uint32_t r = immr & levels;
+    uint64_t pattern = (s == 63) ? ~0ULL : ((1ULL << (s + 1)) - 1);
+    r = r % esize;
+    uint64_t mask = (pattern >> r) | ((pattern << (esize - r)) & ((esize == 64) ? ~0ULL : ((1ULL << esize) - 1)));
+    uint64_t result = 0;
+    uint32_t total_bits = sf ? 64 : 32;
+    for (uint32_t i = 0; i < total_bits; i += esize) {
+        result |= (mask << i);
+    }
+    return result;
+}
+
+void emulate_x18_instruction(void *state_ptr, uint32_t insn) {
+    arm_thread_state64_t *state = (arm_thread_state64_t *)state_ptr;
+    uint32_t rd  = insn & 0x1f;
+    uint32_t rn  = (insn >> 5) & 0x1f;
+    uint32_t rt2 = (insn >> 10) & 0x1f;
+    uint32_t rm  = (insn >> 16) & 0x1f;
+    bool sf = (insn & (1U << 31)) != 0;
+
+    /* Advance PC by 4 by default (branches may override) */
+    state->__pc += 4;
+
+    /* 1. Move wide immediate (MOVZ, MOVN, MOVK) */
+    if ((insn & 0x1f800000) == 0x12800000 || (insn & 0x1f800000) == 0x52800000 || (insn & 0x1f800000) == 0x72800000) {
+        uint32_t opc = (insn >> 29) & 0x3;
+        uint32_t hw = (insn >> 21) & 0x3;
+        uint64_t imm16 = (insn >> 5) & 0xffff;
+        uint32_t shift = hw * 16;
+        uint64_t val = 0;
+        if (opc == 0) { /* MOVN */
+            val = ~(imm16 << shift);
+            if (!sf) val = (uint32_t)val;
+        } else if (opc == 2) { /* MOVZ */
+            val = imm16 << shift;
+        } else if (opc == 3) { /* MOVK */
+            uint64_t cur = get_reg(state, rd);
+            uint64_t mask = ~((uint64_t)0xffff << shift);
+            val = (cur & mask) | (imm16 << shift);
+        }
+        if (sf) set_reg(state, rd, val);
+        else set_wreg(state, rd, (uint32_t)val);
+        return;
+    }
+
+    /* 2. Add / Sub Immediate */
+    if ((insn & 0x1f000000) == 0x11000000) {
+        uint32_t op = (insn >> 29) & 0x3;
+        uint32_t shift_bit = (insn >> 22) & 1;
+        uint64_t imm = (insn >> 10) & 0xfff;
+        if (shift_bit) imm <<= 12;
+
+        uint64_t a = (rn == 31) ? state->__sp : get_reg(state, rn);
+        uint64_t res = 0;
+
+        if (op == 0) { /* ADD */
+            res = sf ? (a + imm) : (uint32_t)(a + imm);
+            if (rd == 31) state->__sp = res;
+            else if (sf) set_reg(state, rd, res);
+            else set_wreg(state, rd, (uint32_t)res);
+        } else if (op == 1) { /* ADDS / CMN */
+            res = eval_add_flags(a, imm, &state->__cpsr, sf);
+            if (rd != 31) {
+                if (sf) set_reg(state, rd, res);
+                else set_wreg(state, rd, (uint32_t)res);
+            }
+        } else if (op == 2) { /* SUB */
+            res = sf ? (a - imm) : (uint32_t)(a - imm);
+            if (rd == 31) state->__sp = res;
+            else if (sf) set_reg(state, rd, res);
+            else set_wreg(state, rd, (uint32_t)res);
+        } else if (op == 3) { /* SUBS / CMP */
+            res = eval_sub_flags(a, imm, &state->__cpsr, sf);
+            if (rd != 31) {
+                if (sf) set_reg(state, rd, res);
+                else set_wreg(state, rd, (uint32_t)res);
+            }
+        }
+        return;
+    }
+
+    /* 3. Add / Sub Register (shifted or extended) */
+    if ((insn & 0x1f200000) == 0x0b000000 || (insn & 0x1f200000) == 0x0b200000) {
+        uint32_t op = (insn >> 29) & 0x3;
+        bool is_extended = (insn & 0x00200000) != 0;
+        uint64_t b = get_reg(state, rm);
+        if (is_extended) {
+            uint32_t opt = (insn >> 13) & 0x7;
+            uint32_t sh = (insn >> 10) & 0x7;
+            b = extend_reg(b, opt, sh);
+        } else {
+            uint32_t st = (insn >> 22) & 0x3;
+            uint32_t sh = (insn >> 10) & 0x3f;
+            b = shift_reg(b, st, sh, sf);
+        }
+        uint64_t a = (rn == 31 && is_extended) ? state->__sp : get_reg(state, rn);
+        uint64_t res = 0;
+
+        if (op == 0) { /* ADD */
+            res = sf ? (a + b) : (uint32_t)(a + b);
+            if (rd == 31) state->__sp = res;
+            else if (sf) set_reg(state, rd, res);
+            else set_wreg(state, rd, (uint32_t)res);
+        } else if (op == 1) { /* ADDS / CMN */
+            res = eval_add_flags(a, b, &state->__cpsr, sf);
+            if (rd != 31) {
+                if (sf) set_reg(state, rd, res);
+                else set_wreg(state, rd, (uint32_t)res);
+            }
+        } else if (op == 2) { /* SUB */
+            res = sf ? (a - b) : (uint32_t)(a - b);
+            if (rd == 31) state->__sp = res;
+            else if (sf) set_reg(state, rd, res);
+            else set_wreg(state, rd, (uint32_t)res);
+        } else if (op == 3) { /* SUBS / CMP */
+            res = eval_sub_flags(a, b, &state->__cpsr, sf);
+            if (rd != 31) {
+                if (sf) set_reg(state, rd, res);
+                else set_wreg(state, rd, (uint32_t)res);
+            }
+        }
+        return;
+    }
+
+    /* 4. Logical Register (shifted register) */
+    if ((insn & 0x1f000000) == 0x0a000000) {
+        uint32_t opc = (insn >> 29) & 0x3;
+        bool N = (insn & (1 << 21)) != 0;
+        uint32_t st = (insn >> 22) & 0x3;
+        uint32_t sh = (insn >> 10) & 0x3f;
+        uint64_t b = shift_reg(get_reg(state, rm), st, sh, sf);
+        if (N) b = ~b;
+        uint64_t a = get_reg(state, rn);
+        uint64_t res = 0;
+
+        if (opc == 0) res = a & b;       /* AND / BIC */
+        else if (opc == 1) res = a | b;  /* ORR / ORN (mov) */
+        else if (opc == 2) res = a ^ b;  /* EOR / EON */
+        else if (opc == 3) {             /* ANDS / BICS (TST) */
+            res = a & b;
+            state->__cpsr &= 0x0fffffff;
+            if (sf) {
+                if ((int64_t)res < 0) state->__cpsr |= 0x80000000;
+                if (res == 0) state->__cpsr |= 0x40000000;
+            } else {
+                if ((int32_t)res < 0) state->__cpsr |= 0x80000000;
+                if ((uint32_t)res == 0) state->__cpsr |= 0x40000000;
+            }
+        }
+
+        if (opc != 3 || rd != 31) {
+            if (sf) set_reg(state, rd, res);
+            else set_wreg(state, rd, (uint32_t)res);
+        }
+        return;
+    }
+
+    /* 4b. Logical (immediate) */
+    if ((insn & 0x1f800000) == 0x12000000) {
+        uint32_t opc = (insn >> 29) & 0x3;
+        uint32_t N = (insn >> 22) & 1;
+        uint32_t immr = (insn >> 16) & 0x3f;
+        uint32_t imms = (insn >> 10) & 0x3f;
+        uint64_t imm = aarch64_decode_bit_masks(N, imms, immr, sf);
+        uint64_t a = (rn == 31) ? state->__sp : (sf ? get_reg(state, rn) : get_wreg(state, rn));
+        uint64_t res = 0;
+
+        if (opc == 0) res = a & imm;       /* AND */
+        else if (opc == 1) res = a | imm;  /* ORR */
+        else if (opc == 2) res = a ^ imm;  /* EOR */
+        else if (opc == 3) {               /* ANDS (TST) */
+            res = a & imm;
+            state->__cpsr &= 0x0fffffff;
+            if (sf) {
+                if ((int64_t)res < 0) state->__cpsr |= 0x80000000;
+                if (res == 0) state->__cpsr |= 0x40000000;
+            } else {
+                if ((int32_t)res < 0) state->__cpsr |= 0x80000000;
+                if ((uint32_t)res == 0) state->__cpsr |= 0x40000000;
+            }
+        }
+
+        if (opc != 3 || rd != 31) {
+            if (rd == 31) state->__sp = res;
+            else if (sf) set_reg(state, rd, res);
+            else set_wreg(state, rd, (uint32_t)res);
+        }
+        return;
+    }
+
+    /* 4c. Extract (EXTR) */
+    if ((insn & 0x1f800000) == 0x13800000) {
+        uint32_t lsb = (insn >> 10) & 0x3f;
+        uint64_t val_n = get_reg(state, rn);
+        uint64_t val_m = get_reg(state, rm);
+        uint64_t res = 0;
+        if (sf) {
+            res = (lsb == 0) ? val_n : ((val_m << (64 - lsb)) | (val_n >> lsb));
+            set_reg(state, rd, res);
+        } else {
+            uint32_t vn = (uint32_t)val_n;
+            uint32_t vm = (uint32_t)val_m;
+            uint32_t r32 = (lsb == 0) ? vn : ((vm << (32 - lsb)) | (vn >> lsb));
+            set_wreg(state, rd, r32);
+        }
+        return;
+    }
+
+    /* 4d. Add / Sub with Carry (ADC, ADCS, SBC, SBCS) */
+    if ((insn & 0x1fe0fc00) == 0x1a000000) {
+        uint32_t op = (insn >> 30) & 1; /* 0 = ADC, 1 = SBC */
+        uint32_t S  = (insn >> 29) & 1; /* 1 = set flags */
+        bool c_in = (state->__cpsr & 0x20000000) != 0;
+        uint64_t a = sf ? get_reg(state, rn) : get_wreg(state, rn);
+        uint64_t b = sf ? get_reg(state, rm) : get_wreg(state, rm);
+        uint64_t res = 0;
+        if (op == 0) { /* ADC */
+            uint64_t carry = c_in ? 1 : 0;
+            res = a + b + carry;
+            if (S) {
+                uint32_t nzcv = 0;
+                bool cout = sf ? ((res < a) || (carry && res == a)) : ((uint32_t)res < (uint32_t)a || (carry && (uint32_t)res == (uint32_t)a));
+                bool vout = sf ? (((~(a ^ b) & (a ^ res)) >> 63) & 1) : (((~(a ^ b) & (a ^ res)) >> 31) & 1);
+                if (sf) {
+                    if ((int64_t)res < 0) nzcv |= 0x80000000;
+                    if (res == 0) nzcv |= 0x40000000;
+                } else {
+                    if ((int32_t)res < 0) nzcv |= 0x80000000;
+                    if ((uint32_t)res == 0) nzcv |= 0x40000000;
+                }
+                if (cout) nzcv |= 0x20000000;
+                if (vout) nzcv |= 0x10000000;
+                state->__cpsr = (state->__cpsr & 0x0fffffff) | nzcv;
+            }
+        } else { /* SBC */
+            uint64_t borrow = c_in ? 0 : 1;
+            res = a - b - borrow;
+            if (S) {
+                uint32_t nzcv = 0;
+                bool cout = sf ? (a >= b + borrow && (b + borrow >= b)) : ((uint32_t)a >= (uint32_t)b + borrow && ((uint32_t)b + borrow >= (uint32_t)b));
+                bool vout = sf ? ((((a ^ b) & (a ^ res)) >> 63) & 1) : ((((a ^ b) & (a ^ res)) >> 31) & 1);
+                if (sf) {
+                    if ((int64_t)res < 0) nzcv |= 0x80000000;
+                    if (res == 0) nzcv |= 0x40000000;
+                } else {
+                    if ((int32_t)res < 0) nzcv |= 0x80000000;
+                    if ((uint32_t)res == 0) nzcv |= 0x40000000;
+                }
+                if (cout) nzcv |= 0x20000000;
+                if (vout) nzcv |= 0x10000000;
+                state->__cpsr = (state->__cpsr & 0x0fffffff) | nzcv;
+            }
+        }
+        if (sf) set_reg(state, rd, res);
+        else set_wreg(state, rd, (uint32_t)res);
+        return;
+    }
+
+    /* 5. Conditional Select (CSEL, CSINC, CSINV, CSNEG) */
+    if ((insn & 0x1fe00000) == 0x1a800000) {
+        uint32_t cond = (insn >> 12) & 0xf;
+        uint32_t op = (insn >> 10) & 0x3;
+        bool cond_ok = condition_holds(cond, state->__cpsr);
+        uint64_t val_n = sf ? get_reg(state, rn) : get_wreg(state, rn);
+        uint64_t val_m = sf ? get_reg(state, rm) : get_wreg(state, rm);
+        uint64_t res = 0;
+
+        if (cond_ok) {
+            res = val_n;
+        } else {
+            if (op == 0) res = val_m;          /* CSEL */
+            else if (op == 1) res = val_m + 1; /* CSINC (CINC, CSET) */
+            else if (op == 2) res = ~val_m;    /* CSINV (CINV) */
+            else if (op == 3) res = -val_m;    /* CSNEG (CNEG) */
+        }
+        if (sf) set_reg(state, rd, res);
+        else set_wreg(state, rd, (uint32_t)res);
+        return;
+    }
+
+    /* 6. CCMP / CCMN (Conditional Compare) */
+    if ((insn & 0x1fc00000) == 0x1a400000) {
+        uint32_t cond = (insn >> 12) & 0xf;
+        bool cond_ok = condition_holds(cond, state->__cpsr);
+        if (cond_ok) {
+            bool is_imm = (insn & (1 << 11)) != 0;
+            bool is_ccmn = !(insn & (1 << 30));
+            uint64_t a = sf ? get_reg(state, rn) : get_wreg(state, rn);
+            uint64_t b = is_imm ? ((insn >> 16) & 0x1f) : (sf ? get_reg(state, rm) : get_wreg(state, rm));
+            if (is_ccmn) {
+                eval_add_flags(a, b, &state->__cpsr, sf);
+            } else {
+                eval_sub_flags(a, b, &state->__cpsr, sf);
+            }
+        } else {
+            uint32_t nzcv_imm = insn & 0xf;
+            state->__cpsr = (state->__cpsr & 0x0fffffff) | (nzcv_imm << 28);
+        }
+        return;
+    }
+
+    /* 6b. Variable Shifts (LSLV, LSRV, ASRV, RORV) */
+    if ((insn & 0x7fe0f800) == 0x1ac02000) {
+        uint32_t op = (insn >> 10) & 0x3;
+        uint64_t a = sf ? get_reg(state, rn) : get_wreg(state, rn);
+        uint64_t b = sf ? get_reg(state, rm) : get_wreg(state, rm);
+        uint32_t shift = (uint32_t)(b % (sf ? 64 : 32));
+        uint64_t res = 0;
+        if (op == 0) { /* LSLV */
+            res = sf ? (a << shift) : (uint32_t)((uint32_t)a << shift);
+        } else if (op == 1) { /* LSRV */
+            res = sf ? (a >> shift) : (uint32_t)((uint32_t)a >> shift);
+        } else if (op == 2) { /* ASRV */
+            res = sf ? (uint64_t)((int64_t)a >> shift) : (uint32_t)((int32_t)a >> shift);
+        } else if (op == 3) { /* RORV */
+            if (sf) {
+                res = (shift == 0) ? a : ((a >> shift) | (a << (64 - shift)));
+            } else {
+                uint32_t a32 = (uint32_t)a;
+                res = (shift == 0) ? a32 : ((a32 >> shift) | (a32 << (32 - shift)));
+            }
+        }
+        if (sf) set_reg(state, rd, res);
+        else set_wreg(state, rd, (uint32_t)res);
+        return;
+    }
+
+    /* 6c. Data Processing 1-Source (RBIT, CLZ, REV, REV16, REV32) */
+    if ((insn & 0x5fe0fc00) == 0x5ac00000) {
+        uint32_t opcode = (insn >> 10) & 0x3f;
+        uint64_t a = sf ? get_reg(state, rn) : get_wreg(state, rn);
+        uint64_t res = 0;
+        if (opcode == 0) { /* RBIT */
+            if (sf) {
+                for (int i = 0; i < 64; i++) if (a & (1ULL << i)) res |= (1ULL << (63 - i));
+            } else {
+                for (int i = 0; i < 32; i++) if (a & (1ULL << i)) res |= (1ULL << (31 - i));
+            }
+        } else if (opcode == 1) { /* CLZ */
+            if (sf) res = a ? (uint64_t)__builtin_clzll(a) : 64;
+            else res = (uint32_t)a ? (uint32_t)__builtin_clz((uint32_t)a) : 32;
+        } else if (opcode == 2) { /* CLS */
+            if (sf) res = __builtin_clrsbll((int64_t)a);
+            else res = __builtin_clrsb((int32_t)a);
+        } else if (opcode == 3) { /* REV */
+            if (sf) res = __builtin_bswap64(a);
+            else res = __builtin_bswap32((uint32_t)a);
+        } else if (opcode == 4 && sf) { /* REV32 */
+            res = ((uint64_t)__builtin_bswap32((uint32_t)(a >> 32)) << 32) | __builtin_bswap32((uint32_t)a);
+        } else if (opcode == 5) { /* REV16 */
+            if (sf) {
+                res = (((a & 0xFF00FF00FF00FF00ULL) >> 8) | ((a & 0x00FF00FF00FF00FFULL) << 8));
+            } else {
+                uint32_t a32 = (uint32_t)a;
+                res = (((a32 & 0xFF00FF00U) >> 8) | ((a32 & 0x00FF00FFU) << 8));
+            }
+        }
+        if (sf) set_reg(state, rd, res);
+        else set_wreg(state, rd, (uint32_t)res);
+        return;
+    }
+
+    /* 7. Multiply / Divide (MADD, MSUB, UMULH, SMULH, UDIV, SDIV) */
+    if ((insn & 0x1f000000) == 0x1b000000) {
+        uint32_t op31 = (insn >> 21) & 0x7;
+        uint32_t o0 = (insn >> 15) & 1;
+        uint64_t a = get_reg(state, rn);
+        uint64_t b = get_reg(state, rm);
+        uint64_t c = get_reg(state, rt2);
+        uint64_t res = 0;
+
+        if (op31 == 0) {
+            if (o0 == 0) { /* MADD */
+                res = sf ? (c + a * b) : (uint32_t)(c + (uint32_t)a * (uint32_t)b);
+            } else {       /* MSUB */
+                res = sf ? (c - a * b) : (uint32_t)(c - (uint32_t)a * (uint32_t)b);
+            }
+            if (sf) set_reg(state, rd, res);
+            else set_wreg(state, rd, (uint32_t)res);
+        } else if (op31 == 2 && sf) { /* UMULH */
+            res = (uint64_t)(((__uint128_t)a * (__uint128_t)b) >> 64);
+            set_reg(state, rd, res);
+        } else if (op31 == 1 && sf) { /* SMULH */
+            res = (uint64_t)(((__int128_t)(int64_t)a * (__int128_t)(int64_t)b) >> 64);
+            set_reg(state, rd, res);
+        }
+        return;
+    }
+    if ((insn & 0x1fe0fc00) == 0x1ac00800) { /* UDIV */
+        uint64_t b = get_reg(state, rm);
+        uint64_t a = get_reg(state, rn);
+        uint64_t res = 0;
+        if (sf) res = (b != 0) ? (a / b) : 0;
+        else res = ((uint32_t)b != 0) ? ((uint32_t)a / (uint32_t)b) : 0;
+        if (sf) set_reg(state, rd, res);
+        else set_wreg(state, rd, (uint32_t)res);
+        return;
+    }
+
+    /* 8. Branches (CBZ, CBNZ, TBZ, TBNZ) */
+    if ((insn & 0x7e000000) == 0x34000000) { /* CBZ / CBNZ */
+        bool is_cbnz = (insn & (1 << 24)) != 0;
+        int64_t imm19 = (insn >> 5) & 0x7ffff;
+        if (imm19 & 0x40000) imm19 -= 0x80000;
+        uint64_t val = sf ? get_reg(state, rd) : get_wreg(state, rd);
+        bool take = is_cbnz ? (val != 0) : (val == 0);
+        if (take) {
+            state->__pc = (state->__pc - 4) + imm19 * 4;
+        }
+        return;
+    }
+    if ((insn & 0x7e000000) == 0x36000000) { /* TBZ / TBNZ */
+        bool is_tbnz = (insn & (1 << 24)) != 0;
+        uint32_t bit = ((insn >> 19) & 0x1f) | ((insn >> 26) & 0x20);
+        int64_t imm14 = (insn >> 5) & 0x3fff;
+        if (imm14 & 0x2000) imm14 -= 0x4000;
+        uint64_t val = get_reg(state, rd);
+        bool bit_set = (val & (1ULL << bit)) != 0;
+        bool take = is_tbnz ? bit_set : !bit_set;
+        if (take) {
+            state->__pc = (state->__pc - 4) + imm14 * 4;
+        }
+        return;
+    }
+
+    /* 9. ADR / ADRP */
+    if ((insn & 0x1f000000) == 0x10000000) {
+        bool is_adrp = (insn & (1U << 31)) != 0;
+        uint64_t immlo = (insn >> 29) & 0x3;
+        uint64_t immhi = (insn >> 5) & 0x7ffff;
+        int64_t imm21 = (immhi << 2) | immlo;
+        if (imm21 & 0x100000) imm21 -= 0x200000;
+
+        uint64_t pc = state->__pc - 4;
+        uint64_t res = is_adrp ? ((pc & ~0xfffULL) + (imm21 << 12)) : (pc + imm21);
+        set_reg(state, rd, res);
+        return;
+    }
+
+    /* 10. Loads and Stores (LDR, STR, LDP, STP, LDUR, STUR, LDRB, STRB, LDRH, STRH) */
+    if ((insn & 0x0a000000) == 0x08000000) {
+        uint64_t base = (rn == 31) ? state->__sp : get_reg(state, rn);
+        uint64_t ea = base;
+
+        /* Load/Store Pair */
+        if ((insn & 0x3a000000) == 0x28000000) {
+            bool is_load = (insn & (1 << 22)) != 0;
+            int64_t imm7 = (insn >> 15) & 0x7f;
+            if (imm7 & 0x40) imm7 -= 0x80;
+            uint32_t scale = sf ? 3 : 2;
+            int64_t offset = imm7 << scale;
+            uint32_t mode = (insn >> 23) & 0x3; /* 1: post-index, 2: signed offset, 3: pre-index */
+
+            if (mode == 1) ea = base;
+            else ea = base + offset;
+
+            if (is_load) {
+                if (sf) {
+                    set_reg(state, rd, *(uint64_t *)ea);
+                    set_reg(state, rt2, *(uint64_t *)(ea + 8));
+                } else {
+                    set_wreg(state, rd, *(uint32_t *)ea);
+                    set_wreg(state, rt2, *(uint32_t *)(ea + 4));
+                }
+            } else {
+                if (sf) {
+                    *(uint64_t *)ea = get_reg(state, rd);
+                    *(uint64_t *)(ea + 8) = get_reg(state, rt2);
+                } else {
+                    *(uint32_t *)ea = get_wreg(state, rd);
+                    *(uint32_t *)(ea + 4) = get_wreg(state, rt2);
+                }
+            }
+
+            if (mode == 1) base += offset;
+            else if (mode == 3) base += offset;
+            if (mode == 1 || mode == 3) {
+                if (rn == 31) state->__sp = base;
+                else set_reg(state, rn, base);
+            }
+            return;
+        }
+
+        /* Register offset */
+        if ((insn & 0x3b200c00) == 0x38200800) {
+            uint32_t opt = (insn >> 13) & 0x7;
+            bool S = (insn & (1 << 12)) != 0;
+            uint32_t size = (insn >> 30) & 0x3;
+            uint32_t shift = S ? size : 0;
+            uint64_t offset = extend_reg(get_reg(state, rm), opt, shift);
+            ea = base + offset;
+        } else if ((insn & 0x3b200000) == 0x38000000) {
+            /* Unscaled immediate (LDUR / STUR) */
+            int64_t imm9 = (insn >> 12) & 0x1ff;
+            if (imm9 & 0x100) imm9 -= 0x200;
+            ea = base + imm9;
+        } else {
+            /* Scaled unsigned immediate offset */
+            uint32_t size = (insn >> 30) & 0x3;
+            uint64_t imm12 = (insn >> 10) & 0xfff;
+            ea = base + (imm12 << size);
+        }
+
+        uint32_t size = (insn >> 30) & 0x3;
+        uint32_t opc = (insn >> 22) & 0x3;
+        bool is_load = (opc != 0);
+
+        if (size == 0) { /* 8-bit */
+            if (is_load) {
+                uint8_t byte = *(uint8_t *)ea;
+                if (opc == 2) set_reg(state, rd, (int64_t)(int8_t)byte); /* LDRSB */
+                else set_wreg(state, rd, byte); /* LDRB */
+            } else {
+                *(uint8_t *)ea = (uint8_t)get_wreg(state, rd); /* STRB */
+            }
+        } else if (size == 1) { /* 16-bit */
+            if (is_load) {
+                uint16_t half = *(uint16_t *)ea;
+                if (opc == 2) set_reg(state, rd, (int64_t)(int16_t)half); /* LDRSH */
+                else set_wreg(state, rd, half); /* LDRH */
+            } else {
+                *(uint16_t *)ea = (uint16_t)get_wreg(state, rd); /* STRH */
+            }
+        } else if (size == 2) { /* 32-bit */
+            if (is_load) {
+                uint32_t word = *(uint32_t *)ea;
+                if (opc == 2) set_reg(state, rd, (int64_t)(int32_t)word); /* LDRSW */
+                else set_wreg(state, rd, word); /* LDR Wd */
+            } else {
+                *(uint32_t *)ea = get_wreg(state, rd); /* STR Wd */
+            }
+        } else if (size == 3) { /* 64-bit */
+            if (is_load) {
+                set_reg(state, rd, *(uint64_t *)ea); /* LDR Xd */
+            } else {
+                *(uint64_t *)ea = get_reg(state, rd); /* STR Xd */
+            }
+        }
+        return;
+    }
+
+    /* 11. Bitfield (UBFM, SBFM, BFM) */
+    if ((insn & 0x1f800000) == 0x53000000 || (insn & 0x1f800000) == 0x13000000) {
+        bool is_sbfm = (insn & 0x1f800000) == 0x13000000;
+        uint32_t immr = (insn >> 16) & (sf ? 0x3f : 0x1f);
+        uint32_t imms = (insn >> 10) & (sf ? 0x3f : 0x1f);
+        uint64_t src = sf ? get_reg(state, rn) : get_wreg(state, rn);
+        uint64_t res = 0;
+
+        if (imms >= immr) {
+            /* Bitfield extract: ubfx / sbfx / lsr */
+            uint32_t width = imms - immr + 1;
+            uint64_t mask = (width == 64) ? ~0ULL : ((1ULL << width) - 1);
+            res = (src >> immr) & mask;
+            if (is_sbfm && (res & (1ULL << (width - 1)))) {
+                /* Sign-extend */
+                res |= ~mask;
+            }
+        } else {
+            /* Bitfield insert / LSL / ubfiz */
+            uint32_t width = imms + 1;
+            uint32_t lshift = (sf ? 64 : 32) - immr;
+            uint64_t mask = ((1ULL << width) - 1);
+            res = (src & mask) << lshift;
+        }
+
+        if (sf) set_reg(state, rd, res);
+        else set_wreg(state, rd, (uint32_t)res);
+        return;
+    }
+
+    ltm_log_error("Unhandled x18 emulation instruction 0x%08x at PC=%p", insn, (void *)(state->__pc - 4));
 }
 
 void ltm_sig_handler_impl(int sig, siginfo_t *si, void *ctx) {
@@ -46,11 +774,7 @@ void ltm_sig_handler_impl(int sig, siginfo_t *si, void *ctx) {
     arm_thread_state64_t *state = &uc->uc_mcontext->__ss;
     arm_neon_state64_t *neon = &uc->uc_mcontext->__ns;
 
-    if (state->__x[18] != 0) {
-        ltm_set_guest_x18(state->__x[18]);
-    } else {
-        state->__x[18] = ltm_get_guest_x18();
-    }
+    state->__x[18] = ltm_get_guest_x18();
 
     uint32_t insn = *(uint32_t *)state->__pc;
 
@@ -76,49 +800,49 @@ void ltm_sig_handler_impl(int sig, siginfo_t *si, void *ctx) {
 
         if (op == 0xd5380000U) {
             /* mrs Xt, MIDR_EL1 */
-            if (reg < 31) state->__x[reg] = 0x610f0300ULL; /* Apple Silicon M-series */
+            if (reg < 31) set_reg(state, reg, 0x610f0300ULL); /* Apple Silicon M-series */
             state->__pc += 4;
-            ltm_resume_context(state, neon);
+            ltm_resume_context_ex(state, neon, 1);
         } else if (op == 0xd53b0020U) {
             /* mrs Xt, CTR_EL0 */
-            if (reg < 31) state->__x[reg] = 0x8444c004ULL; /* 64-byte I/D cache lines */
+            if (reg < 31) set_reg(state, reg, 0x8444c004ULL); /* 64-byte I/D cache lines */
             state->__pc += 4;
-            ltm_resume_context(state, neon);
+            ltm_resume_context_ex(state, neon, 1);
         } else if (op == 0xd5380600U) {
             /* mrs Xt, ID_AA64ISAR0_EL1 */
-            if (reg < 31) state->__x[reg] = 0x00011120ULL; /* AES, SHA1, SHA2, CRC32, ATOMICS */
+            if (reg < 31) set_reg(state, reg, 0x00011120ULL); /* AES, SHA1, SHA2, CRC32, ATOMICS */
             state->__pc += 4;
-            ltm_resume_context(state, neon);
+            ltm_resume_context_ex(state, neon, 1);
         } else if (op == 0xd5380620U) {
             /* mrs Xt, ID_AA64ISAR1_EL1 */
-            if (reg < 31) state->__x[reg] = 0x00000022ULL; /* DP, FCMA, JSCVT */
+            if (reg < 31) set_reg(state, reg, 0x00000022ULL); /* DP, FCMA, JSCVT */
             state->__pc += 4;
-            ltm_resume_context(state, neon);
+            ltm_resume_context_ex(state, neon, 1);
         } else if (op == 0xd5380400U) {
             /* mrs Xt, ID_AA64PFR0_EL1 */
-            if (reg < 31) state->__x[reg] = 0x00000011ULL; /* FP, AdvSIMD, AArch64 */
+            if (reg < 31) set_reg(state, reg, 0x00000011ULL); /* FP, AdvSIMD, AArch64 */
             state->__pc += 4;
-            ltm_resume_context(state, neon);
+            ltm_resume_context_ex(state, neon, 1);
         } else if (op == 0xd5380420U) {
             /* mrs Xt, ID_AA64PFR1_EL1 */
-            if (reg < 31) state->__x[reg] = 0x0ULL;
+            if (reg < 31) set_reg(state, reg, 0x0ULL);
             state->__pc += 4;
-            ltm_resume_context(state, neon);
+            ltm_resume_context_ex(state, neon, 1);
         } else if (op == 0xd5380700U) {
             /* mrs Xt, ID_AA64MMFR0_EL1 */
-            if (reg < 31) state->__x[reg] = 0x00000005ULL; /* 48-bit VA, 16KB/4KB granule */
+            if (reg < 31) set_reg(state, reg, 0x00000005ULL); /* 48-bit VA, 16KB/4KB granule */
             state->__pc += 4;
-            ltm_resume_context(state, neon);
+            ltm_resume_context_ex(state, neon, 1);
         } else if (op == 0xd5380720U) {
             /* mrs Xt, ID_AA64MMFR1_EL1 */
-            if (reg < 31) state->__x[reg] = 0x0ULL;
+            if (reg < 31) set_reg(state, reg, 0x0ULL);
             state->__pc += 4;
-            ltm_resume_context(state, neon);
+            ltm_resume_context_ex(state, neon, 1);
         } else if (op == 0xd5380500U) {
             /* mrs Xt, ID_AA64DFR0_EL1 */
-            if (reg < 31) state->__x[reg] = 0x00000006ULL;
+            if (reg < 31) set_reg(state, reg, 0x00000006ULL);
             state->__pc += 4;
-            ltm_resume_context(state, neon);
+            ltm_resume_context_ex(state, neon, 1);
         }
         ltm_crash_handler(sig, si, ctx);
         return;
@@ -134,13 +858,14 @@ void ltm_sig_handler_impl(int sig, siginfo_t *si, void *ctx) {
             /* Virtualized TLS read: mrs Xt, TPIDR_EL0 */
             if (reg < 31) {
                 uint64_t tls = ltm_get_guest_tls();
-                state->__x[reg] = tls;
                 if (reg == 18) {
                     ltm_set_guest_x18(tls);
+                } else {
+                    state->__x[reg] = tls;
                 }
             }
             state->__pc += 4;
-            ltm_resume_context(state, neon);
+            ltm_resume_context_ex(state, neon, 1);
         } else if (type == 2) {
             /* Virtualized TLS write: msr TPIDR_EL0, Xt */
             if (reg < 31) {
@@ -150,7 +875,21 @@ void ltm_sig_handler_impl(int sig, siginfo_t *si, void *ctx) {
                 ltm_set_guest_tls(0); /* xzr */
             }
             state->__pc += 4;
-            ltm_resume_context(state, neon);
+            ltm_resume_context_ex(state, neon, 1);
+        } else if (imm == 0x1800U) {
+            /* Universal Real-Time x18 Virtualization Engine */
+            uint32_t orig_insn = x18_lookup_patch(state->__pc);
+            if (!orig_insn) {
+                ltm_log_error("x18 patch lookup failed for PC=%p", (void *)state->__pc);
+                handle_kill(getpid(), SIGTRAP);
+                return;
+            }
+            emulate_x18_instruction(state, orig_insn);
+            if (ltm_check_and_deliver_pending_signals(state, neon)) {
+                ltm_resume_context(state, neon);
+            } else {
+                ltm_resume_context_ex(state, neon, 1);
+            }
         } else if (imm != 0) {
             ltm_log_error("Unhandled brk #0x%x at PC=%p", imm, (void *)state->__pc);
             handle_kill(getpid(), SIGTRAP);

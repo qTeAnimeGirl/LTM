@@ -2178,8 +2178,13 @@ static void ltm_host_signal_handler_impl(int d_sig, siginfo_t *info, void *ucont
     ltm_log_debug("[pid=%d] ltm_host_signal_handler: d_sig=%d (l_sig=%d), PC=0x%llx, SP=0x%llx, handler=%p",
                   getpid(), d_sig, l_sig, (unsigned long long)cur_state->__pc, (unsigned long long)cur_state->__sp, act->l_handler);
 
+    extern char ltm_resume_context_asm_start[];
+    extern char ltm_resume_context_asm_end[];
+    bool in_trampoline = (cur_state->__pc >= (uintptr_t)ltm_resume_context_asm_start &&
+                          cur_state->__pc < (uintptr_t)ltm_resume_context_asm_end);
+
     Dl_info dlinfo;
-    bool in_host = (s_in_host_syscall != 0) || (dladdr((void *)cur_state->__pc, &dlinfo) != 0);
+    bool in_host = (s_in_host_syscall != 0) || in_trampoline || (dladdr((void *)cur_state->__pc, &dlinfo) != 0);
 
     /* If the signal is blocked by the guest thread, OR if we are executing host C code, defer delivery */
     if ((s_guest_sigmask & (1ULL << (l_sig - 1))) || in_host) {
@@ -2267,11 +2272,7 @@ static void ltm_host_signal_handler_impl(int d_sig, siginfo_t *info, void *ucont
         frame->siginfo._sifields._sigfault._addr = info->si_addr;
     }
 
-    if (cur_state->__x[18] != 0) {
-        ltm_set_guest_x18(cur_state->__x[18]);
-    } else {
-        cur_state->__x[18] = ltm_get_guest_x18();
-    }
+    cur_state->__x[18] = ltm_get_guest_x18();
     memcpy(&frame->saved_state, cur_state, sizeof(arm_thread_state64_t));
     frame->saved_state.__x[18] = ltm_get_guest_x18();
     memcpy(&frame->saved_neon, cur_neon, sizeof(arm_neon_state64_t));
@@ -2561,22 +2562,31 @@ int64_t handle_mmap(void *addr, size_t length, int prot, int flags, int fd, off_
     }
 
     if (prot & PROT_EXEC) {
-        size_t patch_len = aligned_len;
+        bool handled = false;
         if (fd >= 0) {
-            struct stat st;
-            if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
-                if ((off_t)offset < st.st_size) {
-                    size_t avail = (size_t)(st.st_size - offset);
-                    if (patch_len > avail) {
-                        patch_len = avail;
-                    }
-                } else {
-                    patch_len = 0;
-                }
+            int r = patcher_patch_elf_mapped_file(fd, res, aligned_len, offset);
+            if (r >= 0) {
+                handled = true;
             }
         }
-        if (patch_len > 0) {
-            patcher_patch_executable_range(res, patch_len);
+        if (!handled) {
+            size_t patch_len = aligned_len;
+            if (fd >= 0) {
+                struct stat st;
+                if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
+                    if ((off_t)offset < st.st_size) {
+                        size_t avail = (size_t)(st.st_size - offset);
+                        if (patch_len > avail) {
+                            patch_len = avail;
+                        }
+                    } else {
+                        patch_len = 0;
+                    }
+                }
+            }
+            if (patch_len > 0) {
+                patcher_patch_executable_range(res, patch_len);
+            }
         }
     }
 
@@ -3153,6 +3163,7 @@ int64_t handle_clone(uint64_t flags, void *stack, int *ptid, void *tls, int *cti
             targ.state.__x[0] = 0;
             targ.state.__pc += 4;
             targ.state.__sp = (uintptr_t)targ.stack;
+            targ.state.__x[18] = ltm_get_guest_x18();
         }
 
         pthread_mutex_init(&targ.lock, NULL);
