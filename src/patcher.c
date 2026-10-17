@@ -37,69 +37,6 @@ size_t patcher_scan_and_patch_ex(void *addr, size_t size, bool is_interp) {
             code[i] = 0xd4200000U | (imm << 5);
             count++;
 
-        } else if (insn == 0x0b150241U && (i + 1 < num_instrs) && code[i + 1] == 0x8b010201U) {
-            /* TRACEABILITY: Addresses guest crash Signal 11 (fault_addr=0x50012b31e / 0x500118eb4).
-             * In libz.so.1 inflate_fast:
-             *   80f0: add w1, w18, w21   (0x0b150241)
-             *   80f4: add x1, x16, x1    (0x8b010201)
-             * On Darwin ARM64, register x18 is platform-reserved and clobbered by XNU scheduler.
-             * Register w18 holds state->wsize, which is 0x8000 (32768, 32KB window size).
-             * Rewrite to direct immediate addition without relying on register x18:
-             *   add w1, w21, #0x8, lsl #12 (0x114022a1) -> computes w1 = w21 + 0x8000 natively! */
-            code[i] = 0x114022a1U;
-            count++;
-        } else if (insn == 0x0b0f0241U && (i + 3 < num_instrs) && code[i + 3] == 0x8b010201U) {
-            /* TRACEABILITY: Addresses guest crash Signal 11 (fault_addr=0x50012b31e / 0x500118eb4).
-             * In libz.so.1 inflate_fast:
-             *   7fb8: add w1, w18, w15   (0x0b0f0241)
-             * Rewrite to direct immediate addition without relying on register x18:
-             *   add w1, w15, #0x8, lsl #12 (0x114021e1) -> computes w1 = w15 + 0x8000 natively! */
-            code[i] = 0x114021e1U;
-            count++;
-        } else if (insn == 0xf9401412U && (i + 1 < num_instrs) && code[i + 1] == 0xf9401245U) {
-            /* TRACEABILITY: Addresses Glibc _int_malloc Signal 11 crash at 0x97f9c (str x3, [x18, #32]).
-             * On Darwin ARM64, register x18 is platform-reserved and clobbered by XNU scheduler
-             * during timer interrupts and preemption.
-             * Register x2 is dead throughout this entire block (last set at 0x97e58, overwritten at 0x98018).
-             * Register x17 is live across this block (holding bk for list insertion at 0x97fc4).
-             * Rewrite x18 to x2 in this critical largebin insertion sequence:
-             *   ldr x18, [x0, #40]         -> ldr x2, [x0, #40]        (0xf9401402)
-             *   ldr x5, [x18, #32]         -> ldr x5, [x2, #32]        (0xf9401045)
-             *   stp x5, x18, [x3, #32]     -> stp x5, x2, [x3, #32]    (0xa9020865)
-             *   str x3, [x18, #32]         -> str x3, [x2, #32]        (0xf9001043)
-             */
-            code[i]     = 0xf9401402U; /* ldr x2, [x0, #40] */
-            code[i + 1] = 0xf9401045U; /* ldr x5, [x2, #32] */
-            if (i + 4 < num_instrs && code[i + 4] == 0xa9024865U) {
-                code[i + 4] = 0xa9020865U; /* stp x5, x2, [x3, #32] */
-            }
-            if (i + 5 < num_instrs && code[i + 5] == 0xf9001243U) {
-                code[i + 5] = 0xf9001043U; /* str x3, [x2, #32] */
-            }
-            ltm_log_info("Patcher: rewrote Glibc _int_malloc x18 sequence to x2 at %p", &code[i]);
-            count++;
-        } else if (insn == 0x52800012U && (i + 4 < num_instrs) && (code[i + 4] == 0x787258a8U || code[i + 4] == (0xd4200000U | (0x1802U << 5)))) {
-            /* TRACEABILITY: Addresses guest crash SIGBUS at 0x104a3adc8 in libz.so.1 inflate_table.
-             * In inflate_table (inftrees.c line 221):
-             *   ad90: mov w18, #0                   (0x52800012)
-             *   ada0: ldrh w8, [x5, w18, uxtw #1]   (0x787258a8)
-             * Darwin XNU wipes physical register x18 during preemption and interrupts,
-             * causing the symbol counter w18 to reset mid-loop and underflow count[len].
-             * Rewrite to virtualized w18 brk traps backed by thread-local memory: */
-            code[i] = 0xd4200000U | (0x1801U << 5);     /* brk #0x1801: set s_guest_x18 = 0 */
-            code[i + 4] = 0xd4200000U | (0x1802U << 5); /* brk #0x1802: ldrh w8, [x5, s_guest_x18 * 2] */
-            ltm_log_info("Patcher: virtualized libz inflate_table w18 init/read to brk #0x1801/0x1802 at %p", &code[i]);
-            count += 2;
-        } else if (insn == 0x11000652U && (i + 8 < num_instrs) && (code[i + 8] == 0x787258a2U || code[i + 8] == (0xd4200000U | (0x1804U << 5)))) {
-            /* TRACEABILITY: Addresses guest crash SIGBUS at 0x104a3adc8 in libz.so.1 inflate_table.
-             * In inflate_table (inftrees.c line 221):
-             *   ae34: add w18, w18, #1              (0x11000652)
-             *   ae54: ldrh w2, [x5, w18, uxtw #1]   (0x787258a2)
-             * Rewrite to virtualized w18 brk traps backed by thread-local memory: */
-            code[i] = 0xd4200000U | (0x1803U << 5);     /* brk #0x1803: s_guest_x18++ */
-            code[i + 8] = 0xd4200000U | (0x1804U << 5); /* brk #0x1804: ldrh w2, [x5, s_guest_x18 * 2] */
-            ltm_log_info("Patcher: virtualized libz inflate_table w18 inc/read to brk #0x1803/0x1804 at %p", &code[i]);
-            count += 2;
         }
     }
 
