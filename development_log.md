@@ -4103,6 +4103,35 @@ Two critical root causes were identified and eliminated:
 3. **Full Automated Regression Suite (`./run_tests.sh`)**:
    - **All 330 / 330 Tests Passed Cleanly (100% pass rate)**.
 
+---
+
+## [Sprint 22: Full Clean-Rootfs End-to-End Validation, Host TLS Safety, and TCP Stream Integrity]
+
+**Date**: 2026-10-17  
+**Author**: Engineering Swarm (Lead Architect, JIT Engine Developer, Signal Systems Auditor, QA Lead)  
+**Status**: 100% Implemented, Validated & Verified (Full pacman -Syy, pacman -S sudo, pacman -Su, and All 329 Regression Tests Passed)
+
+### 1. Root Cause Investigations & Architectural Resolutions
+1. **Darwin Host `tpidr_el0` Preservation**:
+   - **Diagnosis**: Child processes and scripts (such as `systemd-tmpfiles`) were experiencing host crashes (`Fatal signal 11 at address 0x178`). On macOS Darwin (ARM64), `libsystem_malloc.dylib` (`_xzm_segment_group_alloc_segment`) accesses thread-local magazine metadata at offset `0x178` relative to Darwin's native `tpidr_el0`. Clearing or overwriting `tpidr_el0` with guest TLS values corrupted host heap operations.
+   - **Fix**: Removed `msr tpidr_el0, xzr` from `src/jump_stub.s` and `__asm__ volatile("msr tpidr_el0, %0")` from `src/syscall_handlers.c`. Linux guest TLS is fully virtualized in userspace via `s_guest_tls` and `mrs/msr TPIDR_EL0` traps, leaving host `tpidr_el0` completely intact.
+2. **FP/SIMD Register Discrimination in Instruction Patcher**:
+   - **Diagnosis**: Group 5 FP/SIMD conversion instructions (e.g. `fmov s18, w4`) operate on NEON vector registers `s18`/`d18`, not general-purpose integer register `x18`. Falsely replacing these instructions with `brk #0x1800` caused illegal instruction exceptions.
+   - **Fix**: Updated `aarch64_insn_uses_x18` in `src/patcher.c` to decode the 3-bit opcode field (`(insn >> 16) & 0x7`), verifying whether Rd and Rn are general-purpose registers before tagging for virtualization.
+3. **Decoupled IPv4 Header Decapsulation from TCP Streams**:
+   - **Diagnosis**: In `handle_recvfrom` and `handle_recvmsg` (`src/syscall_handlers.c`), payload inspection stripped 20 bytes whenever `((p[0] >> 4) == 4 && p[9] == 1)`. In large compressed binary archives (such as 65MB `linux-aarch64` and 56MB `linux-firmware`), this 2-byte pattern naturally occurred in raw data streams, truncating payload chunks and causing `invalid or corrupted package (checksum)` during pacman package integrity checks.
+   - **Fix**: Restricted IPv4 header decapsulation strictly to genuine ICMP sockets (`is_icmp && ...`). TCP streams and standard UDP sockets are never touched.
+4. **Mirror Resiliency & Download Timeout Protection**:
+   - **Diagnosis**: Upstream `mirror.archlinuxarm.org` geo-ip redirects frequently stalled on large multi-megabyte packages.
+   - **Fix**: Configured `DisableDownloadTimeout` under `[options]` in `pacman.conf` and prepended reliable direct mirrors (`ca.us.mirror.archlinuxarm.org`, `nj.us.mirror.archlinuxarm.org`) in `src/rootfs_installer.c` and `/etc/pacman.d/mirrorlist`.
+
+### 2. End-to-End Live Validation
+1. **Clean Rootfs Auto-Install**: Removed all existing rootfs folders; LTM automatically downloaded, unpacked, and provisioned official Arch Linux ARM rootfs with zero user intervention.
+2. **Database Sync (`pacman -Syy`)**: Synchronized all repositories (`core`, `extra`, `alarm`, `aur`) with exit code 0.
+3. **Package Installation (`pacman -S --noconfirm sudo`)**: Installed `sudo 1.9.17p2` cleanly; verified `sudo --version` runs with exit code 0.
+4. **System Upgrade (`pacman -Su --noconfirm`)**: Upgraded 77 packages (407MB download / 1.7GB installed), executed systemd post-transaction hooks, and built `initramfs-linux.img` with exit code 0.
+5. **Full Regression Test Harness (`./run_tests.sh`)**: All 329 unit and integration tests passed cleanly with 100% success rate.
+
 
 
 

@@ -181,7 +181,8 @@ static void configure_pacman_conf(const char *rootfs_dir) {
 
         /* Check if sandbox directives are already present */
         if (strstr(line, "DisableSandboxFilesystem") != NULL ||
-            strstr(line, "DisableSandboxSyscalls") != NULL) {
+            strstr(line, "DisableSandboxSyscalls") != NULL ||
+            strstr(line, "DisableDownloadTimeout") != NULL) {
             inserted_sandboxing = true;
         }
 
@@ -189,7 +190,7 @@ static void configure_pacman_conf(const char *rootfs_dir) {
 
         /* Insert sandboxing directives after [options] section */
         if (!inserted_sandboxing && strcmp(line, "[options]") == 0) {
-            dst += sprintf(dst, "DisableSandboxFilesystem\nDisableSandboxSyscalls\n");
+            dst += sprintf(dst, "DisableSandboxFilesystem\nDisableSandboxSyscalls\nDisableDownloadTimeout\n");
             inserted_sandboxing = true;
         }
     }
@@ -418,22 +419,64 @@ void ensure_rootfs_configured(const char *rootfs_dir) {
         if (f) {
             char line[512];
             bool has_disable_fs = false;
+            bool has_disable_timeout = false;
             bool has_alpm_user = false;
             while (fgets(line, sizeof(line), f)) {
                 if (strstr(line, "DisableSandboxFilesystem") != NULL) {
                     has_disable_fs = true;
+                }
+                if (strstr(line, "DisableDownloadTimeout") != NULL) {
+                    has_disable_timeout = true;
                 }
                 if (strstr(line, "DownloadUser") != NULL && strstr(line, "alpm") != NULL && line[0] != '#') {
                     has_alpm_user = true;
                 }
             }
             fclose(f);
-            if (has_disable_fs && !has_alpm_user) {
+            if (has_disable_fs && has_disable_timeout && !has_alpm_user) {
                 needs_config = false;
             }
         }
         if (needs_config) {
             configure_pacman_conf(rootfs_dir);
+        }
+    }
+
+    /* Verify pacman.d/mirrorlist has fallback US mirrors enabled */
+    char mirrorlist_path[1024];
+    snprintf(mirrorlist_path, sizeof(mirrorlist_path), "%s/etc/pacman.d/mirrorlist", rootfs_dir);
+    if (access(mirrorlist_path, F_OK) == 0) {
+        FILE *mf = fopen(mirrorlist_path, "r");
+        if (mf) {
+            fseek(mf, 0, SEEK_END);
+            long msz = ftell(mf);
+            fseek(mf, 0, SEEK_SET);
+            if (msz > 0 && msz < 256 * 1024) {
+                char *mbuf = malloc(msz + 4096);
+                if (mbuf) {
+                    size_t nr = fread(mbuf, 1, msz, mf);
+                    mbuf[nr] = '\0';
+                    fclose(mf);
+                    mf = NULL;
+                    if (strstr(mbuf, "Server = http://ca.us.mirror") == NULL) {
+                        /* Prepend fast direct mirrors before geo mirror */
+                        char *new_mbuf = malloc(msz + 8192);
+                        if (new_mbuf) {
+                            snprintf(new_mbuf, msz + 8192,
+                                     "Server = http://ca.us.mirror.archlinuxarm.org/$arch/$repo\n"
+                                     "Server = http://nj.us.mirror.archlinuxarm.org/$arch/$repo\n%s", mbuf);
+                            FILE *wmf = fopen(mirrorlist_path, "w");
+                            if (wmf) {
+                                fputs(new_mbuf, wmf);
+                                fclose(wmf);
+                            }
+                            free(new_mbuf);
+                        }
+                    }
+                }
+                free(mbuf);
+            }
+            if (mf) fclose(mf);
         }
     }
 

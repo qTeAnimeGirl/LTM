@@ -40,9 +40,6 @@ _ltm_jump_to_entry:
     mov x29, #0
     mov x30, #0
 
-    // Reset Linux Thread-Local Storage pointer to 0
-    msr tpidr_el0, xzr
-
     br x16
 
 .global _ltm_resume_context_asm_start

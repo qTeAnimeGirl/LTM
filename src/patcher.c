@@ -144,7 +144,12 @@ bool aarch64_insn_uses_x18(uint32_t insn) {
 
     /* Group 5: FP / SIMD conversions ((insn & 0x7f200000) == 0x1e200000) */
     if ((insn & 0x7f200000) == 0x1e200000) {
-        if (rd == 18 || rn == 18) return true;
+        uint32_t opcode = (insn >> 16) & 0x7;
+        bool rd_is_gpr = (opcode <= 2);
+        bool rn_is_gpr = (opcode >= 4);
+        if (rd_is_gpr && rd == 18) return true;
+        if (rn_is_gpr && rn == 18) return true;
+        return false;
     }
 
     return false;

@@ -57,7 +57,6 @@ uintptr_t ltm_get_guest_tls(void) {
 
 void ltm_set_guest_tls(uintptr_t val) {
     s_guest_tls = val;
-    __asm__ volatile("msr tpidr_el0, %0" : : "r"(val));
 }
 
 uint64_t ltm_get_guest_x18(void) {
@@ -5095,9 +5094,9 @@ int64_t handle_recvfrom(int fd, void *buf, size_t len, int flags, void *src_addr
      * whereas Linux SOCK_DGRAM IPPROTO_ICMP sockets deliver only the ICMP payload.
      * Strip the IPv4 header for Linux userspace ABI compatibility. */
     bool is_icmp = (fd >= 0 && fd < MAX_TRACKED_FDS && g_sock_is_icmp[fd]);
-    if (buf && ret >= 20) {
+    if (is_icmp && buf && ret >= 20) {
         unsigned char *p = (unsigned char *)buf;
-        if (is_icmp || ((p[0] >> 4) == 4 && p[9] == 1)) {
+        if ((p[0] >> 4) == 4 && p[9] == 1) {
             size_t hlen = (p[0] & 0x0f) * 4;
             if (hlen >= 20 && (ssize_t)hlen <= ret) {
                 memmove(buf, p + hlen, ret - hlen);
@@ -5175,9 +5174,9 @@ int64_t handle_recvmsg(int fd, void *msg, int flags) {
     if (ret < 0) return darwin_to_linux_errno(errno);
 
     bool is_icmp = (fd >= 0 && fd < MAX_TRACKED_FDS && g_sock_is_icmp[fd]);
-    if (lmsg->msg_iov && lmsg->msg_iovlen > 0 && ret >= 20) {
+    if (is_icmp && lmsg->msg_iov && lmsg->msg_iovlen > 0 && ret >= 20) {
         unsigned char *p = (unsigned char *)lmsg->msg_iov[0].iov_base;
-        if (p && (is_icmp || ((p[0] >> 4) == 4 && p[9] == 1))) {
+        if (p && ((p[0] >> 4) == 4 && p[9] == 1)) {
             size_t hlen = (p[0] & 0x0f) * 4;
             if (hlen >= 20 && (ssize_t)hlen <= ret) {
                 memmove(p, p + hlen, ret - hlen);
